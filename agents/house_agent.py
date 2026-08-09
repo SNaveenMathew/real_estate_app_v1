@@ -8,6 +8,7 @@ from typing import Annotated, Sequence, TypedDict, Literal
 
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
 from langchain_core.tools import BaseTool
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
@@ -75,12 +76,19 @@ def build_house_agent(house_id: str):
 
     tools: list[BaseTool] = make_house_tools(house_id)
     tool_node = ToolNode(tools)
-
-    llm = ChatOllama(
-        base_url=settings.ollama_base_url,
-        model=settings.ollama_model,
-        temperature=0.0,
+    # For 'llama-server -hf DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M -ngl 999 -c 28672 -fa on --cache-type-k q8_0 --cache-type-v q8_0'
+    llm = ChatOpenAI(
+        base_url=settings.llama_server_base_url,
+        api_key="not-needed",  # llama-server doesn't check the key, but LangChain requires a non-empty string
+        model=settings.llama_server_model,
+        temperature=0.0
     ).bind_tools(tools)
+    # For 'ollama run --model llama3.1:8b'
+    # llm = ChatOllama(
+    #     base_url=settings.ollama_base_url,
+    #     model=settings.ollama_model,
+    #     temperature=0.0,
+    # ).bind_tools(tools)
 
     def agent_node(state: AgentState):
         system_prompt = _build_system_prompt(state["house_id"])
