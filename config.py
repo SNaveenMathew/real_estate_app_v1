@@ -9,9 +9,15 @@ BASE_DIR = Path(__file__).parent
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    # ── Ollama ──────────────────────────────────────────────────────────────
-    ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "llama3.1:8b"          # swap for llama3.2, mistral, etc.
+    # ── llama-server ──────────────────────────────────────────────────────────────
+    llama_server_base_url: str = "http://127.0.0.1:8080/v1"
+    llama_server_model: str = "DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M"          # swap for llama3.2, mistral, etc.
+
+    # ── Ollama ─────────────────────────────────────────────────────────
+    # ollama_base_url: str = "http://localhost:11434"
+    # ollama_model: str = "llama3.1:8b"
+
+    # ── Embedding model ─────────────────────────────────────────────────────────
     ollama_embed_model: str = "nomic-embed-text"  # pull once: ollama pull nomic-embed-text
 
     # ── Paths ────────────────────────────────────────────────────────────────
