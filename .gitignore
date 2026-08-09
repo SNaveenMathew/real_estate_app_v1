@@ -1,0 +1,39 @@
+# Ignore raw data and user uploads
+/data/
+/temp_data/
+/uploads/
+
+# DuckDB artifacts
+*.duckdb
+*.duckdb-wal
+
+# Chroma / sqlite artifacts that may live in data/
+data/**/chroma.sqlite3
+data/**/chroma.sqlite3-wal
+data/**/chroma.sqlite3-shm
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtualenv
+venv/
+env/
+ENV/
+venv*/
+
+# Environment files
+.env
+.env.local
+
+# IDE/editor
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+
+# Logs
+*.log
