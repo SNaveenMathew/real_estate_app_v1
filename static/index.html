@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Real Estate Intelligence</title>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Leaflet.markercluster -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
+  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+
+  <!-- Marked (markdown rendering) -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+  <link rel="stylesheet" href="/static/style.css?v=2" />
+</head>
+<body>
+
+<!-- ── Top bar ──────────────────────────────────────────────────────── -->
+<header class="topbar">
+  <div class="topbar-left">
+    <span class="logo">🏠 Real Estate Intelligence</span>
+    <span class="stats" id="stats-badge">Loading...</span>
+  </div>
+  <div class="topbar-right">
+    <button class="btn-general" id="btn-general-chat">💬 General Chat</button>
+  </div>
+</header>
+
+<!-- ── Layout ───────────────────────────────────────────────────────── -->
+<div class="layout">
+
+  <!-- Map -->
+  <div id="map"></div>
+
+  <!-- House sidebar -->
+  <div class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <div id="house-title" class="house-title">Select a house</div>
+      <button class="btn-favorite inactive" id="btn-favorite" title="Add to favorites">♡</button>
+      <button class="btn-close" id="btn-close-sidebar">✕</button>
+    </div>
+
+    <!-- Tabs -->
+    <div class="tabs">
+      <button class="tab active" data-tab="details">Details</button>
+      <button class="tab" data-tab="risk">Risk</button>
+      <button class="tab" data-tab="chat">Chat</button>
+      <button class="tab" data-tab="docs">Docs</button>
+    </div>
+
+    <!-- Details tab -->
+    <div class="tab-pane active" id="tab-details">
+      <div id="house-details-content"></div>
+    </div>
+
+    <!-- Risk tab -->
+    <div class="tab-pane" id="tab-risk">
+      <div id="risk-content"></div>
+    </div>
+
+    <!-- Chat tab -->
+    <div class="tab-pane chat-pane" id="tab-chat">
+      <div class="chat-messages" id="house-chat-messages"></div>
+      <div class="chat-input-area">
+        <textarea id="house-chat-input" placeholder="Ask about this house, paste a Redfin description, or request a price estimate..." rows="2"></textarea>
+        <button class="btn-send" id="house-chat-send">Send</button>
+      </div>
+    </div>
+
+    <!-- Docs tab -->
+    <div class="tab-pane" id="tab-docs">
+      <!-- Description section (max 1 per house) -->
+      <div style="padding:14px 14px 0">
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#888;margin-bottom:10px">
+          Property Description
+        </div>
+        <div id="desc-view-mode">
+          <!-- shown when description exists -->
+          <div id="desc-text" class="doc-item" style="display:none">
+            <div class="doc-type">description</div>
+            <div class="doc-text" id="desc-text-content"></div>
+            <div style="display:flex;gap:8px;margin-top:8px">
+              <button class="btn-small" id="btn-edit-desc">Edit</button>
+              <button class="btn-danger" id="btn-delete-desc">Delete</button>
+            </div>
+          </div>
+          <!-- shown when no description -->
+          <div id="desc-empty" class="no-desc">
+            No description saved yet.<br>
+            Paste a Redfin/Zillow description in the Chat tab, or add one below.
+          </div>
+        </div>
+        <!-- Edit form (hidden by default) -->
+        <div id="desc-edit-mode" style="display:none" class="desc-editor">
+          <textarea id="desc-edit-input" placeholder="Paste the property description here..."></textarea>
+          <div class="desc-actions">
+            <button class="btn-small" id="btn-save-desc">Save</button>
+            <button class="btn-small" id="btn-cancel-desc" style="background:#f0f0f0;color:#333">Cancel</button>
+          </div>
+        </div>
+        <!-- Add button when no description -->
+        <button class="btn-small" id="btn-add-desc" style="margin-top:8px;display:none">+ Add Description</button>
+      </div>
+
+      <!-- Photos section -->
+      <div style="padding:14px">
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#888;margin-bottom:10px">
+          Photos
+        </div>
+        <div id="photos-content"></div>
+        <div class="doc-upload">
+          <input type="file" id="photo-input" accept="image/*" />
+          <input type="text" id="photo-caption" placeholder="Caption (optional)" style="width:100%;margin-top:6px" />
+          <button class="btn-small" id="btn-upload-photo" style="margin-top:6px">Upload Photo</button>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /sidebar -->
+</div><!-- /layout -->
+
+<!-- ── General Chat Modal ────────────────────────────────────────────── -->
+<div class="modal-overlay" id="general-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <span>💬 General Chat</span>
+      <button class="btn-close" id="btn-close-general">✕</button>
+    </div>
+    <div class="chat-messages" id="general-chat-messages">
+      <div class="msg assistant">
+        <div class="bubble">Hi! I can help with broad questions like:<br>
+        • <em>Among the top 50 MSAs, which have the lowest flood risk?</em><br>
+        • <em>Which houses in my list have the best walk score?</em><br>
+        • <em>What's the average price per sqft in Austin?</em>
+        </div>
+      </div>
+    </div>
+    <div class="chat-input-area">
+      <textarea id="general-chat-input" placeholder="Ask a general question..." rows="2"></textarea>
+      <button class="btn-send" id="general-chat-send">Send</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js?v=2"></script>
+</body>
+</html>
