@@ -130,6 +130,32 @@ def has_document(house_id: str, text: str) -> bool:
     return bool(col.get(ids=[doc_id])["ids"])
 
 
+def get_description(house_id: str) -> Optional[dict]:
+    """Return the single stored description document for a house, or None.
+    A "description" is just a document tagged doc_type='description' —
+    filtered out here from other doc types (e.g. 'photo') stored in the
+    same collection."""
+    for d in get_house_documents(house_id):
+        if d["metadata"].get("doc_type") == "description":
+            return d
+    return None
+
+
+def upsert_description(house_id: str, text: str) -> str:
+    """Replace the single stored description for a house. Enforces at most
+    one description per house by deleting any existing one first (unlike
+    add_document, which is append-only / dedupes by content hash)."""
+    existing = get_description(house_id)
+    if existing:
+        delete_document(existing["id"])
+    return add_document(house_id, text, doc_type="description")
+
+
+def delete_document(doc_id: str) -> None:
+    """Delete a single stored document (description or photo) by its id."""
+    _get_collection().delete(ids=[doc_id])
+
+
 def _format_results(results: dict) -> list[dict]:
     out = []
     if not results["ids"] or not results["ids"][0]:
