@@ -30,10 +30,10 @@ A local, AI-powered map app for analyzing houses with FEMA National Risk Index d
 │  ─ sold_homes  │         └──────────────────────┘
 │  ─ cbsa_*      │
 └───────┬────────┘         ┌──────────────────────┐
-        │                  │  Ollama (local LLM)  │
-        └──────────────────│  ─ llama3.1:8b chat  │
-                           │  ─ nomic-embed-text  │
-                           └──────────────────────┘
+        │                  │  llama.cpp / llama-server  │
+        └──────────────────│  ─ Gemma or other HF model  │
+               │  ─ (see LLM setup below)   │
+               └──────────────────────┘
 ```
 
 ---
@@ -41,7 +41,7 @@ A local, AI-powered map app for analyzing houses with FEMA National Risk Index d
 ## Prerequisites
 
 - Python 3.10+
-- [Ollama](https://ollama.com/) installed and running
+- `llama-server` (llama.cpp) installed and running, or Ollama as an alternative
 
 ---
 
@@ -79,21 +79,39 @@ venv\Scripts\activate        # Windows
 pip install -r requirements.txt
 ```
 
-### 3. Pull Ollama models
+### 3. LLM: run `llama-server` (default)
+
+This repository is configured to use `llama-server` (from the `llama.cpp` project)
+as the primary local LLM endpoint. A small example command that works with the
+Gemma model (adjust paths/flags for your machine):
 
 ```bash
-ollama pull llama3.1:8b          # chat model (~4.7 GB)
-ollama pull nomic-embed-text     # embedding model (~274 MB)
+# Example: run llama-server serving a HF model (Gemma) with quantized caches
+llama-server -hf DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M \
+  -ngl 999 -c 28672 -fa on --cache-type-k q8_0 --cache-type-v q8_0
 ```
 
-> **Lower VRAM?** Edit `.env` and set `OLLAMA_MODEL=llama3.2:3b` (2 GB) or `qwen2.5:7b`.
+If you prefer Ollama, it remains supported as an alternative — see the
+`config.py` and agent comments for how to switch. For Ollama, you would
+pull and run:
 
-### 4. Configure
+```bash
+ollama pull llama3.1:8b
+ollama pull nomic-embed-text
+ollama serve
+```
+
+Note: the project is configured to use Ollama's `nomic-embed-text` for embeddings by
+default (see `.env.example`). If you run a pure `llama-server` stack, either run
+Ollama alongside it for embeddings or update `db/vector_store.py` to use a
+different embedding provider.
+
+> **Lower VRAM?** For `llama-server` use a smaller HF model or reduce cache/memory flags.
 
 ```bash
 copy .env.example .env    # Windows
 # cp .env.example .env    # Mac/Linux
-# Edit .env if needed (defaults work for local Ollama)
+# Edit .env if needed (defaults work for local llama-server; Ollama optional)
 ```
 
 ### 5. Place your data files
@@ -237,8 +255,8 @@ The vector database (ChromaDB) grows automatically as you paste descriptions in 
 | Map shows no houses | Run `setup_data.py`, check `data/redfin/*.csv` exists |
 | NRI data missing | Download & place `NRI_Table_CensusTracts.csv` in `data/nri/` |
 | Tract FIPS not resolved | Run `python setup_data.py --resolve-tracts` |
-| Chat says "I couldn't generate a response" | Make sure Ollama is running: `ollama serve` |
-| Embedding errors | Pull the model: `ollama pull nomic-embed-text` |
+| Chat says "I couldn't generate a response" | Make sure `llama-server` is running (or Ollama if you chose that stack) |
+| Embedding errors | If using Ollama embeddings: pull `nomic-embed-text` with `ollama pull nomic-embed-text`. If using another embedding provider, configure accordingly. |
 | Slow tract resolution | Add TIGER/Line shapefiles to `data/shapefiles/` |
 
 ---
