@@ -41,23 +41,37 @@ def _has_markdown_table(text: str) -> bool:
     return len(pipe_lines) >= 2
 
 
+# Tool names whose output is a description/status report, never a query
+# result — excluded by name so no amount of digits in a schema note (FIPS
+# examples, hazard scores, row counts) can be mistaken for grounding data.
+_NON_RESULT_TOOLS = {"get_database_schema", "check_data_availability"}
+
+# query_database's own "this wasn't a result" messages. Guards the loose
+# "any digit → real data" fast path below, which otherwise misfires on
+# these — e.g. "Query returned 0 rows..." contains a digit ('0') and would
+# otherwise be wrongly treated as a grounded result.
+_NON_DATA_QUERY_PREFIXES = ("query returned 0 rows", "0 rows", "no results")
+
+
 def _tool_returned_real_data(tool_outputs: list[tuple[str, str]]) -> bool:
     """
     Return True only if a tool returned an actual query result — i.e. output
     that looks like a pandas DataFrame.to_string() with column headers and rows.
 
-    This is stricter than "has digits": check_data_availability also returns
-    multi-line text with digits, but it's a status report, not a query result.
-    We need to distinguish those.
+    This is stricter than "has digits": query_database's own 0-row/diagnostic
+    messages, and get_database_schema's notes, can both contain plenty of
+    digits (FIPS examples, row counts) without being a result table. We need
+    to distinguish those.
 
     Heuristics for a real query result:
-      - NOT starting with an error prefix
+      - Not from a schema/status tool (_NON_RESULT_TOOLS)
+      - NOT starting with an error/non-data prefix
       - Has at least 2 lines
-      - The first non-empty line looks like column headers (contains 2+ words
-        separated by spaces, no ":" at the end — rules out "Column: value" style)
-      - A subsequent line has numeric values in the same column positions
+      - Has digit-containing line(s) that look like data rows
     """
     for name, content in tool_outputs:
+        if name in _NON_RESULT_TOOLS:
+            continue
         c = content.strip()
         if not c:
             continue
@@ -68,10 +82,6 @@ def _tool_returned_real_data(tool_outputs: list[tuple[str, str]]) -> bool:
                 or c_lower.startswith("error:") or c_lower.startswith("sql error")
                 or "binder error" in c_lower):
             continue
-        # check_data_availability returns lines like "  ✓  houses   939 rows"
-        # These should NOT count as query results
-        if "rows" in c_lower and ("✓" in c or "✗" in c or "loaded" in c_lower):
-            continue
 
         lines = [l for l in c.splitlines() if l.strip()]
         if len(lines) < 2:
@@ -79,12 +89,16 @@ def _tool_returned_real_data(tool_outputs: list[tuple[str, str]]) -> bool:
 
         # A real query result: first line has spaced column names, subsequent
         # lines have values. The simplest signal: the tool is query_database
-        # AND the output has ≥2 lines AND contains digits.
-        if name == "query_database" and re.search(r'\d', c):
+        # AND the output has ≥2 lines AND contains digits — EXCEPT for
+        # query_database's own non-data messages (0 rows, etc.), which also
+        # tend to contain digits (a row count, a sample FIPS code in a hint)
+        # without being a result.
+        if (name == "query_database" and re.search(r'\d', c)
+                and not c_lower.startswith(_NON_DATA_QUERY_PREFIXES)):
             return True
 
-        # For other tools (get_top_msas_by_flood_risk etc.) — must have
-        # digit-containing lines that look like data rows (not just counts)
+        # For other tools — must have digit-containing lines that look like
+        # data rows (not just an incidental number in a status line)
         digit_lines = [l for l in lines if re.search(r'\b\d{2,}\b', l)]
         if len(digit_lines) >= 2:
             return True
@@ -175,31 +189,12 @@ The required tables are not loaded yet:
 """
 
 HALLUCINATION_SQL_ERROR = """\
-⚠️ **Query failed — wrong column or table name in the SQL.**
+⚠️ **Query failed — the SQL referenced a column or table that doesn't exist.**
 
 {error_detail}
 
-**The correct schema is:**
-- `houses`: house_id, address, city, state, zip, lat, lon, price, beds, baths, sqft,
-  walk_score, bike_score, transit_score, tract_fips, msa_code
-- Join to MSA names: `JOIN census_msa m ON h.msa_code = m.msa_code`
-- Join to CBSA:      `JOIN cbsa_counties cb ON h.msa_code = cb.cbsa_code`
-
-There is **no** `msa_name` column in houses — use `city` for city-level grouping,
-or join to `census_msa.name` for metro area names.
-
-**Example — walk score by metro area:**
-```sql
-SELECT m.name AS metro,
-       COUNT(*) AS total_houses,
-       ROUND(100.0 * SUM(CASE WHEN h.walk_score >= 70 THEN 1 ELSE 0 END)
-             / COUNT(*), 1) AS pct_walkable
-FROM houses h
-JOIN census_msa m ON h.msa_code = m.msa_code
-WHERE h.walk_score IS NOT NULL
-GROUP BY m.name
-ORDER BY pct_walkable DESC;
-```
+Please ask again — the assistant checks the live schema (`get_database_schema`)
+before retrying, so it won't guess at column names a second time.
 """
 
 HALLUCINATION_NO_TOOLS = """\

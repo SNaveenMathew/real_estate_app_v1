@@ -2,7 +2,8 @@
 House agent — answers questions about a specific house.
 Uses LangGraph ReAct pattern with house-bound tools.
 
-If a general question is detected, it politely redirects.
+General (non-house-specific) questions are redirected to the General Chat —
+per the system prompt below, this is the agent's own call, not a pre-filter.
 """
 from typing import Annotated, Sequence, TypedDict, Literal
 
@@ -30,9 +31,12 @@ Guidelines:
 - For price estimation, use estimate_price_with_code first, then supplement with your analysis
 - If the user provides a description (e.g. copy-pasted from Redfin/Zillow), acknowledge it
   and confirm it has been saved. Do NOT call a tool to save it — that happens automatically.
-- If the user asks a GENERAL question (e.g., about metro-area risk rankings, national trends,
-  comparing cities) that is not specific to this house, politely say:
-  "That sounds like a general question — please use the General Chat to ask that!"
+- If the user asks a GENERAL question that isn't about this specific house — metro-area
+  risk rankings, national trends, comparing cities, or questions about OTHER houses — don't
+  try to answer it with these tools; they're scoped to this one property. Instead reply
+  exactly: "That sounds like a general question about multiple cities or national trends.
+  Please use the **General Chat** button to ask that — it has access to the full MSA,
+  census, and NRI datasets for broad comparisons!"
 - Be concise but thorough. Format numbers clearly (e.g., $450,000 not 450000).
 - When discussing risk, explain what the NRI scores mean in plain language.
 """
@@ -58,17 +62,6 @@ def _build_system_prompt(house_id: str) -> str:
 class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], lambda x, y: list(x) + list(y)]
     house_id: str
-
-
-def _is_general_question(text: str) -> bool:
-    """Heuristic: detect clearly general questions."""
-    general_signals = [
-        "top 50", "metro area", "best city", "worst city", "national average",
-        "compare cities", "nationwide", "across the country", "best state",
-        "which city", "which metro", "which state", "safest city", "riskiest city",
-    ]
-    text_lower = text.lower()
-    return any(s in text_lower for s in general_signals)
 
 
 def build_house_agent(house_id: str):
@@ -119,17 +112,6 @@ def run_house_chat(house_id: str, message: str,
     Returns (response_text, updated_history).
     history is a list of {"role": "user"|"assistant", "content": "..."}.
     """
-    # Early redirect for obvious general questions
-    if _is_general_question(message):
-        reply = ("That sounds like a general question about multiple cities or national trends. "
-                 "Please use the **General Chat** button to ask that — it has access to the "
-                 "full MSA, census, and NRI datasets for broad comparisons!")
-        history = (history or []) + [
-            {"role": "user", "content": message},
-            {"role": "assistant", "content": reply},
-        ]
-        return reply, history
-
     agent = build_house_agent(house_id)
 
     # Build LangChain message history
