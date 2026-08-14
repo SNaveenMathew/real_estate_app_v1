@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config import settings
 import db.duckdb_store as store
+import db.schema_catalog as schema
 from services import data_loader
 from services import geo_utils
 
@@ -186,18 +187,10 @@ def run_all(only: str = None, resolve_tracts: bool = False,
     # ── Summary ───────────────────────────────────────────────────────────
     banner("Database Summary")
     try:
-        tables = {
-            "houses":        store.query("SELECT COUNT(*) as n FROM houses").iloc[0]["n"],
-            "nri_tracts":    store.query("SELECT COUNT(*) as n FROM nri_tracts").iloc[0]["n"],
-            "census_tracts": store.query("SELECT COUNT(*) as n FROM census_tracts").iloc[0]["n"],
-            "census_msa":    store.query("SELECT COUNT(*) as n FROM census_msa").iloc[0]["n"],
-            "cbsa_counties": store.query("SELECT COUNT(*) as n FROM cbsa_counties").iloc[0]["n"],
-            "sold_homes":    store.query("SELECT COUNT(*) as n FROM sold_homes").iloc[0]["n"],
-            "geocode_cache": store.query("SELECT COUNT(*) as n FROM geocode_cache").iloc[0]["n"],
-        }
-        for tbl, cnt in tables.items():
+        _, counts = schema.availability_report()
+        for tbl, cnt in counts.items():
             status = "✓" if cnt > 0 else "○"
-            print(f"  {status} {tbl:<20} {int(cnt):>10,} rows")
+            print(f"  {status} {tbl:<20} {cnt:>10,} rows")
     except Exception as e:
         print(f"  Error reading summary: {e}")
 
