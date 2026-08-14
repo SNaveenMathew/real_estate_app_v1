@@ -267,8 +267,22 @@ The architecture is designed to grow. To add a new data set:
 
 1. Add a new `load_xyz()` function in `services/data_loader.py`
 2. Add a new table in `db/duckdb_store.py` → `_ensure_schema()`
-3. Add a new tool in `agents/tools.py` if the agent needs to query it
+3. Add ONE `TableMeta` entry (description + notes on any non-obvious columns)
+   in `db/schema_catalog.py`. If it joins to an existing table, add one
+   `Relationship` entry alongside it. You do NOT need to write a new agent
+   tool or teach the LLM a new SQL pattern — `query_database` plus the schema
+   catalog is enough for the agent to work out how to query it, including
+   joins to other tables.
 4. Call `setup_data.py` to load it
+
+`db/schema_catalog.py` is the single source of truth for what the agent knows
+about the data: it combines live introspection of the running database
+(so column names/types can't go stale) with curated notes for things no
+amount of introspection can tell you — which columns are reliably populated,
+which joins need a non-obvious expression, which tables need a default filter
+to be meaningful. `check_data_availability`, `get_database_schema`,
+`setup_data.py`'s summary, and the response validator's fallback message all
+read from it, so there's nothing else to keep in sync when you add a table.
 
 ---
 
@@ -283,19 +297,21 @@ agents/
   tools.py            LangChain tools (SQL, vector search, price estimation)
   house_agent.py      Per-house ReAct agent (LangGraph)
   general_agent.py    General ReAct agent (LangGraph)
+  response_validator.py  Post-hoc check that replies are grounded in real tool output
 
 db/
   duckdb_store.py     All SQL queries and schema management
+  schema_catalog.py   Metadata layer — table/column notes + join graph for the agent
   vector_store.py     ChromaDB — embed, store, search text documents
 
 services/
   data_loader.py      CSV parsers for Redfin, NRI, Census, Sold
-  geo_utils.py        Census tract FIPS assignment (shapefile or API)
+  geo_utils.py         Census tract FIPS assignment (shapefile or API)
 
 static/
   index.html          Leaflet map + sidebar + chat UI
-  style.css           All styles
-  app.js              Frontend logic
+  style.css            All styles
+  app.js               Frontend logic
 
 data/
   redfin/             Drop Redfin CSVs here
