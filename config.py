@@ -46,6 +46,18 @@ class Settings(BaseSettings):
     # ── ChromaDB ─────────────────────────────────────────────────────────────
     chroma_dir: Path = BASE_DIR / "data" / "chroma"
 
+    # ── Evaluation: judge model ─────────────────────────────────────────────
+    # Defaults to the same server/model as the agent under test. Point this at
+    # a different (ideally independent, or stronger) model if you have one
+    # available — a model grading its own answers is weaker evidence than an
+    # independent judge.
+    judge_llama_server_base_url: str = "http://127.0.0.1:8080/v1"
+    judge_llama_server_model: str = "DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M"
+
+    # ── Evaluation: fixtures & reports ──────────────────────────────────────
+    eval_fixture_duckdb_path: Path = BASE_DIR / "eval" / "fixture_data" / "eval_fixture.duckdb"
+    eval_reports_dir: Path = BASE_DIR / "eval" / "reports"
+
     # ── App ──────────────────────────────────────────────────────────────────
     app_host: str = "0.0.0.0"
     app_port: int = 8000
