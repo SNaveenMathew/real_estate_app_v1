@@ -159,7 +159,7 @@ _PATTERNS: dict[str, list[str]] = {
         r"OPERATING[^.]{0,10}INFLUENCE",
     ],
     "disorderly_quality_of_life": [
-        r"DISORDERLY", r"PUBLIC DRUNK", r"\bLOITERING\b", r"\bTRESPASS",
+        r"DISORDERLY", r"PUBLIC DRUNK", r"INTOXICAT", r"\bLOITERING\b", r"\bTRESPASS",
         r"\bCURFEW\b", r"\bNUISANCE\b", r"\bVAGRANCY\b", r"\bPROWLER\b",
         r"NOISE (COMPLAINT|VIOLATION)",
     ],

@@ -695,6 +695,17 @@ function currentBboxQuery() {
   return `west=${b.getWest()}&south=${b.getSouth()}&east=${b.getEast()}&north=${b.getNorth()}`;
 }
 
+// Coarser grid cells when zoomed out, finer when zoomed in — keeps the
+// server-side aggregation (see services/layers.py::get_crime_heatmap)
+// resolved appropriately for whatever's actually on screen, and keeps a
+// wide, zoomed-out view from needing so many grid cells that the
+// MAX_GRID_CELLS safety cap starts silently dropping real areas. Reference:
+// ~300m cells (0.003°) at zoom 14, halving/doubling per zoom level.
+function gridDegForZoom(zoom) {
+  const deg = 0.003 * Math.pow(2, 14 - zoom);
+  return Math.min(0.5, Math.max(0.0005, deg));
+}
+
 function setLayerLoading(isLoading) {
   const el = document.getElementById('layer-status');
   if (el) el.textContent = isLoading ? 'Loading…' : '';
@@ -716,8 +727,8 @@ function renderLegend(kind, data) {
     el.innerHTML = `
       <div class="legend-title">Crime severity (weighted density)</div>
       <div class="legend-gradient"></div>
-      <div class="legend-scale"><span>Lower</span><span>Higher</span></div>
-      <div class="legend-note">${data.incident_count.toLocaleString()} incident(s) in view</div>
+      <div class="legend-scale"><span>0</span><span>${data.max_weight.toFixed(1)}</span></div>
+      <div class="legend-note">${data.incident_count.toLocaleString()} incident(s) in view — scale is relative to this view, not the whole map</div>
       ${data.truncated ? '<div class="legend-note">Zoom in for full detail</div>' : ''}
     `;
   } else if (kind === 'nri') {
@@ -740,20 +751,33 @@ async function refreshCrimeLayer() {
   const token = ++layerState.fetchToken;
   setLayerLoading(true);
   try {
-    const resp = await fetch(`/api/layers/crime?${currentBboxQuery()}`);
+    const zoom = map.getZoom();
+    const gridDeg = gridDegForZoom(zoom);
+    const resp = await fetch(`/api/layers/crime?${currentBboxQuery()}&grid_deg=${gridDeg}`);
     if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
     const data = await resp.json();
     if (token !== layerState.fetchToken) return; // a newer request has since superseded this one
 
     const heatPoints = data.points; // already [lat, lon, weight]
     const maxVal = Math.max(data.max_weight, 1);
+    // maxZoom here is intentionally set to the CURRENT zoom, not a fixed
+    // value. Leaflet.heat scales each point's intensity by
+    // 1 / 2^(maxZoom - currentZoom) internally — with a fixed maxZoom that
+    // means the exact same underlying data renders dimmer and dimmer the
+    // further you zoom out below it (e.g. a fixed maxZoom of 17 leaves you
+    // at a quarter intensity by zoom 15, 1/16 by zoom 13 — this is *why*
+    // areas can look like "low crime" purely from the current zoom level).
+    // Pinning maxZoom to the current zoom makes that factor always 1, so
+    // the ONLY thing driving color intensity is `max` — our own
+    // server-computed severity ceiling for whatever's actually in view
+    // right now. The gradient (the color mapping itself) is untouched.
     if (layerState.active === 'crime' && layerState.layerObj) {
       layerState.layerObj.setLatLngs(heatPoints);
-      layerState.layerObj.setOptions({ max: maxVal });
+      layerState.layerObj.setOptions({ max: maxVal, maxZoom: zoom });
     } else {
       clearActiveLayer();
       layerState.layerObj = L.heatLayer(heatPoints, {
-        radius: 18, blur: 22, maxZoom: 17, max: maxVal,
+        radius: 18, blur: 22, maxZoom: zoom, max: maxVal,
         gradient: { 0.2: '#3b82f6', 0.4: '#eab308', 0.65: '#f97316', 1.0: '#ef4444' },
       }).addTo(map);
     }
@@ -824,6 +848,16 @@ map.on('moveend', () => {
     if (layerState.active === 'crime') refreshCrimeLayer();
     else if (layerState.active === 'nri') refreshNriLayer();
   }, 400);
+});
+
+// Keep the crime layer's color scale in sync with zoom immediately, not
+// just after the debounced re-fetch above completes — see the maxZoom note
+// in refreshCrimeLayer(). This is a cheap client-side option update (no
+// network call), so there's no reason to wait for the full data refresh.
+map.on('zoomend', () => {
+  if (layerState.active === 'crime' && layerState.layerObj) {
+    layerState.layerObj.setOptions({ maxZoom: map.getZoom() });
+  }
 });
 
 const LayerControl = L.Control.extend({

@@ -636,6 +636,33 @@ def load_crime() -> int:
         print(f"    ✓ {len(df):,} incidents "
               f"({int(yr_lo)}–{int(yr_hi)}) — top categories: {top3}")
 
+        # Surface what's landing in the catch-all bucket so classification
+        # gaps are visible instead of silently averaging away. Some of this
+        # is expected — a raw police blotter/incident log typically includes
+        # plenty of non-criminal entries (welfare checks, alarms, found
+        # property, warrant service, ...) that correctly belong at the
+        # lowest weight — but a large share is worth a look, since it also
+        # means those incidents contribute the same low weight to the
+        # 'Crime' map layer regardless of what they actually were.
+        other_mask = df["category"] == "other"
+        other_n = int(other_mask.sum())
+        other_pct = 100 * other_n / len(df) if len(df) else 0
+        if other_n and other_pct >= 5:
+            top_unclassified = (
+                df.loc[other_mask, "raw_type"]
+                  .astype(str).str.strip()
+                  .replace("", pd.NA).dropna()
+                  .value_counts().head(10)
+            )
+            print(f"    ⚠ {other_n:,} ({other_pct:.0f}%) incidents fell into "
+                  f"'Other/Unclassified'. Most common unclassified raw text "
+                  f"for {parser.city_label}:")
+            for txt, n in top_unclassified.items():
+                snippet = txt if len(txt) <= 80 else txt[:77] + "..."
+                print(f"        {n:>7,}×  {snippet}")
+            print(f"      → If real crime types are being missed above, add "
+                  f"keyword patterns for them in services/crime_taxonomy.py.")
+
         all_rows.append(df[_CRIME_SCHEMA_COLS])
 
     if not all_rows:
