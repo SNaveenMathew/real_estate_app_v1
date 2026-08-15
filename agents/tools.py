@@ -26,7 +26,11 @@ def make_house_tools(house_id: str):
             return "House not found in database."
         # Remove internal fields
         house.pop("raw_json", None)
-        return json.dumps({k: v for k, v in house.items() if v is not None}, indent=2)
+        # Keep every field, even when the value is None — a key that's
+        # missing outright is easy to misread as "not asked for" rather
+        # than "not available for this house." An explicit
+        # `"walk_score": null` is unambiguous; a silently absent key isn't.
+        return json.dumps(house, indent=2)
 
     @tool
     def get_nri_risk_data(_: str = "") -> str:
