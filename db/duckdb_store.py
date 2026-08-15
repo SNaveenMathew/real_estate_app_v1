@@ -245,7 +245,31 @@ def query_json(sql: str, params=None) -> list[dict]:
         df[col] = df[col].apply(
             lambda v: None if v is not None and (v != v or v == float("inf") or v == float("-inf")) else v
         )
-    return df.to_dict(orient="records")
+    # Dates/timestamps (e.g. created_at, snapshot_date) come back from DuckDB
+    # as pandas Timestamp / NaT, neither of which json.dumps can handle
+    # either — convert to ISO-8601 strings (None for NaT) so every caller of
+    # this function actually gets what the docstring above promises.
+    for col in df.select_dtypes(include=["datetime", "datetimetz"]).columns:
+        df[col] = df[col].apply(lambda v: None if pd.isna(v) else v.isoformat())
+    return [_json_safe_record(r) for r in df.to_dict(orient="records")]
+
+
+def _json_safe_record(record: dict) -> dict:
+    """Defense in depth for query_json(): normalize any value type that
+    to_dict() can hand back but json.dumps() rejects — a Timestamp/NaT that
+    slipped past the column-dtype pass above (e.g. an object-dtype column
+    holding a mixed value), or a numpy scalar (np.int64, np.bool_, ...)
+    instead of a native Python type."""
+    import numpy as np
+    safe = {}
+    for k, v in record.items():
+        if isinstance(v, pd.Timestamp) or v is pd.NaT:
+            safe[k] = None if pd.isna(v) else v.isoformat()
+        elif isinstance(v, np.generic):
+            safe[k] = v.item()
+        else:
+            safe[k] = v
+    return safe
 
 
 _SNAP_COLS = [
@@ -690,7 +714,7 @@ def get_house(house_id: str) -> Optional[dict]:
             ORDER BY house_id, snapshot_date DESC, created_at DESC
         )
         SELECT
-            h.*,
+            h.* EXCLUDE (status, price),
             COALESCE(ls.status, h.status) AS status,
             COALESCE(ls.price,  h.price)  AS price,
             ls.snapshot_date AS latest_snapshot_date,

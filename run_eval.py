@@ -31,6 +31,7 @@ import argparse
 import json
 import sys
 import time
+import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -49,7 +50,8 @@ def run_example(example: GoldenExample, judge, mock: bool) -> ScoreResult:
         try:
             reply = mock_reply(example)
         except Exception as e:
-            return ScoreResult(example.id, "ERROR", "n/a", f"mock agent failed: {e}")
+            return ScoreResult(example.id, "ERROR", "n/a", f"mock agent failed: {e}",
+                                extra={"traceback": traceback.format_exc()})
     else:
         try:
             if example.agent == "general":
@@ -59,7 +61,8 @@ def run_example(example: GoldenExample, judge, mock: bool) -> ScoreResult:
                 from agents.house_agent import run_house_chat
                 reply, _ = run_house_chat(example.house_id, example.question, history=[])
         except Exception as e:
-            return ScoreResult(example.id, "ERROR", "n/a", f"agent call failed: {e}")
+            return ScoreResult(example.id, "ERROR", "n/a", f"agent call failed: {e}",
+                                extra={"traceback": traceback.format_exc()})
 
     if example.answer_type == "structured":
         return score_structured(example, reply)
@@ -119,6 +122,8 @@ def main():
         print(f"  [{icon}] {ex.id:<42s} {result.verdict:<6s} ({result.method}, {dt:.1f}s)")
         if result.verdict != "PASS":
             print(f"        {result.reason}")
+            if result.verdict == "ERROR" and result.extra.get("traceback"):
+                print("        (full traceback in the report)")
         results.append((ex, result))
 
     _write_report(results, mock=args.mock)
@@ -170,7 +175,7 @@ def _write_report(results: list[tuple[GoldenExample, ScoreResult]], mock: bool):
                 "id": ex.id, "agent": ex.agent, "tags": list(ex.tags),
                 "answer_type": ex.answer_type, "question": ex.question,
                 "verdict": r.verdict, "method": r.method, "reason": r.reason,
-                "reply": r.reply,
+                "reply": r.reply, "traceback": r.extra.get("traceback"),
             }
             for ex, r in results
         ],
@@ -194,6 +199,8 @@ def _write_report(results: list[tuple[GoldenExample, ScoreResult]], mock: bool):
         lines.append(f"- **question:** {ex.question}")
         lines.append(f"- **reason:** {r.reason}")
         lines.append(f"- **reply:** {reply_snippet}")
+        if r.verdict == "ERROR" and r.extra.get("traceback"):
+            lines.append(f"- **traceback:**\n```\n{r.extra['traceback']}```")
     md_path.write_text("\n".join(lines))
 
     print(f"\nReport written to:\n  {json_path}\n  {md_path}")
