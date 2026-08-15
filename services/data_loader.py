@@ -15,6 +15,8 @@ warnings.filterwarnings("ignore")
 
 from config import settings
 import db.duckdb_store as store
+from services.crime_sources import CRIME_PARSERS, CRIME_CITY_KEYS
+from services.crime_taxonomy import classify_crime_text
 
 
 # ── Redfin ──────────────────────────────────────────────────────────────────
@@ -60,6 +62,32 @@ _REDFIN_COL_MAP = {
 def _house_id(row: pd.Series) -> str:
     key = f"{row.get('address','')}-{row.get('city','')}-{row.get('zip','')}"
     return hashlib.md5(key.encode()).hexdigest()[:12]
+
+
+def _normalize_crime_city(value) -> Optional[str]:
+    """Lowercase/trim a crime_city value from a Redfin CSV so it reliably
+    matches crime_incidents.city (always a lowercase key, e.g. 'chicago')."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    s = str(value).strip().lower()
+    return s or None
+
+
+def _infer_crime_city(city_value) -> Optional[str]:
+    """
+    Best-effort fallback when a Redfin CSV doesn't already set crime_city:
+    if the house's own `city` field is an exact (case-insensitive) match for
+    one of the cities covered under data/crime/, use it.
+
+    This only catches houses that are literally IN a covered city — a house
+    in a suburb (e.g. Cambridge, for Boston's crime data) won't match and
+    stays NULL. Set crime_city explicitly in the Redfin CSV for those; an
+    explicit value always wins over this inference (see load_redfin).
+    """
+    if city_value is None or (isinstance(city_value, float) and pd.isna(city_value)):
+        return None
+    norm = str(city_value).strip().lower()
+    return norm if norm in CRIME_CITY_KEYS else None
 
 
 def _clean_numeric(series: pd.Series) -> pd.Series:
@@ -181,6 +209,22 @@ def load_redfin(geo_utils=None) -> int:
         combined["tract_fips"] = None
     if "msa_code" not in combined.columns:
         combined["msa_code"] = None
+
+    # crime_city: the join key into crime_incidents.city (see
+    # services/crime_sources.py and the houses<->crime_incidents Relationship
+    # in db/schema_catalog.py). Normalize whatever the CSV provided; infer it
+    # from `city` when the CSV didn't set it and the house is directly in one
+    # of the covered cities.
+    if "crime_city" not in combined.columns:
+        combined["crime_city"] = None
+    combined["crime_city"] = combined["crime_city"].apply(_normalize_crime_city)
+    needs_inference = combined["crime_city"].isna()
+    if needs_inference.any():
+        combined.loc[needs_inference, "crime_city"] = (
+            combined.loc[needs_inference, "city"].apply(_infer_crime_city)
+        )
+    if "nearest_big_city" not in combined.columns:
+        combined["nearest_big_city"] = None
 
     # For the houses table: keep only the LATEST row per house_id (most recent date)
     combined_sorted = combined.sort_values("snapshot_date", ascending=False, na_position="last")
@@ -325,9 +369,17 @@ def _build_nri_out(df: pd.DataFrame) -> pd.DataFrame:
 
     # DB column name → list of possible source column names in priority order
     # The first match found in available_cols wins.
+    #
+    # NOTE: this dict's key order must match nri_tracts' column order in
+    # db/duckdb_store.py::_ensure_schema exactly — store.upsert_df() inserts
+    # via `SELECT * FROM __tmp`, which is POSITIONAL, not name-based. (This
+    # was previously out of sync — rfld_risks was first here but 12th in the
+    # table — which silently wrote 8 of the 18 hazard scores into the wrong
+    # columns for every tract ever loaded. Keep this alphabetical-by-hazard-
+    # code order in sync with the DDL if you ever add a hazard there.)
     hazard_col_map = {
         # DB dest        source candidates (priority order)
-        "rfld_risks":  ["RFLD_RISKS", "RFLD_RISK",  "IFLD_RISKS", "IFLD_RISK"],  # 2023: RFLD→IFLD
+        "avln_risks":  ["AVLN_RISKS", "AVLN_RISK"],
         "cfld_risks":  ["CFLD_RISKS", "CFLD_RISK"],
         "cwav_risks":  ["CWAV_RISKS", "CWAV_RISK"],
         "drgt_risks":  ["DRGT_RISKS", "DRGT_RISK"],
@@ -338,13 +390,13 @@ def _build_nri_out(df: pd.DataFrame) -> pd.DataFrame:
         "istm_risks":  ["ISTM_RISKS", "ISTM_RISK"],
         "lnds_risks":  ["LNDS_RISKS", "LNDS_RISK"],
         "ltng_risks":  ["LTNG_RISKS", "LTNG_RISK"],
+        "rfld_risks":  ["RFLD_RISKS", "RFLD_RISK",  "IFLD_RISKS", "IFLD_RISK"],  # 2023: RFLD→IFLD
         "swnd_risks":  ["SWND_RISKS", "SWND_RISK"],
         "trnd_risks":  ["TRND_RISKS", "TRND_RISK"],
         "tsun_risks":  ["TSUN_RISKS", "TSUN_RISK"],
         "vlcn_risks":  ["VLCN_RISKS", "VLCN_RISK"],
         "wfir_risks":  ["WFIR_RISKS", "WFIR_RISK"],
         "wntw_risks":  ["WNTW_RISKS", "WNTW_RISK"],
-        "avln_risks":  ["AVLN_RISKS", "AVLN_RISK"],
     }
 
     matched, missing = [], []
@@ -420,6 +472,8 @@ def load_nri() -> int:
     #     print(f"  ✓ Loaded {len(out)} NRI tracts from CSV")
     #     print("  ⚠ Tip: use the shapefile instead — it also provides tract geometries")
     #     print("    for fast tract-FIPS resolution without separate TIGER/Line files.")
+    #     print("    (The 'NRI' map layer also needs tract geometry — without the shapefile,")
+    #     print("     add TIGER/Line shapefiles to data/shapefiles/ so it has polygons to draw.)")
     #     return len(out)
 
     print(f"  ✗ NRI data not found.")
@@ -445,6 +499,161 @@ def _cache_nri_geometry(gdf, tract_fips_series: pd.Series):
         print(f"  ✓ Geometry cache written → {cache_path.name} ({len(slim)} tracts)")
     except Exception as e:
         print(f"  ⚠ Could not write geometry cache: {e} (non-fatal)")
+
+
+# ── Crime ────────────────────────────────────────────────────────────────────
+# Standardizes data/crime/<city>/ (one folder per city, any mix of .csv/.xlsx)
+# across every registered city parser in services/crime_sources.py into one
+# severity-weighted table. Mirrors the "sold homes" parser architecture: each
+# city handles its own file layout/columns in load_raw(), then this function
+# applies the SAME cleaning, classification, and ID assignment to everyone so
+# the output is directly comparable across cities.
+#
+# Inspired by the process_crime_<city>.R scripts (per-city bounding boxes,
+# invalid/zero lat-lon filtering, multi-file handling) with two differences
+# by design: (1) crime TYPE is classified and severity-weighted — the R
+# pipeline's shared process_crime.R only ever received time/lat/lon, never a
+# type column — and (2) results land in a queryable DuckDB table rather than
+# a plotted heatmap, so the general agent can also answer questions like
+# "what's the weighted crime severity near tract X" via query_database.
+
+_CRIME_SCHEMA_COLS = [
+    "incident_id", "city", "source_file", "occurred_at", "year", "month",
+    "year_month", "lat", "lon", "category", "category_label",
+    "severity_weight", "raw_type", "location_text",
+]
+
+
+def _crime_incident_id(city: str, source_file: str, natural_id, row_pos: int) -> str:
+    """
+    Stable, idempotent ID: prefers a natural per-row identifier from the
+    source (Pittsburgh's PK, Chicago's ID, Boston's INCIDENT_NUMBER, ...)
+    when the parser found one, else falls back to its position within that
+    file. Re-running setup_data.py on the same files won't create
+    duplicates; note that if a source file is later re-exported with rows
+    reordered or removed, position-based IDs for that file can shift —
+    acceptable for open-data crime exports, which are typically wholesale
+    replacements rather than incremental diffs.
+    """
+    has_natural = natural_id is not None and not (
+        isinstance(natural_id, float) and pd.isna(natural_id)
+    ) and str(natural_id).strip().lower() not in ("", "nan", "none")
+    key_part = str(natural_id).strip() if has_natural else f"row{row_pos}"
+    key = f"{city}:{source_file}:{key_part}"
+    return hashlib.md5(key.encode()).hexdigest()[:16]
+
+
+def load_crime() -> int:
+    """
+    Load and standardize crime data from data/crime/<city>/ for every city
+    registered in services/crime_sources.CRIME_PARSERS. Safe to call when the
+    directory (or a given city's subfolder) doesn't exist yet — just loads
+    whatever's present.
+    """
+    crime_root = settings.data_dir / "crime"
+    if not crime_root.exists():
+        print(f"  No crime data directory found at {crime_root}")
+        return 0
+
+    all_rows = []
+    for parser in CRIME_PARSERS:
+        city_dir = crime_root / parser.city
+        if not city_dir.exists():
+            continue
+        files = sorted(
+            p for p in city_dir.iterdir()
+            if p.is_file() and p.suffix.lower() in (".csv", ".xlsx", ".xls")
+        )
+        if not files:
+            continue
+
+        print(f"  {parser.city_label}: {len(files)} file(s) — "
+              f"{', '.join(f.name for f in files[:4])}"
+              f"{', ...' if len(files) > 4 else ''}")
+        try:
+            raw = parser.load_raw(city_dir, files)
+        except Exception as e:
+            print(f"    Error loading {parser.city_label}: {e}")
+            import traceback; traceback.print_exc()
+            continue
+
+        if raw is None or raw.empty:
+            print(f"    No usable rows for {parser.city_label}")
+            continue
+
+        df = raw.copy()
+
+        # ── Shared cleaning (mirrors the R scripts' filtering) ────────────
+        df["lat"] = pd.to_numeric(df["lat"], errors="coerce")
+        df["lon"] = pd.to_numeric(df["lon"], errors="coerce")
+        df.loc[df["lat"] == 0, "lat"] = np.nan
+        df.loc[df["lon"] == 0, "lon"] = np.nan
+        if not pd.api.types.is_datetime64_any_dtype(df["occurred_at"]):
+            df["occurred_at"] = pd.to_datetime(df["occurred_at"], errors="coerce", format="mixed")
+
+        before = len(df)
+        df = df.dropna(subset=["lat", "lon", "occurred_at"])
+        if parser.bbox:
+            lon_lo, lon_hi, lat_lo, lat_hi = parser.bbox
+            df = df[df["lat"].between(lat_lo, lat_hi) & df["lon"].between(lon_lo, lon_hi)]
+        dropped = before - len(df)
+        if dropped:
+            print(f"    Dropped {dropped:,} row(s): missing/invalid date, lat, lon, "
+                  f"or outside the expected area")
+
+        if df.empty:
+            print(f"    No valid rows remain for {parser.city_label}")
+            continue
+
+        df = df.reset_index(drop=True)
+
+        # ── Classification ─────────────────────────────────────────────
+        classified = df["raw_type"].fillna("").astype(str).apply(classify_crime_text)
+        df["category"]        = [c[0] for c in classified]
+        df["category_label"]  = [c[1] for c in classified]
+        df["severity_weight"] = [c[2] for c in classified]
+
+        # ── Time parts (mirrors the R pipeline's year / year_month frames) ─
+        df["year"]       = df["occurred_at"].dt.year
+        df["month"]      = df["occurred_at"].dt.month
+        df["year_month"] = df["occurred_at"].dt.strftime("%Y-%m")
+
+        # ── IDs ────────────────────────────────────────────────────────
+        nat_id_col = df["natural_id"] if "natural_id" in df.columns else pd.Series([None] * len(df))
+        df["incident_id"] = [
+            _crime_incident_id(parser.city, sf, nid, i)
+            for i, (sf, nid) in enumerate(zip(df["source_file"], nat_id_col))
+        ]
+        df["city"] = parser.city
+
+        for col in _CRIME_SCHEMA_COLS:
+            if col not in df.columns:
+                df[col] = None
+
+        n_by_cat = df["category_label"].value_counts()
+        top3 = ", ".join(f"{k} ({v:,})" for k, v in n_by_cat.head(3).items())
+        yr_lo, yr_hi = df["year"].min(), df["year"].max()
+        print(f"    ✓ {len(df):,} incidents "
+              f"({int(yr_lo)}–{int(yr_hi)}) — top categories: {top3}")
+
+        all_rows.append(df[_CRIME_SCHEMA_COLS])
+
+    if not all_rows:
+        print(f"  No crime data loaded. Expected folders like "
+              f"data/crime/chicago/, data/crime/pittsburgh/, etc. "
+              f"(supported cities: {', '.join(CRIME_CITY_KEYS)})")
+        return 0
+
+    combined = pd.concat(all_rows, ignore_index=True)
+    before = len(combined)
+    combined = combined.drop_duplicates(subset=["incident_id"])
+    if len(combined) != before:
+        print(f"  Deduplicated {before - len(combined):,} row(s) with a repeated incident_id")
+
+    store.upsert_df("crime_incidents", combined)
+    print(f"  ✓ {len(combined):,} total crime incidents loaded "
+          f"across {combined['city'].nunique()} cities")
+    return len(combined)
 
 
 # ── Census (tract) ───────────────────────────────────────────────────────────

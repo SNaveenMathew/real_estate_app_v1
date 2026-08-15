@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from config import settings
 import db.duckdb_store as store
 import db.vector_store as vs
+from services import layers as layer_service
 from agents.house_agent import run_house_chat
 from agents.general_agent import run_general_chat
 
@@ -247,6 +248,28 @@ async def get_nri(tract_fips: str):
     return nri
 
 
+# ── Map layers (Crime / NRI overlays) ─────────────────────────────────────────
+# Both are viewport-scoped: the frontend passes the current Leaflet map
+# bounds (map.getBounds()) and re-requests on pan/zoom, so a national-scale
+# dataset never has to be shipped whole just to render what's on screen. See
+# services/layers.py for the aggregation/filtering logic.
+
+@app.get("/api/layers/crime")
+async def get_crime_layer(west: float, south: float, east: float, north: float,
+                           grid_deg: float = 0.003, city: Optional[str] = None):
+    """Severity-weighted crime heatmap points within the given map bounds,
+    aggregated into a coarse grid. `city` optionally restricts to one
+    crime_incidents.city key (e.g. 'pittsburgh')."""
+    return layer_service.get_crime_heatmap(west, south, east, north, grid_deg=grid_deg, city=city)
+
+
+@app.get("/api/layers/nri")
+async def get_nri_layer(west: float, south: float, east: float, north: float):
+    """FEMA National Risk Index census-tract choropleth (GeoJSON) within the
+    given map bounds."""
+    return layer_service.get_nri_choropleth(west, south, east, north)
+
+
 # ── Stats / health ────────────────────────────────────────────────────────────
 
 @app.get("/api/stats")
@@ -254,11 +277,13 @@ async def stats():
     houses = store.query("SELECT COUNT(*) as n FROM houses").iloc[0]["n"]
     tracts = store.query("SELECT COUNT(*) as n FROM nri_tracts").iloc[0]["n"]
     sold   = store.query("SELECT COUNT(*) as n FROM sold_homes").iloc[0]["n"]
+    crime  = store.query("SELECT COUNT(*) as n FROM crime_incidents").iloc[0]["n"]
     docs   = vs.collection_count()
     return {
         "houses": int(houses),
         "nri_tracts": int(tracts),
         "sold_homes": int(sold),
+        "crime_incidents": int(crime),
         "vector_documents": docs,
     }
 

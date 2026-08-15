@@ -249,6 +249,39 @@ TABLES: dict[str, TableMeta] = {
         ],
     ),
 
+    "crime_incidents": TableMeta(
+        name="crime_incidents",
+        description=(
+            "Standardized, severity-weighted crime incidents, combined from whatever per-city raw "
+            "exports are dropped in data/crime/<city>/ (each city reports crime differently — see "
+            "services/crime_sources.py for the per-city parsers and services/crime_taxonomy.py for "
+            "how offense text is mapped to a common category + weight). Backs the 'Crime' map layer, "
+            "but also queryable directly for questions like 'which of these tracts has the most "
+            "severe crime' or 'burglaries in Pittsburgh in 2022'."
+        ),
+        setup_hint=(
+            "Drop each city's raw crime export (.csv or .xlsx) in data/crime/<city>/ — one folder per "
+            "city, e.g. data/crime/chicago/, data/crime/pittsburgh/ — then run: "
+            "python setup_data.py --only crime"
+        ),
+        column_notes=[
+            ColumnNote("city",
+                       "Normalized key (e.g. 'chicago', 'pittsburgh') — matches the data/crime/<city>/ "
+                       "folder name it was loaded from, and houses.crime_city (see Relationships)."),
+            ColumnNote("severity_weight",
+                       "1.0 (least severe) - 10.0 (most severe). Use SUM(severity_weight) rather than "
+                       "COUNT(*) for anything about how BAD an area's crime is, not just how much of "
+                       "it there is — that's the whole point of the weighting. COUNT(*) is still right "
+                       "for plain incident-volume questions."),
+            ColumnNote("category", "Standardized category key, e.g. 'aggravated_assault'. "
+                                    "category_label is the human-readable form, e.g. 'Aggravated Assault'."),
+            ColumnNote("raw_type",
+                       "Original offense/description text from the source file, kept for reference — "
+                       "not standardized, don't group by this across cities."),
+            ColumnNote("year_month", "'YYYY-MM' string — convenient for GROUP BY on monthly trend questions."),
+        ],
+    ),
+
     "geocode_cache": TableMeta(
         name="geocode_cache",
         description="Internal address→lat/lon cache so re-running setup_data.py doesn't re-hit the geocoding API.",
@@ -276,6 +309,13 @@ RELATIONSHIPS: list[Relationship] = [
                       "This is the only path from MSA-level rollups down to NRI risk scores."),
     Relationship("house_snapshots", "house_id", "houses", "house_id",
                  note="Full history per house — use for price-over-time / days-on-market questions."),
+    Relationship("houses", "crime_city", "crime_incidents", "city",
+                 note="Weak join — houses.crime_city is only populated when a Redfin CSV set it "
+                      "explicitly, or when the house's own city exactly matches a covered crime-data "
+                      "city (see services/data_loader._infer_crime_city). A house in a suburb (e.g. "
+                      "Cambridge, MA) won't auto-match Boston's crime data unless crime_city was set "
+                      "explicitly. This is a plain city-name join, not spatial — it does NOT restrict "
+                      "to the house's own neighborhood, only its city."),
 ]
 
 

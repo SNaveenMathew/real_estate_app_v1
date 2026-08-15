@@ -1,6 +1,6 @@
 # 🏠 Real Estate Intelligence
 
-A local, AI-powered map app for analyzing houses with FEMA National Risk Index data, Census demographics, Redfin listings, and an LLM chat interface — all running on your machine.
+A local, AI-powered map app for analyzing houses with FEMA National Risk Index data, Census demographics, Redfin listings, severity-weighted crime data, and an LLM chat interface — all running on your machine.
 
 ---
 
@@ -10,6 +10,7 @@ A local, AI-powered map app for analyzing houses with FEMA National Risk Index d
 ┌─────────────────────────────────────────────────────────────┐
 │  Browser (Leaflet Map + Chat UI)                            │
 │   └─ Markers per house (click → sidebar)                    │
+│   └─ Map Layer toggle: None / Crime / NRI                   │
 │   └─ House Chat  (per-property, LangGraph ReAct agent)      │
 │   └─ General Chat (cross-city, LangGraph ReAct agent)       │
 └──────────────────────┬──────────────────────────────────────┘
@@ -17,6 +18,8 @@ A local, AI-powered map app for analyzing houses with FEMA National Risk Index d
 ┌──────────────────────▼──────────────────────────────────────┐
 │  FastAPI  (main.py)                                         │
 │   ├─ /api/houses      GeoJSON of all houses                 │
+│   ├─ /api/layers/crime      Severity-weighted heatmap grid   │
+│   ├─ /api/layers/nri        NRI tract choropleth (GeoJSON)   │
 │   ├─ /api/house/{id}/chat   House-specific agent            │
 │   ├─ /api/chat              General agent                   │
 │   └─ /api/house/{id}/photo  Photo upload                    │
@@ -28,6 +31,7 @@ A local, AI-powered map app for analyzing houses with FEMA National Risk Index d
 │  ─ nri_tracts  │         │    (descriptions,    │
 │  ─ census_*    │         │     photos, notes)   │
 │  ─ sold_homes  │         └──────────────────────┘
+│  ─ crime_incidents │
 │  ─ cbsa_*      │
 └───────┬────────┘         ┌──────────────────────┐
         │                  │  llama.cpp / llama-server  │
@@ -65,6 +69,7 @@ real_estate_app/
     ├── sold/         ← drop sold-homes CSV files here
     ├── nri/          ← NRI_Table_CensusTracts.csv
     ├── census/       ← DECENNIALPL2020_P1_tract.csv, _msa.csv, list1_2020.csv
+    ├── crime/        ← one folder per city, e.g. crime/chicago/, crime/pittsburgh/
     └── shapefiles/   ← TIGER/Line tract shapefiles (optional but recommended)
 ```
 
@@ -187,6 +192,38 @@ Without shapefiles, the app uses the Census Geocoder API to resolve each house's
 - Required columns: `address`, `lat`, `lon`, `sold_price`, `sqft`, `sold_date`
 - Optional: `list_price`, `beds`, `baths`
 
+### Crime Data (optional, powers the "Crime" map layer)
+
+Every city publishes crime data differently — different columns, different
+offense vocabularies, sometimes different file formats entirely. Rather than
+teach the app one format, each city gets its own small parser (see
+`services/crime_sources.py`); currently supported:
+
+**Baltimore · Boston · Buffalo · Chicago · Indianapolis · Minneapolis · Philadelphia · Pittsburgh**
+
+1. Download the city's open-data crime/incident export (.csv or .xlsx — most
+   city data portals offer both) — typically named something like "Crime
+   Incidents", "Part 1 Crime", or "Police Blotter"
+2. Drop it in **`data/crime/<city>/`**, e.g. `data/crime/chicago/crimes_2024.csv`
+   — the folder name must match one of the city keys above (lowercase)
+3. You can drop multiple files per city (e.g. one per year) — they're all
+   read and combined
+4. Run `python setup_data.py --only crime`
+
+Each incident is classified into a standardized category (Homicide, Robbery,
+Burglary, Theft, ...) and assigned a **severity weight from 1–10** — see
+`services/crime_taxonomy.py` for the full category list and the reasoning
+behind the weights. The "Crime" map layer's heatmap intensity is driven by
+this weight, not raw incident count, so a block with a few thefts doesn't
+outweigh a block with one assault. The weights are a plain, editable Python
+list — tune them to your own judgment if the defaults don't match how you'd
+weigh things.
+
+To cover a city that isn't listed above, add a new parser class to
+`services/crime_sources.py` (subclass `CrimeParserBase`, following the
+pattern of the existing city classes) and register it — no changes needed
+anywhere else.
+
 ---
 
 ## Usage Guide
@@ -199,6 +236,11 @@ Without shapefiles, the app uses the Census Geocoder API to resolve each house's
   - 🟣 Purple = Contingent
   - 🟢 Green = Pre-Market
 - **Click any marker** to open the sidebar
+- **Map Layer control** (top-right): toggle an optional overlay on top of the
+  map — **Crime** (severity-weighted heatmap) or **NRI** (FEMA risk choropleth
+  by census tract). Only one layer is shown at a time; select **None** to turn
+  it off. Both re-fetch automatically as you pan/zoom, so they only ever load
+  what's actually in view.
 
 ### House Sidebar
 
@@ -221,6 +263,9 @@ Agent: [runs price estimator, checks comparables, sold homes in tract]
 User: How bad is the flood risk here?
 Agent: [fetches NRI, explains RFLD_RISKS score and EAL in plain language]
 
+User: What's the crime like in this neighborhood?
+Agent: [queries crime_incidents for this house's crime_city, summarizes by category and severity]
+
 User: Is the HOA fee reasonable?
 Agent: [compares HOA against other houses in the same city]
 ```
@@ -231,6 +276,7 @@ Agent: [compares HOA against other houses in the same city]
 - *"Which of my saved houses has the best combined walk + transit score?"*
 - *"Compare tornado risk between Dallas and Houston census tracts"*
 - *"What's the median price/sqft across all my Austin houses?"*
+- *"Which city has the most severe crime, weighted, not just the most incidents?"*
 
 ---
 
@@ -241,6 +287,7 @@ After adding new CSV files, re-run:
 ```bash
 python setup_data.py --only redfin    # just Redfin
 python setup_data.py --only sold      # just sold homes
+python setup_data.py --only crime     # just crime data
 python setup_data.py                  # everything
 ```
 
@@ -258,6 +305,8 @@ The vector database (ChromaDB) grows automatically as you paste descriptions in 
 | Chat says "I couldn't generate a response" | Make sure `llama-server` is running (or Ollama if you chose that stack) |
 | Embedding errors | If using Ollama embeddings: pull `nomic-embed-text` with `ollama pull nomic-embed-text`. If using another embedding provider, configure accordingly. |
 | Slow tract resolution | Add TIGER/Line shapefiles to `data/shapefiles/` |
+| "Crime" layer is empty | Confirm `data/crime/<city>/` has files for a city your map view overlaps, then `python setup_data.py --only crime` |
+| "NRI" layer is empty / shows a warning | It needs both tract *geometry* (from the NRI shapefile, or TIGER/Line shapefiles in `data/shapefiles/`) and tract *attributes* (`python setup_data.py --only nri`) — the layer's warning message says which is missing |
 
 ---
 
@@ -306,7 +355,10 @@ db/
   vector_store.py     ChromaDB — embed, store, search text documents
 
 services/
-  data_loader.py      CSV parsers for Redfin, NRI, Census, Sold
+  data_loader.py      Parsers for Redfin, NRI, Census, Sold, Crime
+  crime_sources.py    Per-city crime file parsers (one class per city)
+  crime_taxonomy.py   Standardized crime categories + severity weights
+  layers.py           Viewport-scoped queries behind the Crime/NRI map layers
   geo_utils.py         Census tract FIPS assignment (shapefile or API)
 
 eval/
@@ -321,13 +373,14 @@ eval/
 static/
   index.html          Leaflet map + sidebar + chat UI
   style.css            All styles
-  app.js               Frontend logic
+  app.js               Frontend logic (incl. the Crime/NRI layer toggle)
 
 data/
   redfin/             Drop Redfin CSVs here
   sold/               Drop sold-homes CSVs here
-  nri/                FEMA NRI CSV
+  nri/                FEMA NRI CSV or shapefile
   census/             Census P1 tables + CBSA crosswalk
+  crime/<city>/       Drop each city's raw crime export here
   shapefiles/         TIGER/Line tract shapefiles (optional)
 ```
 

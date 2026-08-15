@@ -344,7 +344,7 @@ function ratingColor(rating) {
   const r = rating.toLowerCase();
   if (r.includes('very high')) return '#ef4444';
   if (r.includes('relatively high')) return '#f97316';
-  if (r.includes('medium'))    return '#f59e0b';
+  if (r.includes('moderate') || r.includes('medium')) return '#f59e0b';
   if (r.includes('relatively low')) return '#84cc16';
   if (r.includes('very low'))  return '#10b981';
   return '#9ca3af';
@@ -678,5 +678,176 @@ document.getElementById('general-chat-input').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendGeneralMessage(); }
 });
 
+/* ── Map layers (Crime / NRI) ────────────────────────────────────────────
+   Exactly one optional overlay can be active at a time. Both layers are
+   viewport-scoped: we request only what's within the current map bounds,
+   and re-request (debounced) as the user pans/zooms, so this stays fast
+   regardless of how much crime/NRI data is loaded server-side. */
+
+const layerState = {
+  active: null,       // null | 'crime' | 'nri'
+  layerObj: null,      // the Leaflet layer currently on the map, if any
+  fetchToken: 0,        // guards against a slow/stale request overwriting a newer one
+};
+
+function currentBboxQuery() {
+  const b = map.getBounds();
+  return `west=${b.getWest()}&south=${b.getSouth()}&east=${b.getEast()}&north=${b.getNorth()}`;
+}
+
+function setLayerLoading(isLoading) {
+  const el = document.getElementById('layer-status');
+  if (el) el.textContent = isLoading ? 'Loading…' : '';
+}
+
+function clearActiveLayer() {
+  if (layerState.layerObj) {
+    map.removeLayer(layerState.layerObj);
+    layerState.layerObj = null;
+  }
+  const legend = document.getElementById('layer-legend');
+  if (legend) legend.style.display = 'none';
+}
+
+function renderLegend(kind, data) {
+  const el = document.getElementById('layer-legend');
+  if (!el) return;
+  if (kind === 'crime') {
+    el.innerHTML = `
+      <div class="legend-title">Crime severity (weighted density)</div>
+      <div class="legend-gradient"></div>
+      <div class="legend-scale"><span>Lower</span><span>Higher</span></div>
+      <div class="legend-note">${data.incident_count.toLocaleString()} incident(s) in view</div>
+      ${data.truncated ? '<div class="legend-note">Zoom in for full detail</div>' : ''}
+    `;
+  } else if (kind === 'nri') {
+    const ratings = ['Very Low', 'Relatively Low', 'Relatively Moderate', 'Relatively High', 'Very High'];
+    el.innerHTML = `
+      <div class="legend-title">FEMA Risk Rating</div>
+      ${ratings.map(r => `<div class="legend-row"><span class="legend-swatch" style="background:${ratingColor(r)}"></span>${r}</div>`).join('')}
+      ${data.warning ? `<div class="legend-note">${data.warning}</div>` : ''}
+      ${data.truncated ? '<div class="legend-note">Zoom in to see all tracts</div>' : ''}
+    `;
+  }
+  el.style.display = 'block';
+}
+
+async function refreshCrimeLayer() {
+  if (typeof L.heatLayer !== 'function') {
+    console.error('leaflet.heat did not load — check network access to unpkg.com');
+    return;
+  }
+  const token = ++layerState.fetchToken;
+  setLayerLoading(true);
+  try {
+    const resp = await fetch(`/api/layers/crime?${currentBboxQuery()}`);
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    const data = await resp.json();
+    if (token !== layerState.fetchToken) return; // a newer request has since superseded this one
+
+    const heatPoints = data.points; // already [lat, lon, weight]
+    const maxVal = Math.max(data.max_weight, 1);
+    if (layerState.active === 'crime' && layerState.layerObj) {
+      layerState.layerObj.setLatLngs(heatPoints);
+      layerState.layerObj.setOptions({ max: maxVal });
+    } else {
+      clearActiveLayer();
+      layerState.layerObj = L.heatLayer(heatPoints, {
+        radius: 18, blur: 22, maxZoom: 17, max: maxVal,
+        gradient: { 0.2: '#3b82f6', 0.4: '#eab308', 0.65: '#f97316', 1.0: '#ef4444' },
+      }).addTo(map);
+    }
+    layerState.active = 'crime';
+    renderLegend('crime', data);
+  } catch (e) {
+    console.error('Crime layer error:', e);
+  } finally {
+    if (token === layerState.fetchToken) setLayerLoading(false);
+  }
+}
+
+async function refreshNriLayer() {
+  const token = ++layerState.fetchToken;
+  setLayerLoading(true);
+  try {
+    const resp = await fetch(`/api/layers/nri?${currentBboxQuery()}`);
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    const data = await resp.json();
+    if (token !== layerState.fetchToken) return;
+
+    clearActiveLayer();
+    layerState.layerObj = L.geoJSON(data, {
+      style: f => ({
+        color: '#fff', weight: 1, fillOpacity: 0.55,
+        fillColor: ratingColor(f.properties.risk_ratng),
+      }),
+      onEachFeature: (f, lyr) => {
+        const p = f.properties;
+        const scoreTxt = (p.risk_score != null) ? Number(p.risk_score).toFixed(1) : '—';
+        lyr.bindTooltip(
+          `<b>${p.county_name || 'Unknown county'}, ${p.state_name || ''}</b><br>` +
+          `Risk: ${p.risk_ratng || 'No data'} (${scoreTxt})`,
+          { sticky: true }
+        );
+      },
+    }).addTo(map);
+    layerState.active = 'nri';
+    renderLegend('nri', data);
+  } catch (e) {
+    console.error('NRI layer error:', e);
+  } finally {
+    if (token === layerState.fetchToken) setLayerLoading(false);
+  }
+}
+
+function setActiveLayer(kind) {
+  document.querySelectorAll('.layer-option').forEach(b => {
+    b.classList.toggle('active', b.dataset.layer === kind);
+  });
+  if (kind === 'none') {
+    layerState.active = null;
+    layerState.fetchToken++; // invalidate any in-flight request
+    clearActiveLayer();
+    setLayerLoading(false);
+    return;
+  }
+  if (kind === 'crime') refreshCrimeLayer();
+  else if (kind === 'nri') refreshNriLayer();
+}
+
+// Re-fetch the active layer as the map pans/zooms (debounced).
+let _layerMoveTimer = null;
+map.on('moveend', () => {
+  if (!layerState.active) return;
+  clearTimeout(_layerMoveTimer);
+  _layerMoveTimer = setTimeout(() => {
+    if (layerState.active === 'crime') refreshCrimeLayer();
+    else if (layerState.active === 'nri') refreshNriLayer();
+  }, 400);
+});
+
+const LayerControl = L.Control.extend({
+  options: { position: 'topright' },
+  onAdd() {
+    const div = L.DomUtil.create('div', 'layer-toggle-control');
+    div.innerHTML = `
+      <div class="layer-toggle-title">Map Layer <span id="layer-status"></span></div>
+      <div class="layer-toggle-buttons">
+        <button class="layer-option active" data-layer="none" type="button">None</button>
+        <button class="layer-option" data-layer="crime" type="button">Crime</button>
+        <button class="layer-option" data-layer="nri" type="button">NRI</button>
+      </div>
+      <div class="layer-toggle-legend" id="layer-legend" style="display:none"></div>
+    `;
+    L.DomEvent.disableClickPropagation(div);
+    L.DomEvent.disableScrollPropagation(div);
+    div.querySelectorAll('.layer-option').forEach(btn => {
+      btn.addEventListener('click', () => setActiveLayer(btn.dataset.layer));
+    });
+    return div;
+  },
+});
+
 /* ── Boot ────────────────────────────────────────────────────────────── */
 loadHouses();
+map.addControl(new LayerControl());

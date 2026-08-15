@@ -7,6 +7,7 @@ Usage:
     python setup_data.py --only nri         # load only NRI
     python setup_data.py --only census      # load only Census
     python setup_data.py --only sold        # load only Sold
+    python setup_data.py --only crime       # load only Crime (data/crime/<city>/)
     python setup_data.py --resolve-tracts   # re-run tract FIPS resolution
 """
 import sys
@@ -40,7 +41,8 @@ def run_all(only: str = None, resolve_tracts: bool = False,
     # Ensure directories exist
     for d in [settings.data_dir / "nri", settings.data_dir / "census",
               settings.data_dir / "redfin", settings.data_dir / "sold",
-              settings.data_dir / "shapefiles", settings.uploads_dir]:
+              settings.data_dir / "crime", settings.data_dir / "shapefiles",
+              settings.uploads_dir]:
         d.mkdir(parents=True, exist_ok=True)
 
     # Determine geo_utils backend and report to the user
@@ -79,6 +81,30 @@ def run_all(only: str = None, resolve_tracts: bool = False,
             if settings.nri_shp.exists():
                 geo_utils._load_nri_geometry.cache_clear()
                 use_geo = geo_utils  # always resolve tracts when shapefile is present
+
+    # ── Crime ────────────────────────────────────────────────────────────
+    if only in (None, "crime"):
+        banner("Crime (severity-weighted, per city)")
+        crime_dir = settings.data_dir / "crime"
+        city_dirs = sorted(
+            p for p in crime_dir.iterdir()
+            if p.is_dir() and (any(p.glob("*.csv")) or any(p.glob("*.xlsx")) or any(p.glob("*.xls")))
+        ) if crime_dir.exists() else []
+        supported = ", ".join(data_loader.CRIME_CITY_KEYS)
+        if not city_dirs:
+            print(f"  ✗ No city folders with data found in data/crime/")
+            print(f"  → Drop each city's raw export into data/crime/<city>/, e.g. data/crime/chicago/")
+            print(f"  → Currently supported cities: {supported}")
+        else:
+            found = ", ".join(p.name for p in city_dirs)
+            unsupported = sorted(set(p.name for p in city_dirs) - set(data_loader.CRIME_CITY_KEYS))
+            print(f"  Found data for: {found}")
+            if unsupported:
+                print(f"  ⚠ No parser registered for: {', '.join(unsupported)} — see "
+                      f"services/crime_sources.py to add one (supported: {supported})")
+            n = data_loader.load_crime()
+            if n:
+                print(f"  ✓ {n:,} crime incidents loaded")
 
     # ── Census (CBSA crosswalk must come first so MSA name→code matching works) ──
     if only in (None, "census"):
@@ -254,13 +280,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Load data into DuckDB")
     parser.add_argument(
         "--only",
-        choices=["nri", "census", "redfin", "sold", "geocode", "repair", "match"],
+        choices=["nri", "census", "redfin", "sold", "crime", "geocode", "repair", "match"],
         help=(
             "Load only a specific dataset, or run a maintenance task:\n"
             "  nri      — FEMA National Risk Index\n"
             "  census   — CBSA crosswalk + tract + MSA populations (in correct order)\n"
             "  redfin   — Redfin favorites CSVs\n"
             "  sold     — County sold-homes CSVs\n"
+            "  crime    — Per-city crime data (data/crime/<city>/)\n"
             "  geocode  — Retry pending geocodes for sold homes\n"
             "  repair   — Fix X-coded msa_codes in census_msa (no data reload needed)"
         ),

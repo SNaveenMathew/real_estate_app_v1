@@ -47,7 +47,7 @@ def _ensure_schema(conn: duckdb.DuckDBPyConnection):
             tract_fips      VARCHAR,   -- 11-digit census tract FIPS
             msa_code        VARCHAR,   -- CBSA code
             nearest_big_city VARCHAR,
-            crime_city      VARCHAR,
+            crime_city      VARCHAR,   -- normalized key into crime_incidents.city (see data_loader.load_redfin)
             source_file     VARCHAR,
             raw_json        VARCHAR,   -- everything else as JSON
             is_favorite     BOOLEAN DEFAULT FALSE,
@@ -122,6 +122,29 @@ def _ensure_schema(conn: duckdb.DuckDBPyConnection):
             vlcn_risks      DOUBLE,    -- Volcanic Activity
             wfir_risks      DOUBLE,    -- Wildfire
             wntw_risks      DOUBLE     -- Winter Weather
+        )
+    """)
+
+    # crime_incidents — standardized, severity-weighted crime records across
+    # every city dropped into data/crime/<city>/. See services/crime_sources.py
+    # (per-city parsers) and services/crime_taxonomy.py (category + weight
+    # assignment). Populated by services/data_loader.py::load_crime().
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS crime_incidents (
+            incident_id     VARCHAR PRIMARY KEY,
+            city            VARCHAR,    -- normalized key, e.g. 'pittsburgh' — matches houses.crime_city
+            source_file     VARCHAR,
+            occurred_at     TIMESTAMP,
+            year            INTEGER,
+            month           INTEGER,
+            year_month      VARCHAR,    -- 'YYYY-MM', convenience for time-based grouping
+            lat             DOUBLE,
+            lon             DOUBLE,
+            category        VARCHAR,    -- standardized key, e.g. 'aggravated_assault'
+            category_label  VARCHAR,    -- human-readable, e.g. 'Aggravated Assault'
+            severity_weight DOUBLE,     -- 1.0-10.0, see services/crime_taxonomy.py
+            raw_type        VARCHAR,    -- original offense/type text, kept for reference
+            location_text   VARCHAR     -- block address / cross-street, when the source has one
         )
     """)
 
@@ -286,7 +309,8 @@ _HOUSES_COLS = [
     "house_id", "address", "city", "state", "zip", "lat", "lon",
     "status", "price", "beds", "baths", "sqft", "year_built",
     "hoa_fee", "walk_score", "bike_score", "transit_score",
-    "tract_fips", "msa_code", "source_file", "raw_json",
+    "tract_fips", "msa_code", "nearest_big_city", "crime_city",
+    "source_file", "raw_json",
 ]
 _HOUSES_INSERT = f"INSERT OR REPLACE INTO houses ({', '.join(_HOUSES_COLS)}) SELECT {', '.join(_HOUSES_COLS)} FROM __tmp_houses"
 
