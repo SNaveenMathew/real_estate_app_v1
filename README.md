@@ -292,6 +292,7 @@ read from it, so there's nothing else to keep in sync when you add a table.
 main.py               FastAPI app + all HTTP endpoints
 config.py             All settings (paths, models, ports)
 setup_data.py         One-time data loader script
+run_eval.py            Agent evaluation pipeline entry point
 
 agents/
   tools.py            LangChain tools (SQL, vector search, price estimation)
@@ -308,6 +309,15 @@ services/
   data_loader.py      CSV parsers for Redfin, NRI, Census, Sold
   geo_utils.py         Census tract FIPS assignment (shapefile or API)
 
+eval/
+  fixtures.py         Builds a small deterministic DB with hand-verifiable answers
+  golden_set.py        The golden examples (structured + free-text)
+  scoring.py            Assert-equal scoring for structured examples
+  judge.py              LLM-as-judge scoring for free-text examples
+  mock_agent.py         Scripted stand-in used only by --mock (harness smoke test)
+  tests/test_scoring.py Unit tests for the scorer itself, no LLM/DB needed
+  reports/              Timestamped JSON + Markdown reports land here
+
 static/
   index.html          Leaflet map + sidebar + chat UI
   style.css            All styles
@@ -320,3 +330,41 @@ data/
   census/             Census P1 tables + CBSA crosswalk
   shapefiles/         TIGER/Line tract shapefiles (optional)
 ```
+
+---
+
+## Evaluation
+
+`run_eval.py` runs a small golden set (`eval/golden_set.py`) against the real
+agents — the same `run_general_chat` / `run_house_chat` the app itself calls
+— on a dedicated, deterministic evaluation database (`eval/fixtures.py`), not
+your real data.
+
+```bash
+python run_eval.py                 # full run against your configured model
+python run_eval.py --list          # see what's in the golden set
+python run_eval.py --tags nri,sold_homes    # run a subset
+python run_eval.py --mock          # smoke-test the harness itself, no model server needed
+```
+
+Each golden example is one of:
+- **structured** — has a definite right answer (a count, a ranking, a set of
+  cities). Scored by exact comparison against the reply text: as an ordered
+  sequence when order matters, as a set when it doesn't. No LLM involved in
+  grading these.
+- **free_text** — open-ended (a tradeoff, an explanation). Scored by an LLM
+  judge against a rubric (`eval/judge.py`). Configure the judge model via
+  `judge_llama_server_base_url` / `judge_llama_server_model` in `.env` — it
+  defaults to the same server as the agent under test, but an independent or
+  stronger judge is stronger evidence than a model grading itself.
+
+Reports land in `eval/reports/` as both JSON (for tooling) and Markdown (for
+reading). Exit code is non-zero if anything failed or errored, so this is
+safe to wire into CI. `eval/tests/test_scoring.py` unit-tests the assert-equal
+scorer itself against hand-crafted replies — run it directly any time you
+change `eval/scoring.py`.
+
+To add a golden example: add fixture data to `eval/fixtures.py` if needed
+(prefer deriving expected values from the fixture data programmatically, the
+way the existing examples do, over hand-typing a number), then add one
+`GoldenExample` to `eval/golden_set.py`.
