@@ -37,3 +37,6 @@ venv*/
 
 # Logs
 *.log
+
+# Evaluation reports produced by run_eval.py
+/eval/reports/
