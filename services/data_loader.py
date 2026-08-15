@@ -1494,9 +1494,9 @@ def load_sold_homes(run_geocoding: bool = True,
     from services.geocoder import geocode_dataframe
 
     sold_dir = settings.sold_dir
-    csv_files = list(sold_dir.glob("*.csv"))
+    csv_files = sorted(sold_dir.rglob("*.csv"))
     if not csv_files:
-        print("  No sold homes CSV files found in data/sold/")
+        print("  No sold homes CSV files found under data/sold/ (including subfolders)")
         return 0
 
     all_rows = []

@@ -144,10 +144,10 @@ def run_all(only: str = None, resolve_tracts: bool = False,
     # ── Sold homes ────────────────────────────────────────────────────────
     if only in (None, "sold"):
         banner("Sold Homes")
-        csv_files = list(settings.sold_dir.glob("*.csv"))
+        csv_files = sorted(settings.sold_dir.rglob("*.csv"))
         if not csv_files:
-            print(f"  ⚠ No CSV files in: {settings.sold_dir}")
-            print("  → Drop county sold-homes CSV files into data/sold/")
+            print(f"  ⚠ No CSV files found under: {settings.sold_dir}")
+            print("  → Drop sold-homes CSV files into data/sold/ or any subfolder")
             print("  → Supported counties: Allegheny PA (auto-detected)")
             print("  → Other formats: generic fallback parser will be used")
         else:
