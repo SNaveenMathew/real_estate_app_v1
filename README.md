@@ -447,6 +447,8 @@ These utility scripts are intended for debugging, data validation, and evaluatio
 - `run_eval.py`: Agent evaluation pipeline (already described above). Runs the golden set examples, scores them, and writes timestamped reports to `eval/reports/`.
 
 If you prefer the previous standalone bike-routing README, its content has been folded here; `README_BIKE_ROUTING.md` was consolidated into this file.
+
+Note: bike-routing documentation was consolidated into this single `README.md` to avoid duplication.
 ```
 
 Each golden example is one of:
