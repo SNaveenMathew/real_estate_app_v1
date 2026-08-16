@@ -172,6 +172,14 @@ TABLES: dict[str, TableMeta] = {
                        "5-digit (state+county) FIPS, e.g. '42003'. Use THIS — not tract_fips — "
                        "to reach cbsa_counties for metro-area rollups (see Relationships)."),
             ColumnNote("risk_score", "Composite score blending all hazards — use for 'overall risk' questions."),
+            ColumnNote("rfld_risks",
+                       "Riverine Flooding — the right default for a plain 'flood risk' question. "
+                       "Coastal Flooding (cfld_risks) is a SEPARATE hazard that FEMA scores at or "
+                       "near 0 for the many inland tracts with no coastline exposure, so "
+                       "AVG(rfld_risks, cfld_risks) dilutes the real riverine signal for inland "
+                       "areas rather than measuring general flood risk. Use rfld_risks alone unless "
+                       "the user specifically asks about coastal flooding, or "
+                       "GREATEST(rfld_risks, cfld_risks) if they want risk from any flood source."),
             ColumnNote("eal_valt",
                        "Expected Annual Loss in dollars — use when the user wants a $ figure "
                        "rather than a 0-100 score."),
