@@ -685,7 +685,7 @@ document.getElementById('general-chat-input').addEventListener('keydown', e => {
    regardless of how much crime/NRI data is loaded server-side. */
 
 const layerState = {
-  active: null,       // null | 'crime' | 'nri'
+  active: null,       // null | 'crime' | 'nri' | 'bike'
   layerObj: null,      // the Leaflet layer currently on the map, if any
   fetchToken: 0,        // guards against a slow/stale request overwriting a newer one
 };
@@ -739,9 +739,35 @@ function renderLegend(kind, data) {
       ${data.warning ? `<div class="legend-note">${data.warning}</div>` : ''}
       ${data.truncated ? '<div class="legend-note">Zoom in to see all tracts</div>' : ''}
     `;
+  } else if (kind === 'bike') {
+    const order = ['bike_lanes','bikeable_sidewalks','cautionary_bike_route','on_street_bike_route','protected_bike_lanes','sharrows','trails'];
+    el.innerHTML = `
+      <div class="legend-title">Bike Lanes</div>
+      ${order.map(k => `<div class="legend-row"><span class="legend-swatch bike-legend-line" style="background:${BIKE_LAYER_COLORS[k]}"></span>${BIKE_LAYER_LABELS[k]}</div>`).join('')}
+      <div class="legend-note">${(data.feature_count || 0).toLocaleString()} feature(s) in view${data.truncated ? ' — zoom in for full detail' : ''}</div>
+    `;
   }
   el.style.display = 'block';
 }
+
+const BIKE_LAYER_COLORS = {
+  bike_lanes: '#4682b4',
+  bikeable_sidewalks: '#add8e6',
+  cautionary_bike_route: '#ff0000',
+  on_street_bike_route: '#90ee90',
+  protected_bike_lanes: '#006400',
+  sharrows: '#ffa500',
+  trails: '#ffc0cb',
+};
+const BIKE_LAYER_LABELS = {
+  bike_lanes: 'Bike Lanes',
+  bikeable_sidewalks: 'Bikeable Sidewalks',
+  cautionary_bike_route: 'Cautionary Bike Route',
+  on_street_bike_route: 'On Street Bike Route',
+  protected_bike_lanes: 'Protected Bike Lanes',
+  sharrows: 'Sharrows',
+  trails: 'Trails',
+};
 
 async function refreshCrimeLayer() {
   if (typeof L.heatLayer !== 'function') {
@@ -824,6 +850,39 @@ async function refreshNriLayer() {
   }
 }
 
+async function refreshBikeLayer() {
+  const token = ++layerState.fetchToken;
+  setLayerLoading(true);
+  try {
+    const resp = await fetch(`/api/layers/bike?${currentBboxQuery()}`);
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    const data = await resp.json();
+    if (token !== layerState.fetchToken) return;
+
+    clearActiveLayer();
+    layerState.layerObj = L.geoJSON(data, {
+      style: f => ({
+        color: BIKE_LAYER_COLORS[f.properties.layer_type] || '#4f8ef7',
+        weight: 5,
+        opacity: 0.85,
+      }),
+      onEachFeature: (f, lyr) => {
+        const p = f.properties || {};
+        lyr.bindTooltip(
+          `<b>${p.layer_label || 'Bike route'}</b>${p.city ? `<br>${p.city}` : ''}`,
+          { sticky: true }
+        );
+      },
+    }).addTo(map);
+    layerState.active = 'bike';
+    renderLegend('bike', data);
+  } catch (e) {
+    console.error('Bike Lanes layer error:', e);
+  } finally {
+    if (token === layerState.fetchToken) setLayerLoading(false);
+  }
+}
+
 function setActiveLayer(kind) {
   document.querySelectorAll('.layer-option').forEach(b => {
     b.classList.toggle('active', b.dataset.layer === kind);
@@ -837,6 +896,7 @@ function setActiveLayer(kind) {
   }
   if (kind === 'crime') refreshCrimeLayer();
   else if (kind === 'nri') refreshNriLayer();
+  else if (kind === 'bike') refreshBikeLayer();
 }
 
 // Re-fetch the active layer as the map pans/zooms (debounced).
@@ -847,6 +907,7 @@ map.on('moveend', () => {
   _layerMoveTimer = setTimeout(() => {
     if (layerState.active === 'crime') refreshCrimeLayer();
     else if (layerState.active === 'nri') refreshNriLayer();
+    else if (layerState.active === 'bike') refreshBikeLayer();
   }, 400);
 });
 
@@ -870,6 +931,7 @@ const LayerControl = L.Control.extend({
         <button class="layer-option active" data-layer="none" type="button">None</button>
         <button class="layer-option" data-layer="crime" type="button">Crime</button>
         <button class="layer-option" data-layer="nri" type="button">NRI</button>
+        <button class="layer-option" data-layer="bike" type="button">Bike Lanes</button>
       </div>
       <div class="layer-toggle-legend" id="layer-legend" style="display:none"></div>
     `;

@@ -225,7 +225,7 @@ input[type="text"] { border: 1px solid #ddd; border-radius: 6px; padding: 6px 8p
 .btn-danger:hover { background: #fecaca; }
 .no-desc { color: #aaa; font-size: 13px; font-style: italic; padding: 8px 0; }
 
-/* ── Map Layer Toggle (Crime / NRI) ──────────────────────────────────── */
+/* ── Map Layer Toggle (Crime / NRI / Bike Lanes) ──────────────────────────────────── */
 .layer-toggle-control {
   background: #fff; border-radius: 10px; padding: 10px 12px;
   box-shadow: 0 2px 10px rgba(0,0,0,.25); font-size: 12px; min-width: 172px;
@@ -253,3 +253,7 @@ input[type="text"] { border: 1px solid #ddd; border-radius: 6px; padding: 6px 8p
 .legend-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #555; margin: 3px 0; }
 .legend-swatch { width: 11px; height: 11px; border-radius: 3px; flex-shrink: 0; }
 .legend-note { font-size: 10px; color: #888; margin-top: 6px; }
+
+.bike-legend-line { border-radius: 2px; height: 4px; }
+
+.bike-legend-line { border-radius: 2px; height: 4px; }
