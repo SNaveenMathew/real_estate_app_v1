@@ -1,8 +1,8 @@
 """
 services/layers.py
 
-Query/aggregation logic behind the two optional map overlays ('Crime' and
-'NRI'). Both are viewport-scoped: main.py's endpoints require the caller to
+Query/aggregation logic behind the optional map overlays ('Crime', 'NRI',
+and 'Bike Lanes'). Both are viewport-scoped: main.py's endpoints require the caller to
 pass the current map bounding box, and only what's visible is returned — a
 national-scale dataset (crime_incidents can run into the millions of rows
 across cities; the NRI tract geometry cache covers ~85k tracts nationwide)
@@ -166,3 +166,61 @@ def get_nri_choropleth(west: float, south: float, east: float, north: float,
         result["warning"] = ("Tract geometry is loaded but nri_tracts has no matching rows — "
                               "NRI data may not be loaded yet. Run: python setup_data.py --only nri")
     return result
+
+
+# ── Bike routes ──────────────────────────────────────────────────────────────
+
+MAX_BIKE_FEATURES = 5000
+
+
+def get_bike_routes(west: float, south: float, east: float, north: float,
+                    city: Optional[str] = None,
+                    max_features: int = MAX_BIKE_FEATURES) -> dict:
+    """Return BikePGH-style line features intersecting the viewport as GeoJSON.
+
+    The loader stores a WGS-84 bbox for every feature. The initial SQL filter
+    therefore avoids deserializing geometries outside the viewport; the client
+    receives only the seven standardized bike sublayers.
+    """
+    params = [east, west, north, south]
+    city_clause = ""
+    if city:
+        city_clause = "AND city = ?"
+        params.append(city.strip().lower())
+
+    df = store.query(f"""
+        SELECT route_id, city, layer_type, layer_label, color, source_file, geometry_json, properties_json
+        FROM bike_routes
+        WHERE min_lon <= ? AND max_lon >= ?
+          AND min_lat <= ? AND max_lat >= ?
+          {city_clause}
+        ORDER BY city, layer_label, route_id
+        LIMIT {int(max_features)}
+    """, params)
+
+    features = []
+    for r in df.itertuples(index=False):
+        try:
+            geometry = json.loads(r.geometry_json)
+        except Exception:
+            continue
+        try:
+            props = json.loads(r.properties_json) if r.properties_json else {}
+        except Exception:
+            props = {}
+        props.update({
+            "route_id": r.route_id,
+            "city": r.city,
+            "layer_type": r.layer_type,
+            "layer_label": r.layer_label,
+            "color": r.color,
+            "source_file": r.source_file,
+        })
+        features.append({"type": "Feature", "geometry": geometry, "properties": props})
+
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+        "feature_count": len(features),
+        "truncated": len(df) >= max_features,
+    }

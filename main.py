@@ -270,6 +270,14 @@ async def get_nri_layer(west: float, south: float, east: float, north: float):
     return layer_service.get_nri_choropleth(west, south, east, north)
 
 
+@app.get("/api/layers/bike")
+async def get_bike_layer(west: float, south: float, east: float, north: float,
+                         city: Optional[str] = None):
+    """Bike Lanes overlay with all seven standardized BikePGH-style sublayers.
+    Results are restricted to the current map viewport; ``city`` is optional."""
+    return layer_service.get_bike_routes(west, south, east, north, city=city)
+
+
 # ── Stats / health ────────────────────────────────────────────────────────────
 
 @app.get("/api/stats")
