@@ -19,6 +19,7 @@ from config import settings
 import db.duckdb_store as store
 import db.vector_store as vs
 from services import layers as layer_service
+from services import bike_routing
 from agents.house_agent import run_house_chat
 from agents.general_agent import run_general_chat
 
@@ -159,11 +160,11 @@ async def house_chat(house_id: str, req: ChatRequest):
 async def general_chat(req: ChatRequest):
     """General chat — cross-house, MSA, national risk questions."""
     try:
-        reply, updated_history = run_general_chat(req.message, req.history)
+        reply, updated_history, visualization = run_general_chat(req.message, req.history, include_metadata=True)
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(500, f"Agent error: {e}")
-    return {"reply": reply, "history": updated_history}
+    return {"reply": reply, "history": updated_history, "visualization": visualization}
 
 
 # ── Document / photo upload ──────────────────────────────────────────────────
@@ -272,10 +273,36 @@ async def get_nri_layer(west: float, south: float, east: float, north: float):
 
 @app.get("/api/layers/bike")
 async def get_bike_layer(west: float, south: float, east: float, north: float,
-                         city: Optional[str] = None):
-    """Bike Lanes overlay with all seven standardized BikePGH-style sublayers.
-    Results are restricted to the current map viewport; ``city`` is optional."""
-    return layer_service.get_bike_routes(west, south, east, north, city=city)
+                         city: Optional[str] = None,
+                         exclusive: bool = False):
+    """BikePGH overlay within the current viewport.
+
+    ``exclusive=true`` is used by visualizations to resolve known overlapping
+    BikePGH classifications into one canonical display category without
+    altering the underlying bike_routes data.
+    """
+    return layer_service.get_bike_routes(
+        west, south, east, north, city=city, exclusive=exclusive
+    )
+
+
+class BikeRouteRequest(BaseModel):
+    start: str
+    end: str
+    city: str = "Pittsburgh, PA"
+
+
+@app.post("/api/bike/route")
+async def get_bike_route(req: BikeRouteRequest):
+    """Find a bicycle route between place names or addresses."""
+    try:
+        return await bike_routing.route_bike(req.start, req.end, city=req.city)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=502, detail=f"Bike routing service error: {e}")
+
 
 
 # ── Stats / health ────────────────────────────────────────────────────────────
