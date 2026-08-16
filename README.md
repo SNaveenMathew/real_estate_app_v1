@@ -44,7 +44,7 @@ A local, AI-powered map app for analyzing houses with FEMA National Risk Index d
 
 ## Prerequisites
 
-- Python 3.10+
+- Python 3.13+
 - `llama-server` (llama.cpp) installed and running, or Ollama as an alternative
 
 ---
