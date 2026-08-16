@@ -1,4 +1,4 @@
-/* ── App state ───────────────────────────────────────────────────────── */
+﻿﻿/* ── App state ───────────────────────────────────────────────────────── */
 const state = {
   selectedHouseId: null,
   houseChatHistory: {},   // {house_id: [{role, content}]}
@@ -642,6 +642,236 @@ document.getElementById('general-modal').addEventListener('click', e => {
   if (e.target === e.currentTarget) e.currentTarget.classList.remove('open');
 });
 
+
+function bikeRouteBearing(a, b) {
+  const [lat1, lon1] = a.map(Number);
+  const [lat2, lon2] = b.map(Number);
+  const p1 = lat1 * Math.PI / 180, p2 = lat2 * Math.PI / 180;
+  const dl = (lon2 - lon1) * Math.PI / 180;
+  const y = Math.sin(dl) * Math.cos(p2);
+  const x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+
+function makeRouteArrow(latlng, bearing) {
+  return L.marker(latlng, {
+    icon: L.divIcon({
+      className: 'bike-route-arrow',
+      html: `<div style="transform:rotate(${bearing}deg)">➤</div>`,
+      iconSize: [24,24],
+      iconAnchor: [12,12],
+    }),
+    interactive: false,
+  });
+}
+
+async function renderBikeRouteInChat(messageEl, vis) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'bike-route-result';
+  wrapper.innerHTML = `
+    <div class="bike-route-result-header">
+      <strong>BikePGH route</strong>
+      <span>${Number(vis.distance_miles || 0).toFixed(1)} mi · ${Number(vis.duration_minutes || 0).toFixed(0)} min estimate</span>
+    </div>
+    <div class="bike-route-chat-map"></div>
+    <div class="bike-route-legend"></div>
+  `;
+  messageEl.querySelector('.bubble')?.appendChild(wrapper);
+
+  const mapEl = wrapper.querySelector('.bike-route-chat-map');
+  const routeMap = L.map(mapEl, {
+    zoomControl: true,
+    attributionControl: true,
+    scrollWheelZoom: false,
+  }).setView([40.4406, -80.0018], 13);
+
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+    attribution: '© OpenStreetMap contributors © CARTO',
+    subdomains: 'abcd',
+    maxZoom: 19,
+  }).addTo(routeMap);
+
+  const asLatLon = (p) => {
+    if (!Array.isArray(p) || p.length < 2) return null;
+    const lat = Number(p[0]);
+    const lon = Number(p[1]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+    if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
+    return [lat, lon];
+  };
+
+  const routeCoords = (vis.route_shape || []).map(asLatLon).filter(Boolean);
+  if (routeCoords.length < 2) {
+    wrapper.querySelector('.bike-route-legend').textContent =
+      'Route found, but no valid route geometry was returned.';
+    return;
+  }
+
+  // Draw the route first as a subtle guide. BikePGH infrastructure is
+  // deliberately rendered AFTER the route so the original BikePGH colors
+  // are the visible top layer.
+  L.polyline(routeCoords, {
+    color: '#ffffff',
+    weight: 9,
+    opacity: 0.95,
+    lineCap: 'round',
+    lineJoin: 'round',
+  }).addTo(routeMap);
+  L.polyline(routeCoords, {
+    color: '#1d4ed8',
+    weight: 5,
+    opacity: 0.9,
+    lineCap: 'round',
+    lineJoin: 'round',
+  }).addTo(routeMap);
+
+  // Infrastructure is route-edge-specific: only BikePGH segments that
+  // Dijkstra actually selected are drawn, using the original layer colors.
+  const used = vis.used_infrastructure || {features: []};
+  const features = Array.isArray(used.features) ? used.features : [];
+  const routeLayer = L.featureGroup().addTo(routeMap);
+
+  for (const feature of features) {
+    const color = feature?.properties?.color || '#666';
+    const geom = feature?.geometry;
+    if (!geom || geom.type !== 'LineString' || !Array.isArray(geom.coordinates)) continue;
+
+    const pts = geom.coordinates
+      .filter(p => Array.isArray(p) && p.length >= 2)
+      .map(([lon, lat]) => [Number(lat), Number(lon)])
+      .filter(p => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+
+    if (pts.length < 2) continue;
+
+    L.polyline(pts, {
+      color,
+      weight: 6,
+      opacity: 0.98,
+      lineCap: 'round',
+      lineJoin: 'round',
+    }).addTo(routeLayer);
+  }
+
+  const start = vis.start
+    ? asLatLon([vis.start.lat, vis.start.lon])
+    : routeCoords[0];
+  const end = vis.end
+    ? asLatLon([vis.end.lat, vis.end.lon])
+    : routeCoords[routeCoords.length - 1];
+
+  if (start) {
+    L.marker(start, {
+      icon: L.divIcon({
+        className: 'bike-route-endpoint',
+        html: '<div class="bike-route-start-dot"></div>',
+        iconSize: [16, 16],
+        iconAnchor: [8, 8],
+      }),
+    }).addTo(routeMap).bindTooltip('Start', {permanent: false});
+  }
+  if (end) {
+    L.marker(end, {
+      icon: L.divIcon({
+        className: 'bike-route-endpoint',
+        html: '<div class="bike-route-end-dot"></div>',
+        iconSize: [16, 16],
+        iconAnchor: [8, 8],
+      }),
+    }).addTo(routeMap).bindTooltip('Destination', {permanent: false});
+  }
+
+  // Replace the old dense arrow markers with a few small, subtle chevrons
+  // spaced along the route. They indicate travel direction without looking
+  // like turn symbols on every noded graph edge.
+  function addDirectionChevron(position, bearing) {
+    return L.marker(position, {
+      icon: L.divIcon({
+        className: 'bike-route-direction-chevron',
+        html: '<span></span>',
+        iconSize: [18, 18],
+        iconAnchor: [9, 9],
+      }),
+      interactive: false,
+      zIndexOffset: 700,
+    }).addTo(routeMap);
+  }
+
+  // Inject a tiny one-time CSS rule for the chevrons/endpoints.
+  if (!document.getElementById('bike-route-chat-style')) {
+    const style = document.createElement('style');
+    style.id = 'bike-route-chat-style';
+    style.textContent = `
+      .bike-route-direction-chevron span {
+        display:block;
+        width:0;
+        height:0;
+        margin:2px;
+        border-top:7px solid transparent;
+        border-bottom:7px solid transparent;
+        border-left:11px solid #1d4ed8;
+        filter: drop-shadow(0 0 1px #fff);
+      }
+      .bike-route-start-dot,
+      .bike-route-end-dot {
+        width:14px;height:14px;border-radius:50%;
+        border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,.35);
+      }
+      .bike-route-start-dot { background:#16a34a; }
+      .bike-route-end-dot { background:#dc2626; }
+    `;
+    document.head.appendChild(style);
+  }
+
+  // Rotate a small number of chevrons using the route geometry. Use
+  // approximately evenly spaced positions and a local bearing so the
+  // direction is clear without clutter.
+  const arrowCount = Math.min(5, Math.max(2, Math.floor(routeCoords.length / 40)));
+  for (let k = 1; k <= arrowCount; k++) {
+    const idx = Math.max(1, Math.min(
+      routeCoords.length - 2,
+      Math.round(k * (routeCoords.length - 1) / (arrowCount + 1))
+    ));
+    const a = routeCoords[Math.max(0, idx - 2)];
+    const b = routeCoords[Math.min(routeCoords.length - 1, idx + 2)];
+    const bearing = bikeRouteBearing(a, b);
+    const marker = addDirectionChevron(routeCoords[idx], bearing);
+    const el = marker.getElement()?.querySelector('span');
+    if (el) el.style.transform = `rotate(${bearing}deg)`;
+  }
+
+  const bounds = L.latLngBounds(routeCoords);
+  if (start) bounds.extend(start);
+  if (end) bounds.extend(end);
+  if (bounds.isValid()) {
+    routeMap.fitBounds(bounds, { padding: [20, 20], maxZoom: 16 });
+  }
+
+  // Legend now contains only layer families actually used by the route.
+  const usedLabels = new Map();
+  for (const feature of features) {
+    const p = feature?.properties || {};
+    const label = p.label || p.layer_type;
+    if (label) usedLabels.set(label, p.color || '#666');
+  }
+  const legendEl = wrapper.querySelector('.bike-route-legend');
+  if (usedLabels.size) {
+    legendEl.innerHTML =
+      '<div class="bike-route-legend-title">BikePGH infrastructure used</div>' +
+      [...usedLabels.entries()]
+        .map(([label, color]) => `<span><i style="background:${escapeHtml(color)}"></i>${escapeHtml(label)}</span>`)
+        .join('');
+  } else {
+    legendEl.textContent = 'BikePGH route infrastructure';
+  }
+
+  setTimeout(() => {
+    routeMap.invalidateSize();
+    if (bounds.isValid()) {
+      routeMap.fitBounds(bounds, {padding: [20, 20], maxZoom: 16});
+    }
+  }, 100);
+}
+
 async function sendGeneralMessage() {
   const input = document.getElementById('general-chat-input');
   const msg = input.value.trim();
@@ -662,7 +892,10 @@ async function sendGeneralMessage() {
     });
     const data = await resp.json();
     typing.remove();
-    appendMsg('general', 'assistant', data.reply);
+    const assistantMsg = appendMsg('general', 'assistant', data.reply);
+    if (data.visualization && data.visualization.type === 'bike_route') {
+      renderBikeRouteInChat(assistantMsg, data.visualization);
+    }
     state.generalChatHistory = data.history;
   } catch (e) {
     typing.remove();
@@ -854,7 +1087,7 @@ async function refreshBikeLayer() {
   const token = ++layerState.fetchToken;
   setLayerLoading(true);
   try {
-    const resp = await fetch(`/api/layers/bike?${currentBboxQuery()}`);
+    const resp = await fetch(`/api/layers/bike?${currentBboxQuery()}&exclusive=true`);
     if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
     const data = await resp.json();
     if (token !== layerState.fetchToken) return;
@@ -862,7 +1095,7 @@ async function refreshBikeLayer() {
     clearActiveLayer();
     layerState.layerObj = L.geoJSON(data, {
       style: f => ({
-        color: BIKE_LAYER_COLORS[f.properties.layer_type] || '#4f8ef7',
+        color: f.properties?.color || BIKE_LAYER_COLORS[f.properties?.layer_type] || '#4f8ef7',
         weight: 5,
         opacity: 0.85,
       }),
@@ -921,6 +1154,99 @@ map.on('zoomend', () => {
   }
 });
 
+
+/* ── Bike route planner ───────────────────────────────────────────────── */
+let bikeRouteLayer = null;
+
+function clearBikeRoute() {
+  if (bikeRouteLayer) {
+    map.removeLayer(bikeRouteLayer);
+    bikeRouteLayer = null;
+  }
+  const panel = document.getElementById('bike-route-result');
+  if (panel) panel.innerHTML = '';
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, c => ({
+    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+  }[c]));
+}
+
+function BikeRouteControl() {
+  const Control = L.Control.extend({
+    options: { position: 'topleft' },
+    onAdd() {
+      const div = L.DomUtil.create('div', 'bike-route-control');
+      div.innerHTML = `
+        <div class="bike-route-title">🚲 Find a bikeable route</div>
+        <input id="bike-route-start" placeholder="Start: Mount Washington" />
+        <input id="bike-route-end" placeholder="End: Point State Park" />
+        <button id="bike-route-submit" type="button">Find Route</button>
+        <div id="bike-route-status" class="route-status"></div>
+        <div id="bike-route-result" class="route-status"></div>
+        <div class="route-attribution">Uses OpenStreetMap, Nominatim, and Valhalla. Endpoints can be place names or addresses.</div>
+      `;
+      L.DomEvent.disableClickPropagation(div);
+      L.DomEvent.disableScrollPropagation(div);
+      div.querySelector('#bike-route-submit').addEventListener('click', findBikeRoute);
+      return div;
+    }
+  });
+  return Control;
+}
+
+async function findBikeRoute() {
+  const start = document.getElementById('bike-route-start')?.value.trim();
+  const end = document.getElementById('bike-route-end')?.value.trim();
+  const status = document.getElementById('bike-route-status');
+  const result = document.getElementById('bike-route-result');
+  if (!start || !end) {
+    status.textContent = 'Enter both a start and destination.';
+    return;
+  }
+
+  clearBikeRoute();
+  status.textContent = 'Finding places and routing…';
+  try {
+    const resp = await fetch('/api/bike/route', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({start, end, city: 'Pittsburgh, PA'})
+    });
+    const raw = await resp.text();
+    let data = null;
+    try { data = raw ? JSON.parse(raw) : {}; } catch (_) {}
+    if (!resp.ok) throw new Error(data?.detail || raw || `HTTP ${resp.status}`);
+    const coords = data.route.shape || [];
+    if (coords.length < 2) throw new Error('No route geometry was returned.');
+
+    bikeRouteLayer = L.polyline(coords, {
+      color: '#2563eb',
+      weight: 7,
+      opacity: 0.9
+    }).addTo(map);
+
+    const bounds = bikeRouteLayer.getBounds();
+    if (bounds.isValid()) map.fitBounds(bounds.pad(0.12));
+
+    const summary = data.route.summary || {};
+    const facilities = data.route.local_bike_facilities || {};
+    const minutes = summary.time != null ? Math.round(Number(summary.time) / 60) : null;
+    result.innerHTML =
+      `<b>${escapeHtml(data.start.display_name)}</b> → <b>${escapeHtml(data.end.display_name)}</b><br>` +
+      `${summary.length != null ? Number(summary.length).toFixed(1) + ' mi' : ''}` +
+      `${minutes != null ? ` · ~${minutes} min` : ''}<br>` +
+      `Mapped BikePGH facility overlap: ${Number(facilities.facility_overlap_pct || 0).toFixed(0)}%` +
+      `${facilities.facility_segments?.length ? `<br>${facilities.facility_segments.map(x => escapeHtml(x.label)).join(', ')}` : ''}` +
+      `<br><small>${escapeHtml(data.note || '')}</small>`;
+    status.textContent = `Route found (${data.alternatives_considered || 1} route option(s) considered).`;
+  } catch (e) {
+    console.error(e);
+    status.textContent = `Route error: ${e.message || e}`;
+  }
+}
+
 const LayerControl = L.Control.extend({
   options: { position: 'topright' },
   onAdd() {
@@ -947,3 +1273,4 @@ const LayerControl = L.Control.extend({
 /* ── Boot ────────────────────────────────────────────────────────────── */
 loadHouses();
 map.addControl(new LayerControl());
+map.addControl(new BikeRouteControl());
