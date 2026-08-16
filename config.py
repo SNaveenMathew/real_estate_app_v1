@@ -13,6 +13,36 @@ class Settings(BaseSettings):
     llama_server_base_url: str = "http://127.0.0.1:8080/v1"
     llama_server_model: str = "DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M"          # swap for llama3.2, mistral, etc.
 
+    # ── LLM generation limits ───────────────────────────────────────────────
+    # Defensive bounds applied to every local LLM call (general agent, house
+    # agent, SQL Code Agent). Without these, a call that never emits a
+    # recognized stop token runs all the way out to the server's context
+    # limit (-c) instead of stopping on its own. This isn't hypothetical —
+    # some llama-server GGUF conversions (this Gemma-4-26B-A4B-it quant
+    # included; check the server's startup log for "removing '</s>' token
+    # from EOG list") drop the model's normal end-of-turn token from the
+    # server's own stop-token set, so generation only stops where WE tell it
+    # to. `stop` matches on the decoded text itself, so it works even when
+    # the server's internal EOG/token-id classification is wrong. `max_tokens`
+    # is the hard backstop for when the model never emits a stop sequence at
+    # all. Both matter beyond just the one slow reply: with a unified/shared
+    # KV cache (`kv_unified` in the server log), one runaway call can consume
+    # nearly the whole cache and starve every other concurrent chat, forcing
+    # them to reprocess their prompts from scratch too.
+    # Round 2 finding: 700 turned out too tight. Every single Code Agent call
+    # for a 3-table join with a 2-hazard average hit EXACTLY 700 decoded
+    # tokens, never less, across 7 retries in one turn — never a natural,
+    # earlier stop. So `stop` isn't reliably firing for this call shape (a
+    # bare, non-tool-calling text completion) on this model/template combo;
+    # `max_tokens` is doing 100% of the work of bounding it, which means it
+    # also has to be generous enough to let a legitimately complex query
+    # actually finish. Paired with a tightened "SQL only" instruction in
+    # agents/tools.py, which cuts down how much of that budget goes to
+    # non-SQL text in the first place.
+    agent_max_tokens: int = 2048        # ReAct agent turn: reasoning + tool call + final answer
+    code_agent_max_tokens: int = 1500   # SQL Code Agent: raised from 700 — see "Round 2" above
+    llm_request_timeout: float = 120.0  # seconds, per HTTP request to llama-server
+
     # ── Ollama ─────────────────────────────────────────────────────────
     # ollama_base_url: str = "http://localhost:11434"
     # ollama_model: str = "llama3.1:8b"
@@ -67,3 +97,10 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+# Shared stop sequences for every local LLM call — see the "LLM generation
+# limits" comment above. A plain constant, not a Settings field: these are
+# about how we talk to this specific local model/server combo, not something
+# that needs per-deployment .env overrides.
+LLM_STOP_SEQUENCES: list[str] = ["<end_of_turn>", "</s>"]
