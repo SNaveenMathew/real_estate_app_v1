@@ -440,11 +440,11 @@ If the locally ingested network does not contain a continuous path between the s
 
 These utility scripts are intended for debugging, data validation, and evaluation. Run them from the repository root.
 
-- `debug_bike_route.py`: Lightweight checks for BikePGH city-key normalization and routing helpers. Usage: `python debug_bike_route.py`.
-- `debug_flood_query.py`: Step-by-step SQL debugger for the flood-risk query; runs CTEs, prints table counts, join diagnostics, and sample rows to pinpoint where the chain breaks. Usage: `python debug_flood_query.py`.
-- `debug_nri_columns.py`: Inspect the NRI shapefile's DBF column names and show NULL counts for hazard columns in `nri_tracts`. Attempts to read the shapefile with GeoPandas when available. Usage: `python debug_nri_columns.py`.
-- `diagnose_msa.py`: Finds `X`-coded MSA rows that don't match `cbsa_counties`, suggests best CBSA candidates using a fuzzy normalizer, and can apply fixes with `--apply`. Usage: `python diagnose_msa.py [--apply]`.
-- `run_eval.py`: Agent evaluation pipeline (already described above). Runs the golden set examples, scores them, and writes timestamped reports to `eval/reports/`.
+ - `debug_bike_route.py`: Lightweight checks for BikePGH city-key normalization and routing helpers. Usage: `python debug_bike_route.py`.
+ - `debug_flood_query.py`: Step-by-step SQL debugger for the flood-risk query; runs CTEs, prints table counts, join diagnostics, and sample rows to pinpoint where the chain breaks. Usage: `python debug_flood_query.py`.
+ - `debug_nri_columns.py`: Inspect the NRI shapefile's DBF column names and show NULL counts for hazard columns in `nri_tracts`. Attempts to read the shapefile with GeoPandas when available. Usage: `python debug_nri_columns.py`.
+ - `diagnose_msa.py`: Finds `X`-coded MSA rows that don't match `cbsa_counties`, suggests best CBSA candidates using a fuzzy normalizer, and can apply fixes with `--apply`. Usage: `python diagnose_msa.py [--apply]`.
+ - `run_eval.py`: Agent evaluation pipeline (already described above). Runs the golden set examples, scores them, and writes timestamped reports to `eval/reports/`.
 
 If you prefer the previous standalone bike-routing README, its content has been folded here; `README_BIKE_ROUTING.md` was consolidated into this file.
 
