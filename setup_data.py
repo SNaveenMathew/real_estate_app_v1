@@ -7,6 +7,7 @@ Usage:
     python setup_data.py --only nri         # load only NRI
     python setup_data.py --only census      # load only Census
     python setup_data.py --only sold        # load only Sold
+    python setup_data.py --only bike        # load only Bike Lanes
     python setup_data.py --only crime       # load only Crime (data/crime/<city>/)
     python setup_data.py --resolve-tracts   # re-run tract FIPS resolution
 """
@@ -105,6 +106,21 @@ def run_all(only: str = None, resolve_tracts: bool = False,
             n = data_loader.load_crime()
             if n:
                 print(f"  ✓ {n:,} crime incidents loaded")
+
+    # ── Bike Lanes ─────────────────────────────────────────────────────────
+    if only in (None, "bike", "bike_lanes"):
+        banner("Bike Lanes / BikePGH-style route data")
+        bike_dir = settings.data_dir / "bike"
+        city_dirs = sorted(p for p in bike_dir.iterdir() if p.is_dir()) if bike_dir.exists() else []
+        if not city_dirs:
+            print("  ⚠ No city folders found in data/bike/")
+            print("  → Drop each city's BikePGH-style layers into data/bike/<city>/")
+            print("  → Example: data/bike/pittsburgh/Bike Lanes/Bike Lanes.shp")
+        else:
+            print(f"  Found city folders: {', '.join(p.name for p in city_dirs)}")
+            n = data_loader.load_bike_routes()
+            if n:
+                print(f"  ✓ {n:,} bike route features loaded")
 
     # ── Census (CBSA crosswalk must come first so MSA name→code matching works) ──
     if only in (None, "census"):
@@ -280,7 +296,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Load data into DuckDB")
     parser.add_argument(
         "--only",
-        choices=["nri", "census", "redfin", "sold", "crime", "geocode", "repair", "match"],
+        choices=["nri", "census", "redfin", "sold", "crime", "geocode", "repair", "match", "bike", "bike_lanes"],
         help=(
             "Load only a specific dataset, or run a maintenance task:\n"
             "  nri      — FEMA National Risk Index\n"
@@ -288,6 +304,7 @@ if __name__ == "__main__":
             "  redfin   — Redfin favorites CSVs\n"
             "  sold     — County sold-homes CSVs\n"
             "  crime    — Per-city crime data (data/crime/<city>/)\n"
+            "  bike     — Bike Lanes (BikePGH active transportation network)\n"
             "  geocode  — Retry pending geocodes for sold homes\n"
             "  repair   — Fix X-coded msa_codes in census_msa (no data reload needed)"
         ),

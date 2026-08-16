@@ -148,6 +148,27 @@ def _ensure_schema(conn: duckdb.DuckDBPyConnection):
         )
     """)
 
+    # bike_routes — standardized BikePGH-style line datasets across cities.
+    # Files live under data/bike/<city>/<layer folder>/*.shp and are loaded by
+    # services/data_loader.load_bike_routes(). Geometry is stored as GeoJSON plus
+    # a WGS-84 bounding box so viewport queries stay cheap and portable.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS bike_routes (
+            route_id        VARCHAR PRIMARY KEY,
+            city            VARCHAR,
+            layer_type      VARCHAR,
+            layer_label     VARCHAR,
+            color           VARCHAR,
+            source_file     VARCHAR,
+            min_lon         DOUBLE,
+            min_lat         DOUBLE,
+            max_lon         DOUBLE,
+            max_lat         DOUBLE,
+            geometry_json   VARCHAR,
+            properties_json VARCHAR
+        )
+    """)
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS census_tracts (
             tract_fips  VARCHAR PRIMARY KEY,
