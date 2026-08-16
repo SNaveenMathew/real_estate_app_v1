@@ -282,6 +282,35 @@ TABLES: dict[str, TableMeta] = {
         ],
     ),
 
+    "bike_routes": TableMeta(
+        name="bike_routes",
+        description=(
+            "Standardized BikePGH-style bicycle network data across cities. Each row is one "
+            "line feature from one of the seven recognized sublayers under data/bike/<city>/: "
+            "Bike Lanes, Bikeable Sidewalks, Cautionary Bike Route, On Street Bike Route, "
+            "Protected Bike Lanes, Sharrows, or Trails. Geometry is stored as GeoJSON in WGS-84 "
+            "and each feature has a viewport-friendly bounding box. This table powers the "
+            "'Bike Lanes' map layer and is also queryable for counts, coverage, cities, and "
+            "layer-specific summaries. For spatial display/filtering, use the bbox columns; "
+            "geometry_json is a serialized GeoJSON geometry and should not be parsed in SQL."
+        ),
+        setup_hint=(
+            "Drop BikePGH-style shapefiles into data/bike/<city>/<layer folder>/ and run: "
+            "python setup_data.py --only bike"
+        ),
+        hidden_columns=("geometry_json", "properties_json"),
+        column_notes=[
+            ColumnNote("city", "Normalized lower-case city folder name under data/bike/<city>/."),
+            ColumnNote("layer_type", "Stable key: bike_lanes, bikeable_sidewalks, cautionary_bike_route, "
+                                   "on_street_bike_route, protected_bike_lanes, sharrows, or trails."),
+            ColumnNote("layer_label", "Human-readable sublayer label shown in the map."),
+            ColumnNote("color", "Visualization color from the standard R implementation: steelblue, "
+                               "lightblue, red, lightgreen, darkgreen, orange, or pink."),
+            ColumnNote("min_lon/min_lat/max_lon/max_lat", "WGS-84 feature bounding box. Use these for SQL viewport/intersection filters."),
+            ColumnNote("properties_json", "Original shapefile attributes serialized as JSON. Prefer standard columns above for cross-city analysis."),
+        ],
+    ),
+
     "geocode_cache": TableMeta(
         name="geocode_cache",
         description="Internal address→lat/lon cache so re-running setup_data.py doesn't re-hit the geocoding API.",

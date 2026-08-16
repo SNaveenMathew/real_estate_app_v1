@@ -2,12 +2,16 @@
 LangChain tools shared by house agent and general agent.
 """
 import json
+import re
 import traceback
-from typing import Any
+from typing import Any, Optional
 
 import pandas as pd
 from langchain.tools import tool
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import SystemMessage, HumanMessage
 
+from config import settings
 import db.duckdb_store as store
 import db.vector_store as vs
 import db.schema_catalog as schema
@@ -179,6 +183,150 @@ def make_house_tools(house_id: str):
             estimate_price_with_code, get_nearby_sold_homes]
 
 
+_FORBIDDEN = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE|COPY|EXPORT|ATTACH|DETACH|INSTALL|LOAD|CALL|PRAGMA)\b",
+    re.I,
+)
+_TABLE_REF = re.compile(
+    r"\b(?:FROM|JOIN|UPDATE|INTO|TABLE)\s+(?:[A-Za-z_][A-Za-z0-9_]*\.)?([A-Za-z_][A-Za-z0-9_]*)",
+    re.I,
+)
+
+def _live_agent_schema() -> str:
+    # Reuse the same live-schema renderer exposed to General Chat. This keeps
+    # the sub-agent aligned with real column names and documented joins.
+    return schema.render_schema_for_agent()
+
+
+SYSTEM_PROMPT = """You are the shared SQL Code Agent in a real-estate analytics application.
+
+Your job is to generate ONE safe DuckDB SELECT statement for General Chat.
+General Chat is responsible for interpretation, multi-step planning, and the
+final user-facing answer. You are responsible for translating its analytical
+need into SQL against the live database schema below.
+
+Rules:
+1. Return SQL only. No markdown fences, no explanation, no prose.
+2. Only SELECT statements, or WITH ... SELECT statements, are allowed.
+3. Use only tables listed in the LIVE SCHEMA. Never invent tables or columns.
+4. Prefer the documented relationships and column notes over guessed joins.
+5. Honor table-specific default filters when the request is about valid/market data.
+6. Use explicit aliases and deterministic ORDER BY clauses where rankings are involved.
+7. Respect requested city/state/metro/time/price/risk filters exactly.
+8. For questions asking for a count, count the requested unit (incidents, houses,
+   routes, tracts, sales, etc.), not an unrelated join multiplication.
+9. For comparisons/rankings, return enough fields for General Chat to explain the
+   result, but keep the result set reasonably small with LIMIT when appropriate.
+10. If the request combines multiple datasets, use documented joins or CTEs.
+11. Do not parse serialized geometry/blobs in SQL when metadata says they are intended
+   for map rendering only.
+12. Never use SELECT * when a narrower projection can answer the request.
+13. If the request is ambiguous, prefer the interpretation explicitly stated in the
+   General Chat requirements/plan rather than inventing a new scope.
+
+The query must answer the stated analytical request directly; do not write a generic
+schema-inspection query unless General Chat explicitly asks for metadata.
+
+LIVE SCHEMA
+===========
+""" + _live_agent_schema()
+
+
+def _extract_content(resp) -> str:
+    content = resp.content
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        chunks = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                chunks.append(item.get("text", ""))
+            else:
+                chunks.append(str(item))
+        return "".join(chunks).strip()
+    return str(content).strip()
+
+
+def _clean_sql(raw: str) -> str:
+    sql = raw.strip()
+    sql = re.sub(r"^```(?:sql)?\s*", "", sql, flags=re.I)
+    sql = re.sub(r"\s*```$", "", sql)
+    if ";" in sql:
+        # One statement is required; reject multiple statements instead of trying
+        # to guess which one the model intended.
+        statements = [s.strip() for s in sql.split(";") if s.strip()]
+        if len(statements) != 1:
+            raise ValueError("Code agent returned multiple SQL statements.")
+        sql = statements[0]
+    return sql.strip()
+
+
+def validate_sql(sql: str) -> str:
+    if not sql:
+        raise ValueError("Code agent returned empty SQL.")
+    if _FORBIDDEN.search(sql):
+        raise ValueError("Only read-only SELECT SQL is allowed.")
+    if not re.match(r"^\s*(SELECT|WITH)\b", sql, flags=re.I):
+        raise ValueError("Generated SQL must begin with SELECT or WITH.")
+
+    refs = {m.group(1).lower() for m in _TABLE_REF.finditer(sql)}
+    allowed = set(schema.list_table_names(agent_visible_only=True))
+    unknown = refs - allowed
+    if unknown:
+        raise ValueError(f"Code agent referenced unknown table(s): {', '.join(sorted(unknown))}")
+    if not refs:
+        raise ValueError("Generated SQL does not reference a known agent-visible table.")
+    return sql
+
+
+_agent: Optional[ChatOpenAI] = None
+
+
+def get_code_agent() -> ChatOpenAI:
+    global _agent
+    if _agent is None:
+        _agent = ChatOpenAI(
+            base_url=settings.llama_server_base_url,
+            api_key="not-needed",
+            model=settings.llama_server_model,
+            temperature=0.0,
+        )
+    return _agent
+
+
+def generate_sql(request: str, requirements: str = "", plan: str = "") -> str:
+    """Generate and validate a SELECT from a request and optional General Chat plan."""
+    prompt_parts = [f"USER REQUEST:\n{request.strip()}"]
+    if requirements.strip():
+        prompt_parts.append(f"GENERAL CHAT REQUIREMENTS:\n{requirements.strip()}")
+    if plan.strip():
+        prompt_parts.append(f"GENERAL CHAT PLAN:\n{plan.strip()}")
+    prompt_parts.append("Generate the single best SQL query now.")
+
+    response = get_code_agent().invoke([
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(content="\n\n".join(prompt_parts)),
+    ])
+    sql = validate_sql(_clean_sql(_extract_content(response)))
+    return sql
+
+
+def run_code_query(request: str, requirements: str = "", plan: str = "") -> tuple[str, str]:
+    """Generate SQL with the code agent, execute it, and return (sql, result_text)."""
+    sql = generate_sql(request, requirements=requirements, plan=plan)
+    try:
+        df = store.query(sql)
+    except Exception as exc:
+        raise RuntimeError(f"Generated SQL failed: {exc}\nSQL: {sql}") from exc
+
+    if len(df) == 0:
+        diagnosis = schema.diagnose_empty_or_error(sql)
+        return sql, diagnosis or "Query returned 0 rows."
+
+    if len(df) > 50:
+        return sql, df.head(50).to_string(index=False) + f"\n... ({len(df)} total rows, showing 50)"
+    return sql, df.to_string(index=False)
+
 # ── General tools ────────────────────────────────────────────────────────────
 
 @tool
@@ -196,27 +344,25 @@ def check_data_availability(_: str = "") -> str:
 
 
 @tool
-def query_database(sql: str) -> str:
+def query_database(request: str, requirements: str = "", plan: str = "") -> str:
     """
-    Execute a SELECT query against the real estate DuckDB database.
-    Call get_database_schema first if you haven't already this conversation —
-    it documents live columns, which ones are unreliable/NULL-heavy, and the
-    exact join expressions for tables that don't share an obvious key.
-    Do NOT guess or fabricate results if the query returns empty — report it.
+    Use the shared SQL Code Agent to answer analytical questions from any
+    agent-visible DuckDB dataset.
+
+    Pass the user's analytical request plus any explicit General Chat
+    requirements or multi-step plan. The Code Agent uses the live schema
+    metadata and documented relationships to generate one read-only SELECT,
+    executes it, and returns both the generated SQL and live result so General
+    Chat can inspect the evidence and continue thinking/planning before it
+    answers the user.
     """
-    sql_upper = sql.upper().strip()
-    if any(kw in sql_upper for kw in ["INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER"]):
-        return "ERROR: Only SELECT queries are allowed."
     try:
-        df = store.query(sql)
-        if len(df) == 0:
-            diagnosis = schema.diagnose_empty_or_error(sql)
-            return diagnosis if diagnosis else "Query returned 0 rows. The data may not match your filter criteria."
-        if len(df) > 50:
-            return df.head(50).to_string(index=False) + f"\n... ({len(df)} total rows, showing 50)"
-        return df.to_string(index=False)
-    except Exception as e:
-        return f"SQL Error: {e}\nCheck column names and joins with get_database_schema."
+        sql, result = run_code_query(
+            request, requirements=requirements, plan=plan
+        )
+    except Exception as exc:
+        return f"Code Agent error: {exc}"
+    return f"[GENERATED SQL]\n{sql}\n[RESULT]\n{result}"
 
 
 @tool
@@ -242,6 +388,8 @@ def get_database_schema(_: str = "") -> str:
     already queried successfully earlier in this conversation.
     """
     return schema.render_schema_for_agent()
+
+
 
 
 GENERAL_TOOLS = [
