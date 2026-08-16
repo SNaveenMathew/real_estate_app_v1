@@ -4,7 +4,7 @@ portfolio-level analysis across all houses, etc.
 """
 from typing import Annotated, Sequence, TypedDict, Literal
 
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
@@ -48,6 +48,25 @@ analytical data question.
 
 Formatting: dollar amounts as $1,234,567; scores/percentages to one decimal
 place; use a markdown table when comparing more than a couple of rows.
+
+BIKING / BIKE-ROUTING PRESENTATION RULES:
+1. For a question such as "is there a safe way to bike from A to B?" determine
+   whether the locally loaded BikePGH network documents a continuous bikeable
+   path. Treat "safe" as "supported by documented BikePGH bicycle
+   infrastructure"; do NOT claim a safety guarantee. The final answer MUST
+   start with exactly one of: "Yes", "No", or "No data available for <city or MSA>
+   to answer this question." If there is no BikePGH data, use the third form.
+2. For a request to FIND/SHOW/ROUTE a bike path between two endpoints, call
+   find_bike_route. Endpoints may be neighborhoods, landmarks, parks,
+   addresses, or coordinates; exact map clicks are not required.
+3. If find_bike_route returns a successful route, the final response should be
+   a concise text summary and the application will render a route map. Do not
+   claim that the route uses infrastructure not present in the tool result.
+4. If find_bike_route returns kind="no_route", return a text response explaining
+   that no continuous path exists using the locally ingested BikePGH network.
+   Do NOT request an external routing service or invent a road route.
+5. If find_bike_route returns kind="no_data", return exactly:
+   "No data available for <city or MSA> to answer this question."
 """
 
 
@@ -123,7 +142,52 @@ def invalidate_general_agent():
     _general_agent = None
 
 
-def run_general_chat(message: str, history: list[dict] = None) -> tuple[str, list[dict]]:
+def _extract_bike_visualization(messages: list[BaseMessage]):
+    """Extract the latest successful BikePGH route tool result for the UI."""
+    import json
+    for message in reversed(messages):
+        if not isinstance(message, ToolMessage):
+            continue
+        content = message.content
+        if not isinstance(content, str):
+            continue
+        try:
+            payload = json.loads(content)
+        except Exception:
+            continue
+        if payload.get("status") == "ok" and payload.get("presentation") == "route_map":
+            shape = payload.get("route_shape") or []
+            bbox = payload.get("bbox")
+            if shape and bbox:
+                return {
+                    "type": "bike_route",
+                    "city": payload.get("city") or "Pittsburgh, PA",
+                    "start": payload.get("start"),
+                    "end": payload.get("end"),
+                    "route_shape": shape,
+                    "bbox": bbox,
+                    "distance_miles": payload.get("distance_miles"),
+                    "duration_minutes": payload.get("duration_minutes"),
+                    "turn_by_turn": payload.get("turn_by_turn") or [],
+                    "bike_infrastructure_near_route": payload.get("bike_infrastructure_near_route") or [],
+                    "used_infrastructure": payload.get("used_infrastructure") or {"type": "FeatureCollection", "features": []},
+                    "provider": payload.get("provider"),
+                    "attribution": payload.get("attribution"),
+                }
+    return None
+
+
+def run_general_chat(
+    message: str,
+    history: list[dict] = None,
+    include_metadata: bool = False,
+):
+    """Run General Chat.
+
+    By default preserves the original two-value API: (reply, updated_history).
+    Callers that need presentation metadata can request it with
+    ``include_metadata=True``; this keeps one canonical chat entry point.
+    """
     agent = get_general_agent()
 
     lc_messages: list[BaseMessage] = []
@@ -140,7 +204,6 @@ def run_general_chat(message: str, history: list[dict] = None) -> tuple[str, lis
     ai_messages = [m for m in all_messages if isinstance(m, AIMessage)]
     raw_reply = ai_messages[-1].content if ai_messages else "I couldn't generate a response."
 
-    # ── Validate: replace hallucinated data tables with honest errors ─────
     from agents.response_validator import validate_response
     reply = validate_response(raw_reply, all_messages, strict=True)
 
@@ -154,5 +217,7 @@ def run_general_chat(message: str, history: list[dict] = None) -> tuple[str, lis
         {"role": "user", "content": message},
         {"role": "assistant", "content": reply},
     ]
-    return reply, updated_history
 
+    if include_metadata:
+        return reply, updated_history, _extract_bike_visualization(all_messages)
+    return reply, updated_history
