@@ -15,6 +15,9 @@ from config import settings, LLM_STOP_SEQUENCES
 import db.duckdb_store as store
 import db.vector_store as vs
 import db.schema_catalog as schema
+import services.bike_routing as bike_routing
+import asyncio
+import threading
 
 
 # ── House-specific tools ─────────────────────────────────────────────────────
@@ -379,7 +382,94 @@ def query_database(request: str, requirements: str = "", plan: str = "") -> str:
     return f"[GENERATED SQL]\n{sql}\n[RESULT]\n{result}"
 
 
+def _run_async_safely(async_fn, *args, **kwargs):
+    """Run an async function from sync code or from an active event loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(async_fn(*args, **kwargs))
+
+    result = []
+    error = []
+
+    def runner():
+        try:
+            result.append(asyncio.run(async_fn(*args, **kwargs)))
+        except BaseException as exc:
+            error.append(exc)
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    thread.join()
+
+    if error:
+        raise error[0]
+    if not result:
+        raise RuntimeError("Async worker returned no result.")
+    return result[0]
+
+
 @tool
+def find_bike_route(start: str, end: str, city: str = "Pittsburgh, PA") -> str:
+    """Find a bicycle route between two places. Places may be neighborhoods,
+    landmarks, parks, addresses, or coordinates; exact map points are not required.
+    Use for any bicycle-routing request.
+    """
+    try:
+        result = _run_async_safely(
+            bike_routing.route_bike,
+            start.strip(),
+            end.strip(),
+            city=(city or "Pittsburgh, PA").strip(),
+        )
+        summary = result.get("route", {}).get("summary", {})
+        facilities = result.get("route", {}).get("local_bike_facilities", {})
+        instructions = []
+        for maneuver in result.get("route", {}).get("maneuvers", [])[:12]:
+            instruction = maneuver.get("instruction") or maneuver.get("verbal_pre_transition_instruction")
+            if instruction:
+                instructions.append(instruction)
+        return json.dumps({
+            "status": "ok",
+            "presentation": "route_map",
+            "start": result.get("start"),
+            "end": result.get("end"),
+            "city": result.get("city") or city or "Pittsburgh, PA",
+            "provider": result.get("provider"),
+            "distance_miles": round(float(summary.get("length", 0) or 0), 2),
+            "duration_minutes": round(float(summary.get("time", 0) or 0) / 60.0, 1),
+            "bike_facility_overlap_percent": facilities.get("facility_overlap_pct", 0.0),
+            "bike_infrastructure_near_route": facilities.get("facility_segments", []),
+            "used_infrastructure": result.get("route", {}).get("used_infrastructure") or {"type": "FeatureCollection", "features": []},
+            "alternatives_considered": result.get("alternatives_considered", 1),
+            "turn_by_turn": instructions,
+            "route_shape": result.get("route", {}).get("shape", []),
+            "bbox": result.get("route", {}).get("bbox"),
+            "attribution": result.get("attribution"),
+            "note": result.get("note"),
+        }, indent=2)
+    except ValueError as exc:
+        message = str(exc)
+        lower = message.lower()
+        if "no bikepgh infrastructure data is loaded" in lower or "no routable line geometry" in lower:
+            kind = "no_data"
+        elif "no continuous path exists" in lower or "unable to split" in lower:
+            kind = "no_route"
+        else:
+            kind = "input"
+        return json.dumps({"status": "error", "kind": kind, "message": message,
+                           "start": start, "end": end, "city": city or "Pittsburgh, PA"})
+    except Exception as exc:
+        return json.dumps({
+            "status": "error",
+            "kind": "routing_service",
+            "message": str(exc),
+            "start": start,
+            "end": end,
+            "city": city or "Pittsburgh, PA",
+        })
+
+
 def search_all_house_descriptions(query: str) -> str:
     """Search all house descriptions stored in the vector knowledge base."""
     docs = vs.search_all(query, n_results=6)
@@ -410,5 +500,6 @@ GENERAL_TOOLS = [
     check_data_availability,
     get_database_schema,
     query_database,
+    find_bike_route,
     search_all_house_descriptions,
 ]
