@@ -11,7 +11,7 @@ from langchain.tools import tool
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from config import settings
+from config import settings, LLM_STOP_SEQUENCES
 import db.duckdb_store as store
 import db.vector_store as vs
 import db.schema_catalog as schema
@@ -206,7 +206,10 @@ final user-facing answer. You are responsible for translating its analytical
 need into SQL against the live database schema below.
 
 Rules:
-1. Return SQL only. No markdown fences, no explanation, no prose.
+1. Output ONLY the SQL statement itself — nothing before it, nothing after it.
+   No markdown fences, no explanation, no restating the request, no comments
+   about your reasoning or approach. If you notice yourself writing a
+   sentence that is not part of the SQL statement, stop and remove it.
 2. Only SELECT statements, or WITH ... SELECT statements, are allowed.
 3. Use only tables listed in the LIVE SCHEMA. Never invent tables or columns.
 4. Prefer the documented relationships and column notes over guessed joins.
@@ -290,6 +293,17 @@ def get_code_agent() -> ChatOpenAI:
             api_key="not-needed",
             model=settings.llama_server_model,
             temperature=0.0,
+            # Tight ceiling on purpose: this agent's whole job is one bare SQL
+            # statement (see SYSTEM_PROMPT above), so a well-formed reply is at
+            # most a couple hundred tokens. Without a cap, a call that doesn't
+            # hit a recognized stop token keeps decoding indefinitely instead
+            # of returning — this is what actually happened (see config.py's
+            # "LLM generation limits" comment): one such call ran to 24k+
+            # tokens and ~5.5 minutes before being cut off at the server's
+            # context limit.
+            max_tokens=settings.code_agent_max_tokens,
+            timeout=settings.llm_request_timeout,
+            stop=LLM_STOP_SEQUENCES,
         )
     return _agent
 

@@ -14,7 +14,7 @@ from langchain_core.tools import BaseTool
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 
-from config import settings
+from config import settings, LLM_STOP_SEQUENCES
 from agents.tools import make_house_tools
 
 
@@ -74,7 +74,10 @@ def build_house_agent(house_id: str):
         base_url=settings.llama_server_base_url,
         api_key="not-needed",  # llama-server doesn't check the key, but LangChain requires a non-empty string
         model=settings.llama_server_model,
-        temperature=0.0
+        temperature=0.0,
+        max_tokens=settings.agent_max_tokens,  # hard backstop against runaway generation
+        timeout=settings.llm_request_timeout,
+        stop=LLM_STOP_SEQUENCES,               # text-level stop, robust to a broken EOG token list
     ).bind_tools(tools)
     # For 'ollama run --model llama3.1:8b'
     # llm = ChatOllama(
