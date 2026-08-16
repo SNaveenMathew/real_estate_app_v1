@@ -398,6 +398,55 @@ python run_eval.py                 # full run against your configured model
 python run_eval.py --list          # see what's in the golden set
 python run_eval.py --tags nri,sold_homes    # run a subset
 python run_eval.py --mock          # smoke-test the harness itself, no model server needed
+
+**Bike routing**
+
+The app exposes `POST /api/bike/route` with:
+
+```
+{"start":"Mount Washington","end":"Point State Park","city":"Pittsburgh, PA"}
+```
+
+Endpoints are place strings, not required map clicks. The service geocodes them with Nominatim, then routes exclusively on the locally ingested BikePGH linework stored in the `bike_routes` DuckDB table. No external road-routing engine is used.
+
+### Endpoint precision
+
+- Exact coordinates, street addresses, named places, landmarks, or neighborhoods with `city` context are supported.
+- For Pittsburgh, ambiguous place names are auto-appended with `Pittsburgh, PA` when appropriate. Geocoding results are cached in `geocode_cache`.
+
+### BikePGH layers used for routing
+
+- Bike Lanes
+- Bikeable Sidewalks
+- Cautionary Bike Route
+- On Street Bike Route
+- Protected Bike Lanes
+- Sharrows
+- Trails
+
+If the locally ingested network does not contain a continuous path between the snapped endpoints, the request returns **no route** rather than falling back to OSM street routing.
+
+### Free/open services
+
+- Nominatim / OpenStreetMap is used only for endpoint place-name geocoding.
+- Shapely + DuckDB build and query the local BikePGH graph.
+
+### Route semantics
+
+- Distance is computed from the local BikePGH graph. Travel time is an estimate.
+- Turn instructions refer to mapped BikePGH infrastructure rather than inventing street names.
+
+**Developer scripts**
+
+These utility scripts are intended for debugging, data validation, and evaluation. Run them from the repository root.
+
+- `debug_bike_route.py`: Lightweight checks for BikePGH city-key normalization and routing helpers. Usage: `python debug_bike_route.py`.
+- `debug_flood_query.py`: Step-by-step SQL debugger for the flood-risk query; runs CTEs, prints table counts, join diagnostics, and sample rows to pinpoint where the chain breaks. Usage: `python debug_flood_query.py`.
+- `debug_nri_columns.py`: Inspect the NRI shapefile's DBF column names and show NULL counts for hazard columns in `nri_tracts`. Attempts to read the shapefile with GeoPandas when available. Usage: `python debug_nri_columns.py`.
+- `diagnose_msa.py`: Finds `X`-coded MSA rows that don't match `cbsa_counties`, suggests best CBSA candidates using a fuzzy normalizer, and can apply fixes with `--apply`. Usage: `python diagnose_msa.py [--apply]`.
+- `run_eval.py`: Agent evaluation pipeline (already described above). Runs the golden set examples, scores them, and writes timestamped reports to `eval/reports/`.
+
+If you prefer the previous standalone bike-routing README, its content has been folded here; `README_BIKE_ROUTING.md` was consolidated into this file.
 ```
 
 Each golden example is one of:
