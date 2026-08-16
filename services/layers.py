@@ -172,15 +172,95 @@ def get_nri_choropleth(west: float, south: float, east: float, north: float,
 
 MAX_BIKE_FEATURES = 5000
 
+# Ground-truth display hierarchy for overlapping BikePGH classifications.
+# This does NOT change the raw bike_routes data or routing graph. It only
+# prevents the same physical line from being painted as several categories
+# in a visualization. More-specific facility types win over generic route
+# designations.
+BIKE_DISPLAY_PRIORITY = {
+    "protected_bike_lanes": 100,
+    "bike_lanes": 90,
+    "trails": 80,
+    "bikeable_sidewalks": 70,
+    "sharrows": 60,
+    "cautionary_bike_route": 50,
+    "on_street_bike_route": 40,
+}
+
+
+def _canonicalize_bike_features(features: list[dict]) -> list[dict]:
+    """Remove purely visual category overlap without changing raw data.
+
+    Ground-truth BikePGH contains genuine duplicate/overlapping classifications
+    such as On Street Bike Route + Bike Lane and On Street Bike Route + Sharrows.
+    For visualization, retain the more specific category on the overlapping
+    geometry and subtract it from the lower-priority category.
+    """
+    try:
+        from shapely.geometry import shape, mapping
+        from shapely.ops import unary_union
+    except Exception:
+        return features
+
+    grouped = []
+    for feature in features:
+        try:
+            geom = shape(feature["geometry"])
+        except Exception:
+            continue
+        if geom.is_empty:
+            continue
+        props = feature.get("properties") or {}
+        layer_type = props.get("layer_type") or ""
+        priority = BIKE_DISPLAY_PRIORITY.get(layer_type, 0)
+        grouped.append((priority, layer_type, geom, feature))
+
+    # Process highest priority first. Lower-priority geometries have the already
+    # claimed portions removed, so one physical segment gets one displayed label.
+    claimed = None
+    output = []
+    for priority, layer_type, geom, feature in sorted(
+        grouped, key=lambda x: (-x[0], x[1], str((x[3].get("properties") or {}).get("route_id", "")))
+    ):
+        display_geom = geom
+        if claimed is not None and not claimed.is_empty:
+            try:
+                display_geom = geom.difference(claimed)
+            except Exception:
+                display_geom = geom
+
+        if display_geom is None or display_geom.is_empty:
+            continue
+
+        prop = dict(feature.get("properties") or {})
+        prop["display_priority"] = priority
+
+        try:
+            feature = {
+                "type": "Feature",
+                "geometry": mapping(display_geom),
+                "properties": prop,
+            }
+        except Exception:
+            feature = dict(feature)
+            feature["properties"] = prop
+
+        output.append(feature)
+        claimed = display_geom if claimed is None else unary_union([claimed, display_geom])
+
+    return output
+
 
 def get_bike_routes(west: float, south: float, east: float, north: float,
                     city: Optional[str] = None,
-                    max_features: int = MAX_BIKE_FEATURES) -> dict:
+                    max_features: int = MAX_BIKE_FEATURES,
+                    exclusive: bool = False) -> dict:
     """Return BikePGH-style line features intersecting the viewport as GeoJSON.
 
-    The loader stores a WGS-84 bbox for every feature. The initial SQL filter
-    therefore avoids deserializing geometries outside the viewport; the client
-    receives only the seven standardized bike sublayers.
+    The raw dataset preserves every BikePGH source classification. When
+    ``exclusive=True``, the response is visualization-oriented: overlapping
+    classifications are resolved using ``BIKE_DISPLAY_PRIORITY`` so the same
+    physical segment is rendered with one canonical label/color.
     """
     params = [east, west, north, south]
     city_clause = ""
@@ -218,9 +298,13 @@ def get_bike_routes(west: float, south: float, east: float, north: float,
         })
         features.append({"type": "Feature", "geometry": geometry, "properties": props})
 
+    if exclusive:
+        features = _canonicalize_bike_features(features)
+
     return {
         "type": "FeatureCollection",
         "features": features,
         "feature_count": len(features),
         "truncated": len(df) >= max_features,
+        "exclusive_display": exclusive,
     }
