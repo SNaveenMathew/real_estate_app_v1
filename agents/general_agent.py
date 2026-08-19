@@ -13,6 +13,15 @@ from langgraph.prebuilt import ToolNode
 from config import settings, LLM_STOP_SEQUENCES
 from agents.tools import GENERAL_TOOLS
 import db.schema_catalog as schema
+from observability import (
+    elapsed,
+    get_trace_id,
+    mark_span_error,
+    set_span_input,
+    set_span_output,
+    start_general_chat,
+    trace_span,
+)
 
 
 SYSTEM_PROMPT = """You are a real estate and risk analyst assistant backed by a local DuckDB database.
@@ -103,12 +112,77 @@ def build_general_agent():
 
     def agent_node(state: AgentState):
         # Inject live data availability into every system message so the model
-        # always knows what's loaded without needing to call the tool first
+        # always knows what's loaded without needing to call the tool first.
         availability = _get_data_availability_context()
         system = SystemMessage(content=f"{availability}\n{SYSTEM_PROMPT}")
         messages = [system] + list(state["messages"])
-        response = llm.invoke(messages)
-        return {"messages": [response]}
+
+        with trace_span(
+            "general_chat.llm",
+            attributes={
+                "openinference.span.kind": "LLM",
+                "llm.model_name": settings.llama_server_model,
+                "llm.provider": "llama-server",
+            },
+        ) as span:
+            set_span_input(
+                span,
+                [m.model_dump() if hasattr(m, "model_dump") else str(m) for m in messages],
+                mime_type="application/json",
+            )
+            try:
+                response = llm.invoke(messages)
+                set_span_output(
+                    span,
+                    response.content if hasattr(response, "content") else response,
+                )
+                tool_calls = getattr(response, "tool_calls", None) or []
+                if span is not None:
+                    span.set_attribute("llm.tool_call_count", len(tool_calls))
+                usage = getattr(response, "usage_metadata", None) or {}
+                if isinstance(usage, dict):
+                    for key, attr in (
+                        ("input_tokens", "llm.token_count.prompt"),
+                        ("output_tokens", "llm.token_count.completion"),
+                        ("total_tokens", "llm.token_count.total"),
+                    ):
+                        if usage.get(key) is not None and span is not None:
+                            span.set_attribute(attr, int(usage[key]))
+                return {"messages": [response]}
+            except Exception as exc:
+                mark_span_error(span, exc)
+                raise
+
+    def tools_node(state: AgentState):
+        last = state["messages"][-1]
+        tool_calls = getattr(last, "tool_calls", None) or []
+        with trace_span(
+            "general_chat.tools",
+            attributes={
+                "openinference.span.kind": "TOOL",
+                "tool.call_count": len(tool_calls),
+                "tool.names": ",".join(
+                    str(call.get("name", "unknown")) for call in tool_calls
+                ),
+            },
+        ) as span:
+            set_span_input(span, tool_calls, mime_type="application/json")
+            try:
+                result = tool_node.invoke(state)
+                outputs = [
+                    {
+                        "tool": getattr(message, "name", None)
+                        or getattr(message, "tool_call_id", None),
+                        "content": getattr(message, "content", ""),
+                    }
+                    for message in result.get("messages", [])
+                    if isinstance(message, ToolMessage)
+                ]
+                set_span_output(span, outputs, mime_type="application/json")
+                return result
+            except Exception as exc:
+                mark_span_error(span, exc)
+                raise
 
     def router(state: AgentState) -> Literal["tools", "end"]:
         last = state["messages"][-1]
@@ -118,7 +192,7 @@ def build_general_agent():
 
     graph = StateGraph(AgentState)
     graph.add_node("agent", agent_node)
-    graph.add_node("tools", tool_node)
+    graph.add_node("tools", tools_node)
     graph.set_entry_point("agent")
     graph.add_conditional_edges("agent", router, {"tools": "tools", "end": END})
     graph.add_edge("tools", "agent")
@@ -181,43 +255,100 @@ def run_general_chat(
     message: str,
     history: list[dict] = None,
     include_metadata: bool = False,
+    session_id: str | None = None,
 ):
-    """Run General Chat.
+    """Run General Chat and emit one Phoenix trace per answer."""
+    started_at = __import__("time").perf_counter()
+    root_context, root_span, trace_id, trace_url = start_general_chat(
+        message, session_id, len(history or [])
+    )
+    try:
+        agent = get_general_agent()
 
-    By default preserves the original two-value API: (reply, updated_history).
-    Callers that need presentation metadata can request it with
-    ``include_metadata=True``; this keeps one canonical chat entry point.
-    """
-    agent = get_general_agent()
+        lc_messages: list[BaseMessage] = []
+        for h in (history or []):
+            if h["role"] == "user":
+                lc_messages.append(HumanMessage(content=h["content"]))
+            else:
+                lc_messages.append(AIMessage(content=h["content"]))
+        lc_messages.append(HumanMessage(content=message))
 
-    lc_messages: list[BaseMessage] = []
-    for h in (history or []):
-        if h["role"] == "user":
-            lc_messages.append(HumanMessage(content=h["content"]))
-        else:
-            lc_messages.append(AIMessage(content=h["content"]))
-    lc_messages.append(HumanMessage(content=message))
+        with trace_span(
+            "general_chat.agent",
+            attributes={
+                "openinference.span.kind": "AGENT",
+                "general_chat.history_length": len(history or []),
+            },
+        ) as agent_span:
+            set_span_input(agent_span, {"message": message, "history": history or []}, mime_type="application/json")
+            try:
+                result = agent.invoke({"messages": lc_messages})
+                all_messages = list(result["messages"])
+                set_span_output(agent_span, {"message_count": len(all_messages)}, mime_type="application/json")
+            except Exception as exc:
+                mark_span_error(agent_span, exc)
+                raise
 
-    result = agent.invoke({"messages": lc_messages})
-    all_messages = list(result["messages"])
+        ai_messages = [m for m in all_messages if isinstance(m, AIMessage)]
+        tool_call_count = sum(len(getattr(m, "tool_calls", None) or []) for m in ai_messages)
+        raw_reply = ai_messages[-1].content if ai_messages else "I couldn't generate a response."
 
-    ai_messages = [m for m in all_messages if isinstance(m, AIMessage)]
-    raw_reply = ai_messages[-1].content if ai_messages else "I couldn't generate a response."
+        from agents.response_validator import validate_response
+        with trace_span(
+            "general_chat.response_validation",
+            attributes={"openinference.span.kind": "CHAIN"},
+        ) as validation_span:
+            set_span_input(validation_span, raw_reply)
+            try:
+                reply = validate_response(raw_reply, all_messages, strict=True)
+                set_span_output(validation_span, reply)
+            except Exception as exc:
+                mark_span_error(validation_span, exc)
+                raise
 
-    from agents.response_validator import validate_response
-    reply = validate_response(raw_reply, all_messages, strict=True)
+        validation_changed = reply != raw_reply
+        if validation_changed:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Hallucination detected and blocked in general agent response."
+            )
 
-    if reply != raw_reply:
-        import logging
-        logging.getLogger(__name__).warning(
-            "Hallucination detected and blocked in general agent response."
+        updated_history = (history or []) + [
+            {"role": "user", "content": message},
+            {
+                "role": "assistant",
+                "content": reply,
+                "trace_id": trace_id,
+                "trace_url": trace_url,
+            },
+        ]
+
+        if root_span is not None:
+            root_span.set_attribute("general_chat.llm_call_count", len(ai_messages))
+            root_span.set_attribute("general_chat.tool_call_count", tool_call_count)
+            root_span.set_attribute("general_chat.validation_changed", validation_changed)
+            root_span.set_attribute("general_chat.reply_length", len(reply))
+            set_span_output(root_span, reply)
+
+        from observability import record_general_chat_success
+        record_general_chat_success(
+            latency_seconds=elapsed(started_at),
+            llm_calls=len(ai_messages),
+            tool_calls=tool_call_count,
+            reply_chars=len(reply),
+            validation_changed=validation_changed,
         )
 
-    updated_history = (history or []) + [
-        {"role": "user", "content": message},
-        {"role": "assistant", "content": reply},
-    ]
-
-    if include_metadata:
-        return reply, updated_history, _extract_bike_visualization(all_messages)
-    return reply, updated_history
+        if include_metadata:
+            return reply, updated_history, _extract_bike_visualization(all_messages), {
+                "trace_id": trace_id,
+                "trace_url": trace_url,
+            }
+        return reply, updated_history
+    except Exception as exc:
+        mark_span_error(root_span, exc)
+        from observability import record_general_chat_error
+        record_general_chat_error(elapsed(started_at))
+        raise
+    finally:
+        root_context.__exit__(None, None, None)
