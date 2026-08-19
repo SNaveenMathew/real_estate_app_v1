@@ -7,45 +7,55 @@ A local, AI-powered map app for analyzing houses with FEMA National Risk Index d
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Browser (Leaflet Map + Chat UI)                            │
-│   └─ Markers per house (click → sidebar)                    │
-│   └─ Map Layer toggle: None / Crime / NRI                   │
-│   └─ House Chat  (per-property, LangGraph ReAct agent)      │
-│   └─ General Chat (cross-city, LangGraph ReAct agent)       │
-└──────────────────────┬──────────────────────────────────────┘
-                       │ HTTP (FastAPI)
-┌──────────────────────▼──────────────────────────────────────┐
-│  FastAPI  (main.py)                                         │
-│   ├─ /api/houses      GeoJSON of all houses                 │
-│   ├─ /api/layers/crime      Severity-weighted heatmap grid   │
-│   ├─ /api/layers/nri        NRI tract choropleth (GeoJSON)   │
-│   ├─ /api/house/{id}/chat   House-specific agent            │
-│   ├─ /api/chat              General agent                   │
-│   └─ /api/house/{id}/photo  Photo upload                    │
-└───────┬─────────────────────────────┬───────────────────────┘
-        │                             │
-┌───────▼────────┐         ┌──────────▼───────────┐
-│  DuckDB        │         │  ChromaDB (vector)   │
-│  ─ houses      │         │  ─ house_documents   │
-│  ─ nri_tracts  │         │    (descriptions,    │
-│  ─ census_*    │         │     photos, notes)   │
-│  ─ sold_homes  │         └──────────────────────┘
-│  ─ crime_incidents │
-│  ─ cbsa_*      │
-└───────┬────────┘         ┌──────────────────────┐
-        │                  │  llama.cpp / llama-server  │
-        └──────────────────│  ─ Gemma or other HF model  │
-               │  ─ (see LLM setup below)   │
-               └──────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│ Browser (Leaflet map + chat UI)                                            │
+│  ├─ House markers + sidebar                                                │
+│  ├─ Layer control: None / Crime / NRI / Bike Lanes                         │
+│  ├─ Bike route planner (start/end inputs with local BikePGH route map)     │
+│  ├─ House Chat (per-property LangGraph agent)                              │
+│  └─ General Chat (cross-city LangGraph agent)                              │
+└──────────────────────────────┬─────────────────────────────────────────────┘
+                               │ HTTP (FastAPI)
+┌──────────────────────────────▼─────────────────────────────────────────────┐
+│ main.py                                                                    │
+│  ├─ /api/houses                 GeoJSON of all houses                      │
+│  ├─ /api/layers/crime           Severity-weighted heatmap grid             │
+│  ├─ /api/layers/nri             NRI tract choropleth (GeoJSON)             │
+│  ├─ /api/layers/bike            BikePGH overlay for current viewport       │
+│  ├─ /api/bike/route             Local BikePGH routing endpoint             │
+│  ├─ /api/house/{id}/chat        House-specific agent                       │
+│  ├─ /api/chat                   General agent                              │
+│  ├─ /metrics                    Prometheus metrics endpoint                │
+│  └─ /api/house/{id}/photo       Photo upload                               │
+└───────────────┬───────────────────────────────────────┬────────────────────┘
+                │                                       │
+┌───────────────▼──────────────┐      ┌────────────────▼─────────────────┐
+│ DuckDB                       │      │ ChromaDB (vector)                │
+│  ├─ houses                   │      │  ├─ house_documents              │
+│  ├─ nri_tracts               │      │  │  descriptions/photos/notes    │
+│  ├─ census_*                 │      │  └─ search + retrieval           │
+│  ├─ sold_homes               │      └──────────────────────────────────┘
+│  ├─ crime_incidents          │
+│  ├─ bike_routes              │
+│  ├─ cbsa_*                   │
+│  └─ geocode_cache            │
+└───────────────┬──────────────┘
+                │
+┌───────────────▼──────────────────────────────────────────────────────┐
+│ LLM + observability                                                  │
+│  ├─ llama-server / Ollama (default: llama-server)                    │
+│  ├─ Phoenix OTEL tracing + UI (optional local collector)             │
+│  └─ Prometheus-compatible metrics                                    │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Prerequisites
 
-- Python 3.13+
+- Python 3.11+
 - `llama-server` (llama.cpp) installed and running, or Ollama as an alternative
+- Optional local Phoenix for tracing: `python -m phoenix.server.main serve`
 
 ---
 
@@ -64,13 +74,16 @@ real_estate_app/
 ├── db/
 ├── services/
 ├── static/
+├── observability.py
 └── data/
     ├── redfin/       ← drop Redfin CSV exports here
     ├── sold/         ← drop sold-homes CSV files here
-    ├── nri/          ← NRI_Table_CensusTracts.csv
-    ├── census/       ← DECENNIALPL2020_P1_tract.csv, _msa.csv, list1_2020.csv
+    ├── nri/          ← NRI_CensusTracts_Prod.shp or NRI_Table_CensusTracts.csv
+    ├── census/       ← DECENNIALPL2020.P1-Data.csv, DECENNIALPL2020.P1-2026-03-25T232220.csv, list1_2023.xlsx
     ├── crime/        ← one folder per city, e.g. crime/chicago/, crime/pittsburgh/
-    └── shapefiles/   ← TIGER/Line tract shapefiles (optional but recommended)
+    ├── bike/         ← BikePGH route layers by city
+    ├── shapefiles/   ← TIGER/Line tract shapefiles (optional but recommended)
+    └── chroma/       ← vector DB working files
 ```
 
 ### 2. Install dependencies
@@ -84,21 +97,31 @@ venv\Scripts\activate        # Windows
 pip install -r requirements.txt
 ```
 
-### 3. LLM: run `llama-server` (default)
-
-This repository is configured to use `llama-server` (from the `llama.cpp` project)
-as the primary local LLM endpoint. A small example command that works with the
-Gemma model (adjust paths/flags for your machine):
+### 3. Copy environment defaults
 
 ```bash
-# Example: run llama-server serving a HF model (Gemma) with quantized caches
+copy .env.example .env    # Windows
+# cp .env.example .env    # Mac/Linux
+```
+
+The project reads `.env` via `pydantic-settings` and includes defaults for:
+- local `llama-server` or Ollama-backed LLMs
+- model timeout and token caps
+- Phoenix observability endpoint
+- app host/port and default map center
+
+### 4. LLM: run `llama-server` (default)
+
+This repository is configured to use `llama-server` (from the `llama.cpp`
+project) as the primary local LLM endpoint. Example:
+
+```bash
 llama-server -hf DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M \
   -ngl 999 -c 28672 -fa on --cache-type-k q8_0 --cache-type-v q8_0
 ```
 
-If you prefer Ollama, it remains supported as an alternative — see the
-`config.py` and agent comments for how to switch. For Ollama, you would
-pull and run:
+If you prefer Ollama, it remains supported as an alternative. Update the relevant
+settings in `.env` / `config.py` and run:
 
 ```bash
 ollama pull llama3.1:8b
@@ -106,18 +129,8 @@ ollama pull nomic-embed-text
 ollama serve
 ```
 
-Note: the project is configured to use Ollama's `nomic-embed-text` for embeddings by
-default (see `.env.example`). If you run a pure `llama-server` stack, either run
-Ollama alongside it for embeddings or update `db/vector_store.py` to use a
-different embedding provider.
-
-> **Lower VRAM?** For `llama-server` use a smaller HF model or reduce cache/memory flags.
-
-```bash
-copy .env.example .env    # Windows
-# cp .env.example .env    # Mac/Linux
-# Edit .env if needed (defaults work for local llama-server; Ollama optional)
-```
+> The app defaults to `nomic-embed-text` for embeddings, even when using a
+> separate local LLM server stack.
 
 ### 5. Place your data files
 
@@ -147,8 +160,8 @@ Open **http://localhost:8000** in your browser.
 
 1. Go to Redfin → My Redfin → Favorites (or Saved Searches)
 2. Export to CSV
-3. The app expects columns including `lat`/`lon`, `address`, `city`, `state`, `zip`, `price`, `beds`, `baths`, `square feet`, `status`
-4. If you already have Walk/Bike/Transit scores (from the WalkScore API), include them as `walk score`, `bike score`, `transit score`
+3. The app expects columns including `lat`/`lon`, `address`, `city`, `state`, `zip`, `price`, `beds`, `baths`, `sqft`, `status`
+4. If you already have Walk/Bike/Transit scores, include them as `walk_score`, `bike_score`, `transit_score`
 5. Drop the CSV into **`data/redfin/`**
 
 You can drop multiple CSV files (e.g. one per city).
@@ -156,26 +169,27 @@ You can drop multiple CSV files (e.g. one per city).
 ### FEMA National Risk Index (highly recommended)
 
 1. Go to: https://www.fema.gov/about/openfema/data-sets/national-risk-index-data
-2. Download **NRI_Table_CensusTracts.csv** (census tract level, ~800 MB)
-3. Place at: **`data/nri/NRI_Table_CensusTracts.csv`**
+2. Download the tract-level data package
+3. The project prefers the shapefile version at **`data/nri/NRI_CensusTracts_Prod.shp`**
+4. The CSV fallback is also supported at **`data/nri/NRI_Table_CensusTracts.csv`**
 
 ### Census Tract Populations
 
 1. Go to https://data.census.gov
 2. Search for table **DECENNIALPL2020.P1**
 3. Filter: Geography → Census Tracts → All States → All Tracts
-4. Download → Save as **`data/census/DECENNIALPL2020_P1_tract.csv`**
+4. Download → Save as **`data/census/DECENNIALPL2020.P1-Data.csv`**
 
 ### MSA Populations
 
 1. Same table **DECENNIALPL2020.P1** on data.census.gov
 2. Filter: Geography → Metropolitan Statistical Areas → All MSAs
-3. Download → Save as **`data/census/DECENNIALPL2020_P1_msa.csv`**
+3. Download → Save as **`data/census/DECENNIALPL2020.P1-2026-03-25T232220.csv`**
 
 ### CBSA County Crosswalk (needed for MSA-level NRI queries)
 
 1. Go to: https://www.census.gov/geographies/reference-files/time-series/demo/metro-micro/delineation-files.html
-2. Download **list1_2020.xls** → save/convert as **`data/census/list1_2020.csv`**
+2. Download the current crosswalk and store it under **`data/census/`** as a file like **`list1_2023.xlsx`** or a CSV equivalent; the app accepts `list*.xlsx`, `list*.xls`, and `list*.csv` variants.
 
 ### Census Tract Shapefiles (optional, for fast tract-FIPS assignment)
 
@@ -185,6 +199,19 @@ Without shapefiles, the app uses the Census Geocoder API to resolve each house's
 2. Select: Year = 2020 → Layer = Census Tracts → Select your states
 3. Unzip into **`data/shapefiles/`** (one or multiple states)
 4. Re-run: `python setup_data.py --resolve-tracts`
+
+### BikePGH route data (optional but required for local bike routing)
+
+The route planner uses the locally ingested BikePGH network from the DuckDB `bike_routes` table and its source data under `data/bike/`.
+
+- `data/bike/Bike Lanes/`
+- `data/bike/Pittsburgh/`
+
+If those files are present, the app can answer route questions like:
+- “Is there a bikeable route from Mount Washington to Point State Park?”
+- “Find a safe bike route from A to B”
+
+No external road-routing engine is used for the route graph itself; the service only geocodes place names with Nominatim.
 
 ### Sold Homes (optional)
 
@@ -236,11 +263,8 @@ anywhere else.
   - 🟣 Purple = Contingent
   - 🟢 Green = Pre-Market
 - **Click any marker** to open the sidebar
-- **Map Layer control** (top-right): toggle an optional overlay on top of the
-  map — **Crime** (severity-weighted heatmap) or **NRI** (FEMA risk choropleth
-  by census tract). Only one layer is shown at a time; select **None** to turn
-  it off. Both re-fetch automatically as you pan/zoom, so they only ever load
-  what's actually in view.
+- **Map Layer control** (top-right): toggle an optional overlay on top of the map — **Crime** (severity-weighted heatmap), **NRI** (FEMA risk choropleth by census tract), or **Bike Lanes** (BikePGH network overlay). Only one layer is shown at a time; select **None** to turn it off. Layers re-fetch automatically as you pan/zoom.
+- **Bike route planner**: a control on the map lets you enter a start and end location and route using the local BikePGH network. Resulting route geometry is drawn directly on the map and in chat responses when applicable.
 
 ### House Sidebar
 
@@ -300,7 +324,7 @@ The vector database (ChromaDB) grows automatically as you paste descriptions in 
 | Issue | Fix |
 |-------|-----|
 | Map shows no houses | Run `setup_data.py`, check `data/redfin/*.csv` exists |
-| NRI data missing | Download & place `NRI_Table_CensusTracts.csv` in `data/nri/` |
+| NRI data missing | Download the NRI shapefile or CSV into `data/nri/` (preferred: `NRI_CensusTracts_Prod.shp`; fallback: `NRI_Table_CensusTracts.csv`) |
 | Tract FIPS not resolved | Run `python setup_data.py --resolve-tracts` |
 | Chat says "I couldn't generate a response" | Make sure `llama-server` is running (or Ollama if you chose that stack) |
 | Embedding errors | If using Ollama embeddings: pull `nomic-embed-text` with `ollama pull nomic-embed-text`. If using another embedding provider, configure accordingly. |
@@ -372,17 +396,40 @@ eval/
 
 static/
   index.html          Leaflet map + sidebar + chat UI
-  style.css            All styles
-  app.js               Frontend logic (incl. the Crime/NRI layer toggle)
+  style.css            App styles, BikePGH route visuals, route planner UI
+  app.js              Frontend logic, layer toggles, bike route rendering
+
+observability.py      Phoenix tracing + Prometheus metrics helper
 
 data/
   redfin/             Drop Redfin CSVs here
   sold/               Drop sold-homes CSVs here
-  nri/                FEMA NRI CSV or shapefile
+  nri/                FEMA NRI shapefile or CSV
   census/             Census P1 tables + CBSA crosswalk
   crime/<city>/       Drop each city's raw crime export here
+  bike/               BikePGH network sources used by the local router
   shapefiles/         TIGER/Line tract shapefiles (optional)
 ```
+
+---
+
+## Observability & metrics
+
+The app can auto-start a local Phoenix trace collector when `PHOENIX_ENABLED=true`
+(which is the default in `.env.example`) and exposes Prometheus-compatible metrics
+at `/metrics`.
+
+- Trace collection is configured via `PHOENIX_COLLECTOR_ENDPOINT`, `PHOENIX_PROTOCOL`,
+  and `PHOENIX_UI_URL`
+- The General Chat flow records agent, tool, and validation spans
+- This is intentionally fail-open: if Phoenix is unavailable, the app continues
+  running normally
+
+```bash
+python -m phoenix.server.main serve
+```
+
+Then open the Phoenix UI at the configured local URL (default: http://127.0.0.1:6006).
 
 ---
 
@@ -398,21 +445,49 @@ python run_eval.py                 # full run against your configured model
 python run_eval.py --list          # see what's in the golden set
 python run_eval.py --tags nri,sold_homes    # run a subset
 python run_eval.py --mock          # smoke-test the harness itself, no model server needed
+```
 
-**Bike routing**
+Each golden example is one of:
+- **structured** — has a definite right answer (a count, a ranking, a set of
+  cities). Scored by exact comparison against the reply text: as an ordered
+  sequence when order matters, as a set when it doesn't. No LLM involved in
+  grading these.
+- **free_text** — open-ended (a tradeoff, an explanation). Scored by an LLM
+  judge against a rubric in `eval/judge.py`. Configure the judge model via
+  `judge_llama_server_base_url` / `judge_llama_server_model` in `.env`; it
+  defaults to the same server as the agent under test, but an independent or
+  stronger judge is stronger evidence than a model grading itself.
+
+Reports land in `eval/reports/` as both JSON (for tooling) and Markdown (for
+reading). Exit code is non-zero if anything failed or errored, so this is
+safe to wire into CI. `eval/tests/test_scoring.py` tests the assert-equal
+scorer itself against hand-crafted replies — run it directly any time you
+change `eval/scoring.py`.
+
+To add a golden example: add fixture data to `eval/fixtures.py` if needed
+(prefer deriving expected values from the fixture data programmatically, the
+way the existing examples do, over hand-typing a number), then add one
+`GoldenExample` to `eval/golden_set.py`.
+
+---
+
+## Bike routing
 
 The app exposes `POST /api/bike/route` with:
 
-```
+```json
 {"start":"Mount Washington","end":"Point State Park","city":"Pittsburgh, PA"}
 ```
 
-Endpoints are place strings, not required map clicks. The service geocodes them with Nominatim, then routes exclusively on the locally ingested BikePGH linework stored in the `bike_routes` DuckDB table. No external road-routing engine is used.
+Endpoints are place strings, not required map clicks. The service geocodes them
+with Nominatim, then routes exclusively on the locally ingested BikePGH linework
+stored in the `bike_routes` DuckDB table. No external road-routing engine is used.
 
 ### Endpoint precision
 
 - Exact coordinates, street addresses, named places, landmarks, or neighborhoods with `city` context are supported.
-- For Pittsburgh, ambiguous place names are auto-appended with `Pittsburgh, PA` when appropriate. Geocoding results are cached in `geocode_cache`.
+- For Pittsburgh, ambiguous place names are auto-appended with `Pittsburgh, PA` when appropriate.
+- Geocoding results are cached in the `geocode_cache` table.
 
 ### BikePGH layers used for routing
 
@@ -436,39 +511,15 @@ If the locally ingested network does not contain a continuous path between the s
 - Distance is computed from the local BikePGH graph. Travel time is an estimate.
 - Turn instructions refer to mapped BikePGH infrastructure rather than inventing street names.
 
-**Developer scripts**
+---
+
+## Developer scripts
 
 These utility scripts are intended for debugging, data validation, and evaluation. Run them from the repository root.
 
- - `debug_bike_route.py`: Lightweight checks for BikePGH city-key normalization and routing helpers. Usage: `python debug_bike_route.py`.
- - `debug_flood_query.py`: Step-by-step SQL debugger for the flood-risk query; runs CTEs, prints table counts, join diagnostics, and sample rows to pinpoint where the chain breaks. Usage: `python debug_flood_query.py`.
- - `debug_nri_columns.py`: Inspect the NRI shapefile's DBF column names and show NULL counts for hazard columns in `nri_tracts`. Attempts to read the shapefile with GeoPandas when available. Usage: `python debug_nri_columns.py`.
- - `diagnose_msa.py`: Finds `X`-coded MSA rows that don't match `cbsa_counties`, suggests best CBSA candidates using a fuzzy normalizer, and can apply fixes with `--apply`. Usage: `python diagnose_msa.py [--apply]`.
- - `run_eval.py`: Agent evaluation pipeline (already described above). Runs the golden set examples, scores them, and writes timestamped reports to `eval/reports/`.
+- `debug_bike_route.py`: Lightweight checks for BikePGH city-key normalization and routing helpers. Usage: `python debug_bike_route.py`
+- `debug_flood_query.py`: Step-by-step SQL debugger for the flood-risk query; runs CTEs, prints table counts, join diagnostics, and sample rows to pinpoint where the chain breaks. Usage: `python debug_flood_query.py`
+- `debug_nri_columns.py`: Inspect the NRI shapefile's DBF column names and show NULL counts for hazard columns in `nri_tracts`. Attempts to read the shapefile with GeoPandas when available. Usage: `python debug_nri_columns.py`
+- `diagnose_msa.py`: Finds `X`-coded MSA rows that don't match `cbsa_counties`, suggests best CBSA candidates using a fuzzy normalizer, and can apply fixes with `--apply`. Usage: `python diagnose_msa.py [--apply]`
+- `run_eval.py`: Agent evaluation pipeline (already described above). Runs the golden set examples, scores them, and writes timestamped reports to `eval/reports/`
 
-If you prefer the previous standalone bike-routing README, its content has been folded here; `README_BIKE_ROUTING.md` was consolidated into this file.
-
-Note: bike-routing documentation was consolidated into this single `README.md` to avoid duplication.
-```
-
-Each golden example is one of:
-- **structured** — has a definite right answer (a count, a ranking, a set of
-  cities). Scored by exact comparison against the reply text: as an ordered
-  sequence when order matters, as a set when it doesn't. No LLM involved in
-  grading these.
-- **free_text** — open-ended (a tradeoff, an explanation). Scored by an LLM
-  judge against a rubric (`eval/judge.py`). Configure the judge model via
-  `judge_llama_server_base_url` / `judge_llama_server_model` in `.env` — it
-  defaults to the same server as the agent under test, but an independent or
-  stronger judge is stronger evidence than a model grading itself.
-
-Reports land in `eval/reports/` as both JSON (for tooling) and Markdown (for
-reading). Exit code is non-zero if anything failed or errored, so this is
-safe to wire into CI. `eval/tests/test_scoring.py` unit-tests the assert-equal
-scorer itself against hand-crafted replies — run it directly any time you
-change `eval/scoring.py`.
-
-To add a golden example: add fixture data to `eval/fixtures.py` if needed
-(prefer deriving expected values from the fixture data programmatically, the
-way the existing examples do, over hand-typing a number), then add one
-`GoldenExample` to `eval/golden_set.py`.
