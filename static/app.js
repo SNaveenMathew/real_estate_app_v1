@@ -1,8 +1,9 @@
-﻿﻿/* ── App state ───────────────────────────────────────────────────────── */
+/* ── App state ───────────────────────────────────────────────────────── */
 const state = {
   selectedHouseId: null,
   houseChatHistory: {},   // {house_id: [{role, content}]}
   generalChatHistory: [],
+  generalChatSessionId: (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : `general-${Date.now()}-${Math.random().toString(16).slice(2)}`,
   markers: {},            // {house_id: L.Marker}
 };
 
@@ -534,13 +535,47 @@ function renderHouseChat(history) {
   history.forEach(h => appendMsg('house', h.role, h.content));
 }
 
-function appendMsg(ctx, role, content) {
+function openTrace(traceUrl, button) {
+  if (!traceUrl) return;
+  const win = window.open(traceUrl, '_blank');
+  if (!win) {
+    window.location.assign(traceUrl);
+    return;
+  }
+  try { win.opener = null; } catch (_) {}
+  if (button) button.blur();
+}
+
+function addTraceButton(messageEl, traceUrl) {
+  if (!traceUrl || messageEl.querySelector('.btn-trace')) return;
+
+  const traceButton = document.createElement('button');
+  traceButton.type = 'button';
+  traceButton.className = 'btn-trace';
+  traceButton.title = 'Open the exact Phoenix trace for this answer';
+  traceButton.setAttribute('aria-label', 'View the exact Phoenix trace for this answer');
+  traceButton.textContent = '⌁ Trace';
+  traceButton.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openTrace(traceUrl, traceButton);
+  });
+  messageEl.appendChild(traceButton);
+}
+
+function appendMsg(ctx, role, content, traceUrl = null) {
   const containerId = ctx === 'house' ? 'house-chat-messages' : 'general-chat-messages';
   const el = document.getElementById(containerId);
   const div = document.createElement('div');
   div.className = `msg ${role}`;
   const html = typeof marked !== 'undefined' ? marked.parse(content) : content;
   div.innerHTML = `<div class="bubble">${html}</div>`;
+
+  if (ctx === 'general' && role === 'assistant') {
+    div.dataset.traceUrl = traceUrl || '';
+    addTraceButton(div, traceUrl);
+  }
+
   el.appendChild(div);
   el.scrollTop = el.scrollHeight;
   return div;
@@ -888,15 +923,36 @@ async function sendGeneralMessage() {
     const resp = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg, history: state.generalChatHistory }),
+      body: JSON.stringify({
+        message: msg,
+        history: state.generalChatHistory,
+        session_id: state.generalChatSessionId,
+      }),
     });
     const data = await resp.json();
     typing.remove();
-    const assistantMsg = appendMsg('general', 'assistant', data.reply);
+    if (!resp.ok) {
+      throw new Error(data.detail || data.error || `Request failed (${resp.status})`);
+    }
+
+    const traceId = data.observability?.trace_id || null;
+    const traceUrl = data.observability?.trace_url ||
+      (traceId ? `/redirects/traces/${encodeURIComponent(traceId)}` : null);
+    const assistantMsg = appendMsg(
+      'general',
+      'assistant',
+      data.reply,
+      traceUrl,
+    );
+
+    // Keep the exact trace metadata on the answer in local state too, so a
+    // future re-render can recreate the same button instead of losing it.
+    if (Array.isArray(data.history)) {
+      state.generalChatHistory = data.history;
+    }
     if (data.visualization && data.visualization.type === 'bike_route') {
       renderBikeRouteInChat(assistantMsg, data.visualization);
     }
-    state.generalChatHistory = data.history;
   } catch (e) {
     typing.remove();
     appendMsg('general', 'assistant', `Error: ${e.message}`);

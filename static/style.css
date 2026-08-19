@@ -1,4 +1,4 @@
-﻿﻿* { box-sizing: border-box; margin: 0; padding: 0; }
+﻿* { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
        font-size: 14px; background: #f0f2f5; height: 100vh; display: flex;
        flex-direction: column; overflow: hidden; }
@@ -112,6 +112,19 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 .msg.assistant .bubble th, .msg.assistant .bubble td { border: 1px solid #ddd; padding: 4px 8px; text-align: left; }
 .msg.assistant .bubble th { background: #e8eaf0; }
 .typing .bubble { color: #888; font-style: italic; }
+.msg.assistant { align-items: flex-start; gap: 6px; }
+.btn-trace {
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: 0 0 auto; align-self: flex-start; margin-top: 2px;
+  min-height: 26px; border: 1px solid #c7cfdd; background: #ffffff;
+  color: #30415f; border-radius: 7px; padding: 5px 9px;
+  font-size: 11px; line-height: 1.2; font-weight: 800; cursor: pointer;
+  white-space: nowrap; box-shadow: 0 1px 2px rgba(0,0,0,.06);
+  user-select: none;
+}
+.btn-trace:hover { background: #eef3fb; border-color: #8fa3c3; color: #1d3f73; }
+.btn-trace:active { transform: translateY(1px); }
+.btn-trace:focus-visible { outline: 2px solid #4f8ef7; outline-offset: 2px; }
 
 .chat-input-area {
   display: flex; gap: 8px; padding: 10px 12px;
