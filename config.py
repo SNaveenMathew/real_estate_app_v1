@@ -43,6 +43,14 @@ class Settings(BaseSettings):
     code_agent_max_tokens: int = 1500   # SQL Code Agent: raised from 700 — see "Round 2" above
     llm_request_timeout: float = 120.0  # seconds, per HTTP request to llama-server
 
+    # ── Observability / Phoenix ─────────────────────────────────────────────
+    # Local Phoenix is open source and runs entirely on the developer machine.
+    phoenix_enabled: bool = True
+    phoenix_collector_endpoint: str = "http://127.0.0.1:6006/v1/traces"
+    phoenix_protocol: str = "http/protobuf"
+    phoenix_ui_url: str = "http://127.0.0.1:6006"
+    phoenix_project_name: str = "real-estate-general-chat"
+
     # ── Ollama ─────────────────────────────────────────────────────────
     # ollama_base_url: str = "http://localhost:11434"
     # ollama_model: str = "llama3.1:8b"

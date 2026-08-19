@@ -6,6 +6,12 @@ import json
 import shutil
 import traceback
 import math
+import os
+import socket
+import subprocess
+import sys
+import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -13,6 +19,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from prometheus_client import make_asgi_app
 from pydantic import BaseModel
 
 from config import settings
@@ -22,6 +29,7 @@ from services import layers as layer_service
 from services import bike_routing
 from agents.house_agent import run_house_chat
 from agents.general_agent import run_general_chat
+from observability import initialize_observability, phoenix_enabled
 
 
 def _safe(v):
@@ -35,8 +43,115 @@ def _safe_dict(d: dict) -> dict:
     return {k: _safe(v) for k, v in d.items()}
 
 
+# ── Phoenix process lifecycle ────────────────────────────────────────────────
+# Phoenix is a local, free/open-source service. Start it automatically with
+# the FastAPI app so the OTLP endpoint exists before tracing is initialized.
+_phoenix_process = None
+_phoenix_started_by_app = False
+
+def _phoenix_port_open(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+
+def _start_phoenix_server() -> None:
+    global _phoenix_process, _phoenix_started_by_app
+
+    if not settings.phoenix_enabled:
+        return
+
+    host = "127.0.0.1"
+    port = 6006
+    endpoint = settings.phoenix_ui_url.rstrip("/")
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(endpoint)
+        host = parsed.hostname or host
+        port = parsed.port or port
+    except Exception:
+        pass
+
+    if _phoenix_port_open(host, port):
+        _phoenix_started_by_app = False
+        print(f"Phoenix already running at {endpoint}")
+        return
+
+    creationflags = 0
+    kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.STDOUT}
+    if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        kwargs["creationflags"] = creationflags
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "phoenix.server.main",
+        "serve",
+        "--host",
+        host,
+        "--port",
+        str(port),
+    ]
+
+    try:
+        _phoenix_process = subprocess.Popen(cmd, **kwargs)
+        _phoenix_started_by_app = True
+        print(f"Started Phoenix in background (PID {_phoenix_process.pid}) at {endpoint}")
+    except Exception as exc:
+        _phoenix_process = None
+        _phoenix_started_by_app = False
+        print(f"WARNING: Could not start Phoenix automatically: {exc}")
+        return
+
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        if _phoenix_process.poll() is not None:
+            print("WARNING: Phoenix exited during startup; tracing will be disabled.")
+            _phoenix_process = None
+            _phoenix_started_by_app = False
+            return
+        if _phoenix_port_open(host, port):
+            print("Phoenix is ready; enabling General Chat tracing.")
+            return
+        time.sleep(0.2)
+
+    print("WARNING: Phoenix did not become ready within 15 seconds; continuing without blocking the app.")
+
+
+def _stop_phoenix_server() -> None:
+    global _phoenix_process, _phoenix_started_by_app
+    if not _phoenix_started_by_app or _phoenix_process is None:
+        return
+    proc = _phoenix_process
+    _phoenix_process = None
+    _phoenix_started_by_app = False
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _start_phoenix_server()
+    initialize_observability()
+    try:
+        yield
+    finally:
+        _stop_phoenix_server()
+
+
 # ── App setup ────────────────────────────────────────────────────────────────
-app = FastAPI(title="Real Estate Analysis", version="1.0.0")
+app = FastAPI(title="Real Estate Analysis", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -47,6 +162,7 @@ app.add_middleware(
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 settings.uploads_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/metrics", make_asgi_app(), name="metrics")
 
 
 # ── Pydantic models ──────────────────────────────────────────────────────────
@@ -54,6 +170,7 @@ settings.uploads_dir.mkdir(parents=True, exist_ok=True)
 class ChatRequest(BaseModel):
     message: str
     history: list[dict] = []   # [{"role": "user"|"assistant", "content": "..."}]
+    session_id: Optional[str] = None
 
 
 class DocumentRequest(BaseModel):
@@ -160,11 +277,22 @@ async def house_chat(house_id: str, req: ChatRequest):
 async def general_chat(req: ChatRequest):
     """General chat — cross-house, MSA, national risk questions."""
     try:
-        reply, updated_history, visualization = run_general_chat(req.message, req.history, include_metadata=True)
+        reply, updated_history, visualization, observability = run_general_chat(
+            req.message,
+            req.history,
+            include_metadata=True,
+            session_id=req.session_id,
+        )
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(500, f"Agent error: {e}")
-    return {"reply": reply, "history": updated_history, "visualization": visualization}
+    return {
+        "reply": reply,
+        "history": updated_history,
+        "visualization": visualization,
+        "observability": observability,
+        "phoenix_enabled": phoenix_enabled(),
+    }
 
 
 # ── Document / photo upload ──────────────────────────────────────────────────
