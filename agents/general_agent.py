@@ -406,6 +406,11 @@ def run_general_chat(
                 lc_messages.append(AIMessage(content=h["content"]))
         lc_messages.append(HumanMessage(content=message))
 
+        # Initialize routing state before branching. Ordinary questions may not
+        # take the deterministic bike-route path, but the downstream routing
+        # reconciliation code still inspects this value.
+        bike_tool_result = None
+
         deterministic_route = _extract_bike_route_endpoints(message)
         route_is_crime_aware = _message_requests_crime_avoidance([HumanMessage(content=message)])
         if deterministic_route:
