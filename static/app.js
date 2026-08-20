@@ -531,10 +531,10 @@ document.getElementById('btn-close-sidebar').addEventListener('click', closeSide
 function renderHouseChat(history) {
   const el = document.getElementById('house-chat-messages');
   el.innerHTML = '';
-  history.forEach(h => appendMsg('house', h.role, h.content));
+  history.forEach(h => appendMsg('house', h.role, h.content, h.trace_url));
 }
 
-function appendMsg(ctx, role, content) {
+function appendMsg(ctx, role, content, traceUrl = null) {
   const containerId = ctx === 'house' ? 'house-chat-messages' : 'general-chat-messages';
   const el = document.getElementById(containerId);
   const div = document.createElement('div');
@@ -542,6 +542,17 @@ function appendMsg(ctx, role, content) {
   const safeContent = content == null ? 'The assistant returned no response.' : String(content);
   const html = typeof marked !== 'undefined' ? marked.parse(safeContent) : safeContent;
   div.innerHTML = `<div class="bubble">${html}</div>`;
+  if (role === 'assistant' && traceUrl) {
+    const traceBtn = document.createElement('button');
+    traceBtn.type = 'button';
+    traceBtn.className = 'btn-trace';
+    traceBtn.textContent = 'Trace';
+    traceBtn.title = 'Open this response trace in Arize Phoenix';
+    traceBtn.addEventListener('click', () => {
+      window.open(String(traceUrl), '_blank', 'noopener,noreferrer');
+    });
+    div.appendChild(traceBtn);
+  }
   el.appendChild(div);
   el.scrollTop = el.scrollHeight;
   return div;
@@ -929,7 +940,8 @@ async function sendGeneralMessage() {
     });
     const data = await resp.json();
     typing.remove();
-    const assistantMsg = appendMsg('general', 'assistant', data.reply);
+    const assistantTraceUrl = data?.observability?.trace_url || null;
+    const assistantMsg = appendMsg('general', 'assistant', data.reply, assistantTraceUrl);
     const viz = data.visualization;
     // Crime-aware requests always render the intermediate filtered-network +
     // crime-density map first. A successful route then gets a second map.
