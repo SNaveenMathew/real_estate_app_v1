@@ -12,16 +12,9 @@ from langgraph.prebuilt import ToolNode
 
 from config import settings, LLM_STOP_SEQUENCES
 from agents.tools import GENERAL_TOOLS
+import json
+
 import db.schema_catalog as schema
-from observability import (
-    elapsed,
-    get_trace_id,
-    mark_span_error,
-    set_span_input,
-    set_span_output,
-    start_general_chat,
-    trace_span,
-)
 
 
 SYSTEM_PROMPT = """You are a real estate and risk analyst assistant backed by a local DuckDB database.
@@ -68,13 +61,24 @@ BIKING / BIKE-ROUTING PRESENTATION RULES:
 2. For a request to FIND/SHOW/ROUTE a bike path between two endpoints, call
    find_bike_route. Endpoints may be neighborhoods, landmarks, parks,
    addresses, or coordinates; exact map clicks are not required.
-3. If find_bike_route returns a successful route, the final response should be
-   a concise text summary and the application will render a route map. Do not
-   claim that the route uses infrastructure not present in the tool result.
-4. If find_bike_route returns kind="no_route", return a text response explaining
-   that no continuous path exists using the locally ingested BikePGH network.
-   Do NOT request an external routing service or invent a road route.
-5. If find_bike_route returns kind="no_data", return exactly:
+3. For FIND/SHOW/ROUTE requests that explicitly ask to avoid crime-dense,
+   high-crime, dangerous, or crime-heavy areas, call find_bike_route with
+   avoid_crime_dense_areas=true. The application execution layer will enforce
+   this flag even if the model omits it. Let the tool apply the spatial crime
+   filter before Dijkstra; do not invent a safety route yourself.
+4. For every crime-aware route request, an intermediate map MUST be preserved and
+   rendered showing the post-filter BikePGH network, crime density, source, and
+   destination. This map is required whether or not Dijkstra finds a path.
+5. For crime-aware requests, NEVER present a route unless the tool explicitly
+   reports that the crime filter was applied. If the filter could not be applied,
+   treat the route as unavailable and explain the limitation. Do not fall back to
+   an ordinary or neighborhood route.
+6. If find_bike_route returns a successful crime-filtered route, return a concise
+   text summary and let the application render a separate final route map. If
+   kind="no_route", return text explaining that no continuous path exists using
+   the filtered BikePGH network. Do NOT request an external routing service or
+   invent a road route.
+6. If find_bike_route returns kind="no_data", return exactly:
    "No data available for <city or MSA> to answer this question."
 """
 
@@ -91,8 +95,128 @@ class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], lambda x, y: list(x) + list(y)]
 
 
+def _message_requests_crime_avoidance(messages: Sequence[BaseMessage]) -> bool:
+    """Deterministically detect crime-avoidance routing intent.
+
+    This is an execution guard, not an LLM replacement: the local LLM still
+    decides to use find_bike_route, but it cannot accidentally downgrade an
+    explicitly crime-aware routing request into an ordinary route.
+    """
+    text_parts = []
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            content = msg.content
+            if isinstance(content, str):
+                text_parts.append(content.lower())
+            elif isinstance(content, list):
+                text_parts.extend(str(x.get("text", "")) for x in content if isinstance(x, dict))
+    text = "\n".join(text_parts)
+    crime_terms = (
+        "crime", "criminal", "dangerous", "unsafe", "high-crime",
+        "high crime", "crime-prone", "crime prone", "avoid crime",
+        "avoid high-crime", "avoid dangerous", "avoid unsafe",
+    )
+    return any(term in text for term in crime_terms)
+
+
+def _extract_bike_route_endpoints(message: str) -> tuple[str, str] | None:
+    """Extract endpoints from a direct bike-route request.
+
+    Keeping this deterministic avoids sending route requests through the
+    general LLM agent, which can otherwise accumulate a very large history
+    and hit the local model context limit.
+    """
+    import re
+    text = " ".join((message or "").split())
+    if not re.search(r"\bbike\b", text, re.I) or not re.search(r"\broute\b", text, re.I):
+        return None
+    m = re.search(
+        r"\bfrom\s+(.+?)\s+\bto\s+(.+?)(?=\s+(?:that\s+)?(?:avoids?|avoiding|without)\b|[.!?]?$)",
+        text, re.I,
+    )
+    if not m:
+        return None
+    start_text = m.group(1).strip(" ,")
+    end_text = m.group(2).strip(" ,")
+    if not start_text or not end_text:
+        return None
+    return start_text, end_text
+
+
+def _extract_crime_aware_bike_route_endpoints(message: str) -> tuple[str, str] | None:
+    """Backward-compatible wrapper for crime-aware route detection."""
+    text = " ".join((message or "").split())
+    if not _message_requests_crime_avoidance([HumanMessage(content=text)]):
+        return None
+    return _extract_bike_route_endpoints(text)
+
+
+def _bounded_agent_history(history: list[dict] | None, max_chars: int = 24000) -> list[dict]:
+    """Keep general-agent prompts comfortably below the local model context limit."""
+    items = list(history or [])
+    if not items:
+        return []
+    kept = []
+    total = 0
+    for item in reversed(items):
+        content = str(item.get("content") or "")
+        size = len(content)
+        if kept and total + size > max_chars:
+            break
+        kept.append({"role": item.get("role", "user"), "content": content})
+        total += size
+    kept.reverse()
+    return kept
+
+
 def build_general_agent():
-    tool_node = ToolNode(GENERAL_TOOLS)
+    tool_map = {getattr(t, "name", ""): t for t in GENERAL_TOOLS}
+
+    def tools_node(state: AgentState):
+        """Execute tool calls while enforcing explicit crime-aware routing.
+
+        We keep the existing tools and LangGraph architecture. The only added
+        behavior is a deterministic guard at execution time: for an explicitly
+        crime-aware bike request, any find_bike_route call is forced to enable
+        the crime filter.
+        """
+        last = state["messages"][-1]
+        tool_calls = getattr(last, "tool_calls", None) or []
+        enforce_crime = _message_requests_crime_avoidance(state["messages"])
+        outputs = []
+        for call in tool_calls:
+            name = call.get("name", "")
+            tool = tool_map.get(name)
+            if tool is None:
+                outputs.append(ToolMessage(
+                    content=f"Unknown tool: {name}",
+                    tool_call_id=call.get("id", ""),
+                    name=name,
+                ))
+                continue
+            args = dict(call.get("args") or {})
+            if enforce_crime and name == "find_bike_route":
+                args["avoid_crime_dense_areas"] = True
+                # Preserve the caller's explicit percentile if supplied.
+                args.setdefault("crime_density_percentile", 90.0)
+            try:
+                result = tool.invoke(args)
+                if isinstance(result, ToolMessage):
+                    outputs.append(result)
+                else:
+                    outputs.append(ToolMessage(
+                        content=str(result),
+                        tool_call_id=call.get("id", ""),
+                        name=name,
+                    ))
+            except Exception as exc:
+                outputs.append(ToolMessage(
+                    content=f"Tool error in {name}: {exc}",
+                    tool_call_id=call.get("id", ""),
+                    name=name,
+                    status="error",
+                ))
+        return {"messages": outputs}
     # For 'llama-server -hf DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M -ngl 999 -c 28672 -fa on --cache-type-k q8_0 --cache-type-v q8_0'
     llm = ChatOpenAI(
         base_url=settings.llama_server_base_url,
@@ -112,77 +236,12 @@ def build_general_agent():
 
     def agent_node(state: AgentState):
         # Inject live data availability into every system message so the model
-        # always knows what's loaded without needing to call the tool first.
+        # always knows what's loaded without needing to call the tool first
         availability = _get_data_availability_context()
         system = SystemMessage(content=f"{availability}\n{SYSTEM_PROMPT}")
         messages = [system] + list(state["messages"])
-
-        with trace_span(
-            "general_chat.llm",
-            attributes={
-                "openinference.span.kind": "LLM",
-                "llm.model_name": settings.llama_server_model,
-                "llm.provider": "llama-server",
-            },
-        ) as span:
-            set_span_input(
-                span,
-                [m.model_dump() if hasattr(m, "model_dump") else str(m) for m in messages],
-                mime_type="application/json",
-            )
-            try:
-                response = llm.invoke(messages)
-                set_span_output(
-                    span,
-                    response.content if hasattr(response, "content") else response,
-                )
-                tool_calls = getattr(response, "tool_calls", None) or []
-                if span is not None:
-                    span.set_attribute("llm.tool_call_count", len(tool_calls))
-                usage = getattr(response, "usage_metadata", None) or {}
-                if isinstance(usage, dict):
-                    for key, attr in (
-                        ("input_tokens", "llm.token_count.prompt"),
-                        ("output_tokens", "llm.token_count.completion"),
-                        ("total_tokens", "llm.token_count.total"),
-                    ):
-                        if usage.get(key) is not None and span is not None:
-                            span.set_attribute(attr, int(usage[key]))
-                return {"messages": [response]}
-            except Exception as exc:
-                mark_span_error(span, exc)
-                raise
-
-    def tools_node(state: AgentState):
-        last = state["messages"][-1]
-        tool_calls = getattr(last, "tool_calls", None) or []
-        with trace_span(
-            "general_chat.tools",
-            attributes={
-                "openinference.span.kind": "TOOL",
-                "tool.call_count": len(tool_calls),
-                "tool.names": ",".join(
-                    str(call.get("name", "unknown")) for call in tool_calls
-                ),
-            },
-        ) as span:
-            set_span_input(span, tool_calls, mime_type="application/json")
-            try:
-                result = tool_node.invoke(state)
-                outputs = [
-                    {
-                        "tool": getattr(message, "name", None)
-                        or getattr(message, "tool_call_id", None),
-                        "content": getattr(message, "content", ""),
-                    }
-                    for message in result.get("messages", [])
-                    if isinstance(message, ToolMessage)
-                ]
-                set_span_output(span, outputs, mime_type="application/json")
-                return result
-            except Exception as exc:
-                mark_span_error(span, exc)
-                raise
+        response = llm.invoke(messages)
+        return {"messages": [response]}
 
     def router(state: AgentState) -> Literal["tools", "end"]:
         last = state["messages"][-1]
@@ -216,9 +275,50 @@ def invalidate_general_agent():
     _general_agent = None
 
 
-def _extract_bike_visualization(messages: list[BaseMessage]):
-    """Extract the latest successful BikePGH route tool result for the UI."""
+def _extract_bike_visualization_from_payload(payload: dict, crime_request: bool = False):
+    """Normalize one authoritative bike-route tool payload for the frontend.
+
+    The current user request, not prior chat history, determines whether a
+    final route must prove crime filtering was applied.
+    """
+    if not isinstance(payload, dict):
+        return None
+    analysis = payload.get("analysis_visualization")
+    crime_meta = payload.get("crime_avoidance") or {}
+    applied = bool(crime_meta.get("enabled")) and bool(crime_meta.get("applied"))
+
+    final_route = None
+    if payload.get("presentation") == "route_map" and payload.get("route_shape") and (not crime_request or applied):
+        final_route = {
+            "type": "bike_route",
+            "city": payload.get("city") or "Pittsburgh, PA",
+            "start": payload.get("start"),
+            "end": payload.get("end"),
+            "route_shape": payload.get("route_shape") or [],
+            "bbox": payload.get("bbox"),
+            "distance_miles": payload.get("distance_miles"),
+            "duration_minutes": payload.get("duration_minutes"),
+            "turn_by_turn": payload.get("turn_by_turn") or [],
+            "bike_infrastructure_near_route": payload.get("bike_infrastructure_near_route") or [],
+            "used_infrastructure": payload.get("used_infrastructure") or {"type": "FeatureCollection", "features": []},
+            "provider": payload.get("provider"),
+            "attribution": payload.get("attribution"),
+        }
+
+    if analysis:
+        result = {"type": "bike_crime_analysis", "analysis": analysis}
+        if final_route:
+            result["final_route"] = final_route
+        return result
+    return final_route
+
+
+def _extract_bike_visualization(messages: list[BaseMessage], crime_request: bool | None = None):
+    """Extract bike visualizations using the current request intent, not stale history."""
     import json
+    if crime_request is None:
+        crime_request = _message_requests_crime_avoidance(messages[-1:])
+
     for message in reversed(messages):
         if not isinstance(message, ToolMessage):
             continue
@@ -229,25 +329,44 @@ def _extract_bike_visualization(messages: list[BaseMessage]):
             payload = json.loads(content)
         except Exception:
             continue
-        if payload.get("status") == "ok" and payload.get("presentation") == "route_map":
-            shape = payload.get("route_shape") or []
-            bbox = payload.get("bbox")
-            if shape and bbox:
-                return {
-                    "type": "bike_route",
-                    "city": payload.get("city") or "Pittsburgh, PA",
-                    "start": payload.get("start"),
-                    "end": payload.get("end"),
-                    "route_shape": shape,
-                    "bbox": bbox,
-                    "distance_miles": payload.get("distance_miles"),
-                    "duration_minutes": payload.get("duration_minutes"),
-                    "turn_by_turn": payload.get("turn_by_turn") or [],
-                    "bike_infrastructure_near_route": payload.get("bike_infrastructure_near_route") or [],
-                    "used_infrastructure": payload.get("used_infrastructure") or {"type": "FeatureCollection", "features": []},
-                    "provider": payload.get("provider"),
-                    "attribution": payload.get("attribution"),
-                }
+        if not isinstance(payload, dict):
+            continue
+
+        analysis = payload.get("analysis_visualization")
+        final_route = None
+        crime_meta = payload.get("crime_avoidance") or {}
+        crime_filter_applied = bool(crime_meta.get("enabled")) and bool(
+            crime_meta.get("applied", crime_meta.get("enabled"))
+        )
+
+        if (payload.get("presentation") == "route_map" or payload.get("status") == "ok") and (
+            not crime_request or crime_filter_applied
+        ):
+            final_route = {
+                "type": "bike_route",
+                "city": payload.get("city") or "Pittsburgh, PA",
+                "start": payload.get("start"),
+                "end": payload.get("end"),
+                "route_shape": payload.get("route_shape") or [],
+                "bbox": payload.get("bbox"),
+                "distance_miles": payload.get("distance_miles"),
+                "duration_minutes": payload.get("duration_minutes"),
+                "turn_by_turn": payload.get("turn_by_turn") or [],
+                "bike_infrastructure_near_route": payload.get("bike_infrastructure_near_route") or [],
+                "used_infrastructure": payload.get("used_infrastructure") or {"type": "FeatureCollection", "features": []},
+                "provider": payload.get("provider"),
+                "attribution": payload.get("attribution"),
+            }
+
+        if analysis:
+            result = {"type": "bike_crime_analysis", "analysis": analysis}
+            if final_route and final_route.get("route_shape"):
+                result["final_route"] = final_route
+            return result
+
+        if final_route:
+            return final_route
+
     return None
 
 
@@ -258,60 +377,210 @@ def run_general_chat(
     session_id: str | None = None,
 ):
     """Run General Chat and emit one Phoenix trace per answer."""
-    started_at = __import__("time").perf_counter()
-    root_context, root_span, trace_id, trace_url = start_general_chat(
+    from time import perf_counter
+    from observability import (
+        start_general_chat,
+        trace_span,
+        set_span_input,
+        set_span_output,
+        mark_span_error,
+        end_general_chat,
+    )
+
+    started_at = perf_counter()
+    _, root_span, trace_id, trace_url = start_general_chat(
         message, session_id, len(history or [])
     )
     try:
         agent = get_general_agent()
 
+        # Route requests are handled deterministically below, but other LLM
+        # requests still need a bounded history to avoid exceeding the local
+        # model context window after long sessions.
+        bounded_history = _bounded_agent_history(history)
         lc_messages: list[BaseMessage] = []
-        for h in (history or []):
+        for h in bounded_history:
             if h["role"] == "user":
                 lc_messages.append(HumanMessage(content=h["content"]))
             else:
                 lc_messages.append(AIMessage(content=h["content"]))
         lc_messages.append(HumanMessage(content=message))
 
-        with trace_span(
-            "general_chat.agent",
-            attributes={
-                "openinference.span.kind": "AGENT",
-                "general_chat.history_length": len(history or []),
-            },
-        ) as agent_span:
-            set_span_input(agent_span, {"message": message, "history": history or []}, mime_type="application/json")
-            try:
-                result = agent.invoke({"messages": lc_messages})
-                all_messages = list(result["messages"])
-                set_span_output(agent_span, {"message_count": len(all_messages)}, mime_type="application/json")
-            except Exception as exc:
-                mark_span_error(agent_span, exc)
-                raise
+        deterministic_route = _extract_bike_route_endpoints(message)
+        route_is_crime_aware = _message_requests_crime_avoidance([HumanMessage(content=message)])
+        if deterministic_route:
+            start_text, end_text = deterministic_route
+            from agents.tools import find_bike_route
+            with trace_span(
+                "general_chat.bike_route",
+                attributes={
+                    "openinference.span.kind": "TOOL",
+                    "bike_route.start": start_text,
+                    "bike_route.end": end_text,
+                    "bike_route.crime_avoidance": route_is_crime_aware,
+                },
+            ) as route_span:
+                try:
+                    tool_json = find_bike_route.invoke({
+                        "start": start_text,
+                        "end": end_text,
+                        "city": "Pittsburgh, PA",
+                        "avoid_crime_dense_areas": bool(route_is_crime_aware),
+                        "crime_density_percentile": 90.0,
+                    })
+                    try:
+                        deterministic_payload = json.loads(tool_json) if isinstance(tool_json, str) else None
+                    except Exception:
+                        deterministic_payload = None
+                    set_span_output(route_span, {
+                        "result": deterministic_payload if isinstance(deterministic_payload, dict) else str(tool_json),
+                    }, mime_type="application/json" if isinstance(deterministic_payload, dict) else "text/plain")
+                except Exception as exc:
+                    mark_span_error(route_span, exc)
+                    raise
+            all_messages = [*lc_messages, ToolMessage(
+                content=str(tool_json),
+                tool_call_id="deterministic-bike-route",
+                name="find_bike_route",
+            )]
+            ai_messages = []
+            bike_tool_result = deterministic_payload if isinstance(deterministic_payload, dict) else None
+            if bike_tool_result:
+                raw_reply = bike_tool_result.get("message") or (
+                    f"Yes — a BikePGH route was found from {start_text} to {end_text}."
+                    if bike_tool_result.get("status") == "ok"
+                    else "The bike-routing request could not be completed."
+                )
+            else:
+                raw_reply = "The crime-aware bike-routing tool returned an unreadable result."
+        else:
+            with trace_span(
+                "general_chat.agent",
+                attributes={
+                    "openinference.span.kind": "AGENT",
+                    "general_chat.history_length": len(history or []),
+                    "general_chat.session_id": session_id or "",
+                },
+            ) as agent_span:
+                set_span_input(agent_span, {"message": message, "history": history or []}, mime_type="application/json")
+                try:
+                    result = agent.invoke({"messages": lc_messages})
+                    all_messages = list(result["messages"])
+                    set_span_output(agent_span, {"message_count": len(all_messages)}, mime_type="application/json")
+                except Exception as exc:
+                    mark_span_error(agent_span, exc)
+                    raise
 
-        ai_messages = [m for m in all_messages if isinstance(m, AIMessage)]
-        tool_call_count = sum(len(getattr(m, "tool_calls", None) or []) for m in ai_messages)
-        raw_reply = ai_messages[-1].content if ai_messages else "I couldn't generate a response."
+            ai_messages = [m for m in all_messages if isinstance(m, AIMessage)]
+            raw_reply = ai_messages[-1].content if ai_messages else "I couldn't generate a response."
+
+        # Routing tool results are authoritative. In particular, when a
+        # crime-aware bike request returns kind="no_route", do not let the
+        # local LLM invent a neighborhood/approximate fallback route. The
+        # intermediate filtered-network/crime map remains attached to the
+        # tool result and is rendered independently by the UI.
+        if not isinstance(bike_tool_result, dict):
+            bike_tool_result = None
+        for message_item in reversed(all_messages):
+            # Prefer an already-parsed deterministic routing result.
+            if isinstance(bike_tool_result, dict):
+                break
+            if not isinstance(message_item, ToolMessage):
+                continue
+            try:
+                payload = json.loads(message_item.content) if isinstance(message_item.content, str) else None
+            except Exception:
+                payload = None
+            if isinstance(payload, dict) and (
+                payload.get("kind") in {"no_route", "no_data"}
+                or payload.get("analysis_visualization")
+                or payload.get("presentation") == "route_map"
+            ):
+                bike_tool_result = payload
+                break
+
+        crime_request = _message_requests_crime_avoidance([HumanMessage(content=message)])
+        if crime_request and bike_tool_result:
+            crime_meta = bike_tool_result.get("crime_avoidance") or {}
+            if bike_tool_result.get("kind") in {"routing_service", "input"}:
+                raw_reply = (
+                    bike_tool_result.get("message")
+                    or "The crime-aware routing request could not be evaluated."
+                )
+            elif bike_tool_result.get("presentation") == "route_map" and not bool(crime_meta.get("enabled")):
+                raw_reply = (
+                    "The requested crime-aware route could not be produced because "
+                    "the crime-avoidance filter was not applied. No unfiltered route "
+                    "is being substituted."
+                )
+                bike_tool_result["kind"] = "crime_filter_error"
+                bike_tool_result["status"] = "error"
+                bike_tool_result["message"] = raw_reply
+                # Keep the intermediate visualization, if present, but prevent a
+                # final route visualization from being rendered.
+                if "analysis_visualization" in bike_tool_result:
+                    bike_tool_result["presentation"] = None
+
+        if bike_tool_result and bike_tool_result.get("kind") in {"no_route", "crime_filter_error"}:
+            raw_reply = bike_tool_result.get("message") or (
+                "No continuous path exists between the two endpoints using the "
+                "filtered BikePGH infrastructure."
+            )
+
+        # Crime-aware routing is deterministic: the routing tool result is
+        # authoritative. Do not let the final LLM rewrite a no-route, filter
+        # failure, or successfully filtered route into a different outcome.
+        crime_request = _message_requests_crime_avoidance([HumanMessage(content=message)])
+        direct_routing_reply = None
+        if crime_request and bike_tool_result:
+            crime_meta = bike_tool_result.get("crime_avoidance") or {}
+            analysis_present = bool(bike_tool_result.get("analysis_visualization"))
+            applied = bool(crime_meta.get("enabled")) and bool(
+                crime_meta.get("applied", False)
+            )
+
+            if bike_tool_result.get("kind") in {"no_route", "no_data"}:
+                direct_routing_reply = bike_tool_result.get("message") or (
+                    "No continuous path exists between the two endpoints using "
+                    "the filtered BikePGH infrastructure."
+                )
+            elif bike_tool_result.get("kind") in {"routing_service", "crime_filter_error", "input"}:
+                direct_routing_reply = bike_tool_result.get("message") or (
+                    "The crime-aware routing request could not be evaluated."
+                )
+            elif bike_tool_result.get("presentation") == "route_map" and applied:
+                # Let the normal validator check the generated route prose, but
+                # never allow it to disable crime filtering or substitute a
+                # different route.
+                direct_routing_reply = raw_reply
+            elif analysis_present:
+                # We have the required intermediate map, but the route itself
+                # was not proven crime-aware. Never present the unfiltered route.
+                direct_routing_reply = (
+                    "The requested crime-aware route could not be produced because "
+                    "the crime-avoidance filter was not successfully applied. "
+                    "No unfiltered route is being substituted."
+                )
+
+        if direct_routing_reply is not None:
+            raw_reply = direct_routing_reply
 
         from agents.response_validator import validate_response
-        with trace_span(
-            "general_chat.response_validation",
-            attributes={"openinference.span.kind": "CHAIN"},
-        ) as validation_span:
-            set_span_input(validation_span, raw_reply)
-            try:
-                reply = validate_response(raw_reply, all_messages, strict=True)
-                set_span_output(validation_span, reply)
-            except Exception as exc:
-                mark_span_error(validation_span, exc)
-                raise
 
-        validation_changed = reply != raw_reply
-        if validation_changed:
-            import logging
-            logging.getLogger(__name__).warning(
-                "Hallucination detected and blocked in general agent response."
-            )
+        # The routing result is authoritative for crime-aware route requests.
+        # For ordinary General Chat, keep the normal response validator.
+        # Initialize the reply on every path so non-crime conversations cannot
+        # reach updated_history with an undefined local variable.
+        reply = validate_response(raw_reply, all_messages, strict=True)
+        if crime_request and bike_tool_result:
+            if direct_routing_reply is not None and not (
+                bike_tool_result.get("presentation") == "route_map"
+                and bool((bike_tool_result.get("crime_avoidance") or {}).get("applied", False))
+            ):
+                reply = raw_reply
+            else:
+                # A successfully crime-filtered route may still be checked for prose quality.
+                reply = validate_response(raw_reply, all_messages, strict=True)
 
         updated_history = (history or []) + [
             {"role": "user", "content": message},
@@ -323,32 +592,41 @@ def run_general_chat(
             },
         ]
 
-        if root_span is not None:
-            root_span.set_attribute("general_chat.llm_call_count", len(ai_messages))
-            root_span.set_attribute("general_chat.tool_call_count", tool_call_count)
-            root_span.set_attribute("general_chat.validation_changed", validation_changed)
-            root_span.set_attribute("general_chat.reply_length", len(reply))
-            set_span_output(root_span, reply)
-
-        from observability import record_general_chat_success
-        record_general_chat_success(
-            latency_seconds=elapsed(started_at),
-            llm_calls=len(ai_messages),
-            tool_calls=tool_call_count,
-            reply_chars=len(reply),
-            validation_changed=validation_changed,
+        visualization = _extract_bike_visualization(all_messages, crime_request=crime_request)
+        if isinstance(bike_tool_result, dict):
+            direct_visualization = _extract_bike_visualization_from_payload(
+                bike_tool_result, crime_request=crime_request
+            )
+            # The current request controls whether an ordinary route or a
+            # crime-filtered route is allowed to render. Never let stale
+            # conversation history suppress a valid ordinary route map.
+            if direct_visualization is not None:
+                if not crime_request or (
+                    direct_visualization.get("type") == "bike_crime_analysis"
+                    or direct_visualization.get("type") == "bike_route"
+                ):
+                    visualization = direct_visualization
+        end_general_chat(
+            root_span,
+            trace_id=trace_id,
+            reply=reply,
+            started_at=started_at,
+            tool_call_count=sum(len(getattr(m, "tool_calls", None) or []) for m in ai_messages),
         )
 
         if include_metadata:
-            return reply, updated_history, _extract_bike_visualization(all_messages), {
+            return reply, updated_history, visualization, {
                 "trace_id": trace_id,
                 "trace_url": trace_url,
             }
         return reply, updated_history
     except Exception as exc:
         mark_span_error(root_span, exc)
-        from observability import record_general_chat_error
-        record_general_chat_error(elapsed(started_at))
+        end_general_chat(
+            root_span,
+            trace_id=trace_id,
+            reply=None,
+            started_at=started_at,
+            error=exc,
+        )
         raise
-    finally:
-        root_context.__exit__(None, None, None)

@@ -89,7 +89,7 @@ def initialize_observability() -> None:
                 project_name=settings.phoenix_project_name,
                 endpoint=endpoint,
                 protocol=settings.phoenix_protocol,
-                batch=True,
+                batch=False,
                 auto_instrument=False,
             )
             _tracer = _tracer_provider.get_tracer(
@@ -220,6 +220,46 @@ def start_general_chat(message: str, session_id: str | None, history_length: int
     span = context.__enter__()
     set_span_input(span, {"message": message, "history_length": history_length}, mime_type="application/json")
     return context, span, get_trace_id(span), get_trace_url(get_trace_id(span))
+
+
+def end_general_chat(
+    root_span,
+    *,
+    trace_id: str | None = None,
+    reply: str | None = None,
+    started_at: float | None = None,
+    tool_call_count: int = 0,
+    error: BaseException | None = None,
+) -> None:
+    """Finalize a General Chat trace.
+
+    This is intentionally backward-compatible with the older agent wrapper
+    that explicitly finalizes the root span. The newer implementation can
+    still manage the context itself; calling this function is safe either way.
+    """
+    if root_span is not None:
+        try:
+            root_span.set_attribute("general_chat.tool_call_count", tool_call_count)
+            if trace_id:
+                root_span.set_attribute("general_chat.trace_id", trace_id)
+            if started_at is not None:
+                root_span.set_attribute("general_chat.latency_seconds", elapsed(started_at))
+            if reply is not None:
+                root_span.set_attribute("general_chat.reply_length", len(reply))
+                set_span_output(root_span, reply)
+            if error is not None:
+                mark_span_error(root_span, error)
+        except Exception:
+            logger.debug("Unable to finalize Phoenix General Chat span", exc_info=True)
+    if started_at is not None:
+        if error is None:
+            GENERAL_CHAT_REQUESTS.inc()
+            GENERAL_CHAT_LATENCY.observe(elapsed(started_at))
+            GENERAL_CHAT_TOOL_CALLS.inc(tool_call_count)
+        else:
+            GENERAL_CHAT_REQUESTS.inc()
+            GENERAL_CHAT_ERRORS.inc()
+            GENERAL_CHAT_LATENCY.observe(elapsed(started_at))
 
 
 def record_general_chat_success(

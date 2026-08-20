@@ -410,10 +410,22 @@ def _run_async_safely(async_fn, *args, **kwargs):
 
 
 @tool
-def find_bike_route(start: str, end: str, city: str = "Pittsburgh, PA") -> str:
-    """Find a bicycle route between two places. Places may be neighborhoods,
-    landmarks, parks, addresses, or coordinates; exact map points are not required.
-    Use for any bicycle-routing request.
+def find_bike_route(
+    start: str,
+    end: str,
+    city: str = "Pittsburgh, PA",
+    avoid_crime_dense_areas: bool = False,
+    crime_density_percentile: float = 90.0,
+) -> str:
+    """Find a bicycle route between two places.
+
+    Places may be neighborhoods, landmarks, parks, addresses, or coordinates.
+    For requests that explicitly ask to avoid crime-dense/high-crime areas, set
+    ``avoid_crime_dense_areas=True``. The routing layer will filter graph edges
+    that intersect the highest-density local crime cells BEFORE Dijkstra runs.
+    ``crime_density_percentile`` controls how selective that exclusion is; the
+    default 90 means only the top 10% of occupied crime-density cells are
+    excluded. This is a route-avoidance heuristic, not a safety guarantee.
     """
     try:
         result = _run_async_safely(
@@ -421,16 +433,49 @@ def find_bike_route(start: str, end: str, city: str = "Pittsburgh, PA") -> str:
             start.strip(),
             end.strip(),
             city=(city or "Pittsburgh, PA").strip(),
+            avoid_crime_dense_areas=bool(avoid_crime_dense_areas),
+            crime_density_percentile=float(crime_density_percentile),
         )
-        summary = result.get("route", {}).get("summary", {})
-        facilities = result.get("route", {}).get("local_bike_facilities", {})
+        # A routing failure/no-route result intentionally uses route=None.
+        # Never call .get() on that None value; normalize it to an empty dict
+        # so the structured no-route response can be returned to the caller.
+        if not isinstance(result, dict):
+            raise TypeError(f"Bike routing returned an unexpected result type: {type(result).__name__}")
+        route_data = result.get("route") or {}
+        summary = route_data.get("summary") or {}
+        facilities = route_data.get("local_bike_facilities") or {}
         instructions = []
-        for maneuver in result.get("route", {}).get("maneuvers", [])[:12]:
+        for maneuver in (route_data.get("maneuvers") or [])[:12]:
             instruction = maneuver.get("instruction") or maneuver.get("verbal_pre_transition_instruction")
             if instruction:
                 instructions.append(instruction)
+        if result.get("no_route"):
+            note = result.get("note") or "No continuous path exists using the filtered BikePGH network."
+            if result.get("crime_filter_error"):
+                message = f"No — Not possible: {note}"
+            else:
+                message = f"No — Not possible: no continuous bike path exists using the filtered BikePGH network. {note}"
+            return json.dumps({
+                "status": "analysis",
+                "kind": "no_route",
+                "message": message,
+                "start": result.get("start"),
+                "end": result.get("end"),
+                "city": result.get("city") or city or "Pittsburgh, PA",
+                "crime_avoidance": result.get("crime_avoidance") or {"enabled": False},
+                "analysis_visualization": result.get("analysis_visualization"),
+            }, indent=2)
+
+        crime_meta = result.get("crime_avoidance") or {"enabled": False, "applied": False}
+        success_message = (
+            "Yes — a continuous BikePGH route exists after filtering out the selected high-density crime areas."
+            if bool(crime_meta.get("enabled")) and bool(crime_meta.get("applied"))
+            else "Yes — a continuous BikePGH route was found."
+        )
         return json.dumps({
             "status": "ok",
+            "kind": "route_found",
+            "message": success_message,
             "presentation": "route_map",
             "start": result.get("start"),
             "end": result.get("end"),
@@ -440,11 +485,13 @@ def find_bike_route(start: str, end: str, city: str = "Pittsburgh, PA") -> str:
             "duration_minutes": round(float(summary.get("time", 0) or 0) / 60.0, 1),
             "bike_facility_overlap_percent": facilities.get("facility_overlap_pct", 0.0),
             "bike_infrastructure_near_route": facilities.get("facility_segments", []),
-            "used_infrastructure": result.get("route", {}).get("used_infrastructure") or {"type": "FeatureCollection", "features": []},
+            "used_infrastructure": route_data.get("used_infrastructure") or {"type": "FeatureCollection", "features": []},
             "alternatives_considered": result.get("alternatives_considered", 1),
+            "crime_avoidance": result.get("crime_avoidance") or {"enabled": False},
+            "analysis_visualization": result.get("analysis_visualization"),
             "turn_by_turn": instructions,
-            "route_shape": result.get("route", {}).get("shape", []),
-            "bbox": result.get("route", {}).get("bbox"),
+            "route_shape": route_data.get("shape", []) or [],
+            "bbox": route_data.get("bbox"),
             "attribution": result.get("attribution"),
             "note": result.get("note"),
         }, indent=2)

@@ -1,9 +1,8 @@
-/* ── App state ───────────────────────────────────────────────────────── */
+﻿﻿/* ── App state ───────────────────────────────────────────────────────── */
 const state = {
   selectedHouseId: null,
   houseChatHistory: {},   // {house_id: [{role, content}]}
   generalChatHistory: [],
-  generalChatSessionId: (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : `general-${Date.now()}-${Math.random().toString(16).slice(2)}`,
   markers: {},            // {house_id: L.Marker}
 };
 
@@ -535,47 +534,14 @@ function renderHouseChat(history) {
   history.forEach(h => appendMsg('house', h.role, h.content));
 }
 
-function openTrace(traceUrl, button) {
-  if (!traceUrl) return;
-  const win = window.open(traceUrl, '_blank');
-  if (!win) {
-    window.location.assign(traceUrl);
-    return;
-  }
-  try { win.opener = null; } catch (_) {}
-  if (button) button.blur();
-}
-
-function addTraceButton(messageEl, traceUrl) {
-  if (!traceUrl || messageEl.querySelector('.btn-trace')) return;
-
-  const traceButton = document.createElement('button');
-  traceButton.type = 'button';
-  traceButton.className = 'btn-trace';
-  traceButton.title = 'Open the exact Phoenix trace for this answer';
-  traceButton.setAttribute('aria-label', 'View the exact Phoenix trace for this answer');
-  traceButton.textContent = '⌁ Trace';
-  traceButton.addEventListener('click', (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    openTrace(traceUrl, traceButton);
-  });
-  messageEl.appendChild(traceButton);
-}
-
-function appendMsg(ctx, role, content, traceUrl = null) {
+function appendMsg(ctx, role, content) {
   const containerId = ctx === 'house' ? 'house-chat-messages' : 'general-chat-messages';
   const el = document.getElementById(containerId);
   const div = document.createElement('div');
   div.className = `msg ${role}`;
-  const html = typeof marked !== 'undefined' ? marked.parse(content) : content;
+  const safeContent = content == null ? 'The assistant returned no response.' : String(content);
+  const html = typeof marked !== 'undefined' ? marked.parse(safeContent) : safeContent;
   div.innerHTML = `<div class="bubble">${html}</div>`;
-
-  if (ctx === 'general' && role === 'assistant') {
-    div.dataset.traceUrl = traceUrl || '';
-    addTraceButton(div, traceUrl);
-  }
-
   el.appendChild(div);
   el.scrollTop = el.scrollHeight;
   return div;
@@ -700,12 +666,179 @@ function makeRouteArrow(latlng, bearing) {
   });
 }
 
-async function renderBikeRouteInChat(messageEl, vis) {
+function injectBikeChatStyles() {
+  if (document.getElementById('bike-route-chat-style')) return;
+  const style = document.createElement('style');
+  style.id = 'bike-route-chat-style';
+  style.textContent = `
+    .bike-route-direction-chevron span {
+      display:block;width:0;height:0;margin:2px;
+      border-top:7px solid transparent;border-bottom:7px solid transparent;
+      border-left:11px solid #1d4ed8;filter: drop-shadow(0 0 1px #fff);
+    }
+    .bike-route-start-dot,.bike-route-end-dot {
+      width:14px;height:14px;border-radius:50%;
+      border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,.35);
+    }
+    .bike-route-start-dot { background:#16a34a; }
+    .bike-route-end-dot { background:#dc2626; }
+    .bike-analysis-start-dot { background:#16a34a; }
+    .bike-analysis-end-dot { background:#dc2626; }
+    .bike-crime-legend { display:flex; flex-wrap:wrap; gap:8px; margin-top:7px; font-size:11px; }
+    .bike-crime-legend span { display:inline-flex; align-items:center; gap:4px; }
+    .bike-crime-legend i { width:14px; height:8px; border-radius:2px; display:inline-block; border:1px solid rgba(0,0,0,.15); }
+    .bike-analysis-stats { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 7px; }
+    .bike-analysis-stat { background:#f3f4f6; border:1px solid #e5e7eb; border-radius:999px; padding:2px 7px; font-size:10px; color:#374151; }
+    .bike-analysis-note { margin:0 0 7px; font-size:10px; color:#6b7280; }
+  `;
+  document.head.appendChild(style);
+}
+
+function makeEmbeddedLeafletMap(container, center = [40.4406, -80.0018]) {
+  const m = L.map(container, {
+    zoomControl: true,
+    attributionControl: true,
+    scrollWheelZoom: false,
+  }).setView(center, 13);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+    attribution: '© OpenStreetMap contributors © CARTO',
+    subdomains: 'abcd',
+    maxZoom: 19,
+  }).addTo(m);
+  return m;
+}
+
+function addBikeEndpointMarkers(mapObj, start, end) {
+  const point = (p) => {
+    if (!p) return null;
+    const lat = Number(p.lat), lon = Number(p.lon);
+    return Number.isFinite(lat) && Number.isFinite(lon) ? [lat, lon] : null;
+  };
+  const a = point(start), b = point(end);
+  if (a) {
+    L.marker(a, {
+      icon: L.divIcon({ className: 'bike-route-endpoint', html: '<div class="bike-analysis-start-dot bike-route-start-dot"></div>', iconSize:[16,16], iconAnchor:[8,8] }),
+    }).addTo(mapObj).bindTooltip('Source', {permanent:false});
+  }
+  if (b) {
+    L.marker(b, {
+      icon: L.divIcon({ className: 'bike-route-endpoint', html: '<div class="bike-analysis-end-dot bike-route-end-dot"></div>', iconSize:[16,16], iconAnchor:[8,8] }),
+    }).addTo(mapObj).bindTooltip('Destination', {permanent:false});
+  }
+  return {a, b};
+}
+
+function crimeColor(intensity) {
+  const x = Math.max(0, Math.min(1, Number(intensity) || 0));
+  const hue = 70 - x * 70; // yellow -> red
+  return `hsl(${hue.toFixed(0)} 85% 55%)`;
+}
+
+function renderBikeCrimeAnalysisInChat(messageEl, analysis) {
+  injectBikeChatStyles();
+  const wrapper = document.createElement('div');
+  wrapper.className = 'bike-route-result';
+  const crimeMeta = analysis?.crime_avoidance || {};
+  const hotspotCount = Number(crimeMeta.visual_hotspot_cells ?? crimeMeta.hotspot_cells ?? 0);
+  const blockedCount = Number(crimeMeta.blocked_edges ?? 0);
+  const blockedSegmentCount = Number(crimeMeta.blocked_segments ?? crimeMeta.visual_blocked_edges ?? 0);
+  const percentile = Number(crimeMeta.percentile || 90);
+  const remaining = Array.isArray(analysis?.filtered_bike_network?.features) ? analysis.filtered_bike_network.features.length : 0;
+  wrapper.innerHTML = `
+    <div class="bike-route-result-header">
+      <strong>Intermediate: crime filter applied to BikePGH</strong>
+      <span>top ${Math.max(1, Math.round(100 - percentile))}% density cells excluded</span>
+    </div>
+    <div class="bike-analysis-stats">
+      <span class="bike-analysis-stat">${hotspotCount.toLocaleString()} hotspot cells shown</span>
+      <span class="bike-analysis-stat">${blockedCount.toLocaleString()} BikePGH edges removed</span>
+      <span class="bike-analysis-stat">${remaining.toLocaleString()} network segments shown</span>
+    </div>
+    <div class="bike-analysis-note">Crime density is shown as a continuous heatmap using the same normalized score that drives routing. When a logical BikePGH segment between two junctions intersects a buffered top-percentile crime hotspot, the entire segment is removed; clean segments remain unfiltered.</div>
+    <div class="bike-route-chat-map"></div>
+    <div class="bike-route-legend"></div>
+  `;
+  messageEl.querySelector('.bubble')?.appendChild(wrapper);
+
+  const mapEl = wrapper.querySelector('.bike-route-chat-map');
+  const analysisMap = makeEmbeddedLeafletMap(mapEl);
+  const density = Array.isArray(analysis?.crime_density) ? analysis.crime_density : [];
+
+  // Render crime density using the same continuous Leaflet.heat visualization
+  // used by the main Crime layer. The route filter still uses the shared
+  // combined crime-density score on the backend; this is only the visual
+  // rendering of the exact same normalized intensity used by routing.
+  const heatPoints = [];
+  for (const cell of density) {
+    const lat = Number(cell.lat), lon = Number(cell.lon);
+    const weight = Number(cell.intensity) || 0;
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || weight <= 0) continue;
+    heatPoints.push([lat, lon, weight]);
+  }
+  if (typeof L.heatLayer === 'function' && heatPoints.length) {
+    L.heatLayer(heatPoints, {
+      radius: 24,
+      blur: 28,
+      maxZoom: 15,
+      max: 1.0,
+      gradient: { 0.2: '#3b82f6', 0.4: '#eab308', 0.65: '#f97316', 1.0: '#ef4444' },
+    }).addTo(analysisMap);
+  } else if (heatPoints.length) {
+    console.warn('leaflet.heat did not load for the bike/crime analysis map.');
+  }
+
+  const blocked = analysis?.blocked_bike_network?.features || [];
+  const blockedLayer = L.featureGroup().addTo(analysisMap);
+  for (const feature of blocked) {
+    const coords = feature?.geometry?.coordinates;
+    if (!Array.isArray(coords) || coords.length < 2) continue;
+    const pts = coords.map(([lon, lat]) => [Number(lat), Number(lon)])
+      .filter(([lat, lon]) => Number.isFinite(lat) && Number.isFinite(lon));
+    if (pts.length < 2) continue;
+    L.polyline(pts, { color:'#f97316', weight:4, opacity:0.78, dashArray:'7 6', lineCap:'round', lineJoin:'round' }).addTo(blockedLayer);
+  }
+
+  const network = analysis?.filtered_bike_network?.features || [];
+  const networkLayer = L.featureGroup().addTo(analysisMap);
+  for (const feature of network) {
+    const coords = feature?.geometry?.coordinates;
+    if (!Array.isArray(coords) || coords.length < 2) continue;
+    const pts = coords.map(([lon, lat]) => [Number(lat), Number(lon)])
+      .filter(([lat, lon]) => Number.isFinite(lat) && Number.isFinite(lon));
+    if (pts.length < 2) continue;
+    L.polyline(pts, { color:'#334155', weight:2.8, opacity:0.85, lineCap:'round', lineJoin:'round' }).addTo(networkLayer);
+  }
+
+  const {a,b} = addBikeEndpointMarkers(analysisMap, analysis.start, analysis.end);
+  const bounds = L.latLngBounds([]);
+  const corridor = analysis?.corridor_bbox;
+  if (corridor) {
+    bounds.extend([corridor.south, corridor.west]);
+    bounds.extend([corridor.north, corridor.east]);
+  }
+  if (a) bounds.extend(a);
+  if (b) bounds.extend(b);
+  if (bounds.isValid()) analysisMap.fitBounds(bounds, {padding:[16,16], maxZoom:15});
+
+  const legend = wrapper.querySelector('.bike-route-legend');
+  legend.innerHTML = `
+    <div class="bike-route-legend-title">How to read this step</div>
+    <span><i style="background:linear-gradient(90deg,#3b82f6,#eab308,#f97316,#ef4444)"></i>Continuous crime density (blue → red)</span>
+    <span><i style="background:#f97316"></i>BikePGH paths removed by crime filter</span>
+    <span><i style="background:#334155"></i>BikePGH paths remaining after segment filtering</span>
+    <span><i style="background:#16a34a"></i>Source</span>
+    <span><i style="background:#dc2626"></i>Destination</span>
+  `;
+  setTimeout(() => analysisMap.invalidateSize(), 100);
+}
+
+function renderBikeFinalRouteInChat(messageEl, vis) {
+  injectBikeChatStyles();
   const wrapper = document.createElement('div');
   wrapper.className = 'bike-route-result';
   wrapper.innerHTML = `
     <div class="bike-route-result-header">
-      <strong>BikePGH route</strong>
+      <strong>Final bike route</strong>
       <span>${Number(vis.distance_miles || 0).toFixed(1)} mi · ${Number(vis.duration_minutes || 0).toFixed(0)} min estimate</span>
     </div>
     <div class="bike-route-chat-map"></div>
@@ -714,197 +847,66 @@ async function renderBikeRouteInChat(messageEl, vis) {
   messageEl.querySelector('.bubble')?.appendChild(wrapper);
 
   const mapEl = wrapper.querySelector('.bike-route-chat-map');
-  const routeMap = L.map(mapEl, {
-    zoomControl: true,
-    attributionControl: true,
-    scrollWheelZoom: false,
-  }).setView([40.4406, -80.0018], 13);
-
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-    attribution: '© OpenStreetMap contributors © CARTO',
-    subdomains: 'abcd',
-    maxZoom: 19,
-  }).addTo(routeMap);
-
+  const routeMap = makeEmbeddedLeafletMap(mapEl);
   const asLatLon = (p) => {
     if (!Array.isArray(p) || p.length < 2) return null;
-    const lat = Number(p[0]);
-    const lon = Number(p[1]);
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
-    if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
-    return [lat, lon];
+    const lat = Number(p[0]), lon = Number(p[1]);
+    return Number.isFinite(lat) && Number.isFinite(lon) ? [lat, lon] : null;
   };
-
   const routeCoords = (vis.route_shape || []).map(asLatLon).filter(Boolean);
   if (routeCoords.length < 2) {
-    wrapper.querySelector('.bike-route-legend').textContent =
-      'Route found, but no valid route geometry was returned.';
+    wrapper.querySelector('.bike-route-legend').textContent = 'Route found, but no valid route geometry was returned.';
     return;
   }
 
-  // Draw the route first as a subtle guide. BikePGH infrastructure is
-  // deliberately rendered AFTER the route so the original BikePGH colors
-  // are the visible top layer.
-  L.polyline(routeCoords, {
-    color: '#ffffff',
-    weight: 9,
-    opacity: 0.95,
-    lineCap: 'round',
-    lineJoin: 'round',
-  }).addTo(routeMap);
-  L.polyline(routeCoords, {
-    color: '#1d4ed8',
-    weight: 5,
-    opacity: 0.9,
-    lineCap: 'round',
-    lineJoin: 'round',
-  }).addTo(routeMap);
+  L.polyline(routeCoords, {color:'#fff', weight:9, opacity:.95, lineCap:'round', lineJoin:'round'}).addTo(routeMap);
+  L.polyline(routeCoords, {color:'#1d4ed8', weight:5, opacity:.92, lineCap:'round', lineJoin:'round'}).addTo(routeMap);
 
-  // Infrastructure is route-edge-specific: only BikePGH segments that
-  // Dijkstra actually selected are drawn, using the original layer colors.
-  const used = vis.used_infrastructure || {features: []};
-  const features = Array.isArray(used.features) ? used.features : [];
+  const features = Array.isArray(vis.used_infrastructure?.features) ? vis.used_infrastructure.features : [];
   const routeLayer = L.featureGroup().addTo(routeMap);
-
   for (const feature of features) {
-    const color = feature?.properties?.color || '#666';
-    const geom = feature?.geometry;
-    if (!geom || geom.type !== 'LineString' || !Array.isArray(geom.coordinates)) continue;
-
-    const pts = geom.coordinates
-      .filter(p => Array.isArray(p) && p.length >= 2)
-      .map(([lon, lat]) => [Number(lat), Number(lon)])
-      .filter(p => Number.isFinite(p[0]) && Number.isFinite(p[1]));
-
+    const coords = feature?.geometry?.coordinates;
+    if (!Array.isArray(coords)) continue;
+    const pts = coords.map(([lon, lat]) => [Number(lat), Number(lon)])
+      .filter(([lat, lon]) => Number.isFinite(lat) && Number.isFinite(lon));
     if (pts.length < 2) continue;
-
     L.polyline(pts, {
-      color,
-      weight: 6,
-      opacity: 0.98,
-      lineCap: 'round',
-      lineJoin: 'round',
+      color: feature?.properties?.color || '#666', weight:6, opacity:.98,
+      lineCap:'round', lineJoin:'round'
     }).addTo(routeLayer);
   }
 
-  const start = vis.start
-    ? asLatLon([vis.start.lat, vis.start.lon])
-    : routeCoords[0];
-  const end = vis.end
-    ? asLatLon([vis.end.lat, vis.end.lon])
-    : routeCoords[routeCoords.length - 1];
+  const start = vis.start || null, end = vis.end || null;
+  addBikeEndpointMarkers(routeMap, start, end);
 
-  if (start) {
-    L.marker(start, {
-      icon: L.divIcon({
-        className: 'bike-route-endpoint',
-        html: '<div class="bike-route-start-dot"></div>',
-        iconSize: [16, 16],
-        iconAnchor: [8, 8],
-      }),
-    }).addTo(routeMap).bindTooltip('Start', {permanent: false});
-  }
-  if (end) {
-    L.marker(end, {
-      icon: L.divIcon({
-        className: 'bike-route-endpoint',
-        html: '<div class="bike-route-end-dot"></div>',
-        iconSize: [16, 16],
-        iconAnchor: [8, 8],
-      }),
-    }).addTo(routeMap).bindTooltip('Destination', {permanent: false});
-  }
-
-  // Replace the old dense arrow markers with a few small, subtle chevrons
-  // spaced along the route. They indicate travel direction without looking
-  // like turn symbols on every noded graph edge.
-  function addDirectionChevron(position, bearing) {
-    return L.marker(position, {
-      icon: L.divIcon({
-        className: 'bike-route-direction-chevron',
-        html: '<span></span>',
-        iconSize: [18, 18],
-        iconAnchor: [9, 9],
-      }),
-      interactive: false,
-      zIndexOffset: 700,
-    }).addTo(routeMap);
-  }
-
-  // Inject a tiny one-time CSS rule for the chevrons/endpoints.
-  if (!document.getElementById('bike-route-chat-style')) {
-    const style = document.createElement('style');
-    style.id = 'bike-route-chat-style';
-    style.textContent = `
-      .bike-route-direction-chevron span {
-        display:block;
-        width:0;
-        height:0;
-        margin:2px;
-        border-top:7px solid transparent;
-        border-bottom:7px solid transparent;
-        border-left:11px solid #1d4ed8;
-        filter: drop-shadow(0 0 1px #fff);
-      }
-      .bike-route-start-dot,
-      .bike-route-end-dot {
-        width:14px;height:14px;border-radius:50%;
-        border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,.35);
-      }
-      .bike-route-start-dot { background:#16a34a; }
-      .bike-route-end-dot { background:#dc2626; }
-    `;
-    document.head.appendChild(style);
-  }
-
-  // Rotate a small number of chevrons using the route geometry. Use
-  // approximately evenly spaced positions and a local bearing so the
-  // direction is clear without clutter.
   const arrowCount = Math.min(5, Math.max(2, Math.floor(routeCoords.length / 40)));
-  for (let k = 1; k <= arrowCount; k++) {
-    const idx = Math.max(1, Math.min(
-      routeCoords.length - 2,
-      Math.round(k * (routeCoords.length - 1) / (arrowCount + 1))
-    ));
-    const a = routeCoords[Math.max(0, idx - 2)];
-    const b = routeCoords[Math.min(routeCoords.length - 1, idx + 2)];
-    const bearing = bikeRouteBearing(a, b);
-    const marker = addDirectionChevron(routeCoords[idx], bearing);
+  for (let k=1; k<=arrowCount; k++) {
+    const idx = Math.max(1, Math.min(routeCoords.length-2, Math.round(k*(routeCoords.length-1)/(arrowCount+1))));
+    const a = routeCoords[Math.max(0, idx-2)], b = routeCoords[Math.min(routeCoords.length-1, idx+2)];
+    const bearing = bikeRouteBearing(a,b);
+    const marker = L.marker(routeCoords[idx], {
+      icon: L.divIcon({className:'bike-route-direction-chevron', html:'<span></span>', iconSize:[18,18], iconAnchor:[9,9]}),
+      interactive:false, zIndexOffset:700,
+    }).addTo(routeMap);
     const el = marker.getElement()?.querySelector('span');
     if (el) el.style.transform = `rotate(${bearing}deg)`;
   }
 
   const bounds = L.latLngBounds(routeCoords);
-  if (start) bounds.extend(start);
-  if (end) bounds.extend(end);
-  if (bounds.isValid()) {
-    routeMap.fitBounds(bounds, { padding: [20, 20], maxZoom: 16 });
-  }
+  if (start?.lat != null && start?.lon != null) bounds.extend([Number(start.lat), Number(start.lon)]);
+  if (end?.lat != null && end?.lon != null) bounds.extend([Number(end.lat), Number(end.lon)]);
+  if (bounds.isValid()) routeMap.fitBounds(bounds, {padding:[18,18], maxZoom:16});
 
-  // Legend now contains only layer families actually used by the route.
   const usedLabels = new Map();
   for (const feature of features) {
-    const p = feature?.properties || {};
-    const label = p.label || p.layer_type;
-    if (label) usedLabels.set(label, p.color || '#666');
+    const pr = feature?.properties || {};
+    const label = pr.label || pr.layer_type;
+    if (label) usedLabels.set(label, pr.color || '#666');
   }
-  const legendEl = wrapper.querySelector('.bike-route-legend');
-  if (usedLabels.size) {
-    legendEl.innerHTML =
-      '<div class="bike-route-legend-title">BikePGH infrastructure used</div>' +
-      [...usedLabels.entries()]
-        .map(([label, color]) => `<span><i style="background:${escapeHtml(color)}"></i>${escapeHtml(label)}</span>`)
-        .join('');
-  } else {
-    legendEl.textContent = 'BikePGH route infrastructure';
-  }
-
-  setTimeout(() => {
-    routeMap.invalidateSize();
-    if (bounds.isValid()) {
-      routeMap.fitBounds(bounds, {padding: [20, 20], maxZoom: 16});
-    }
-  }, 100);
+  wrapper.querySelector('.bike-route-legend').innerHTML =
+    '<div class="bike-route-legend-title">Final route</div>' +
+    [...usedLabels.entries()].map(([label,color]) => `<span><i style="background:${escapeHtml(color)}"></i>${escapeHtml(label)}</span>`).join('');
+  setTimeout(() => routeMap.invalidateSize(), 100);
 }
 
 async function sendGeneralMessage() {
@@ -923,36 +925,27 @@ async function sendGeneralMessage() {
     const resp = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message: msg,
-        history: state.generalChatHistory,
-        session_id: state.generalChatSessionId,
-      }),
+      body: JSON.stringify({ message: msg, history: state.generalChatHistory }),
     });
     const data = await resp.json();
     typing.remove();
-    if (!resp.ok) {
-      throw new Error(data.detail || data.error || `Request failed (${resp.status})`);
+    const assistantMsg = appendMsg('general', 'assistant', data.reply);
+    const viz = data.visualization;
+    // Crime-aware requests always render the intermediate filtered-network +
+    // crime-density map first. A successful route then gets a second map.
+    // Accept both normalized forms returned by older/newer backend versions.
+    if (viz?.type === 'bike_crime_analysis' || viz?.analysis || viz?.analysis_visualization) {
+      const analysis = viz.analysis || viz.analysis_visualization;
+      renderBikeCrimeAnalysisInChat(assistantMsg, analysis);
+      if (viz.final_route) {
+        renderBikeFinalRouteInChat(assistantMsg, viz.final_route);
+      } else if (viz.type === 'bike_route' && viz.route_shape?.length) {
+        renderBikeFinalRouteInChat(assistantMsg, viz);
+      }
+    } else if (viz?.type === 'bike_route') {
+      renderBikeFinalRouteInChat(assistantMsg, viz);
     }
-
-    const traceId = data.observability?.trace_id || null;
-    const traceUrl = data.observability?.trace_url ||
-      (traceId ? `/redirects/traces/${encodeURIComponent(traceId)}` : null);
-    const assistantMsg = appendMsg(
-      'general',
-      'assistant',
-      data.reply,
-      traceUrl,
-    );
-
-    // Keep the exact trace metadata on the answer in local state too, so a
-    // future re-render can recreate the same button instead of losing it.
-    if (Array.isArray(data.history)) {
-      state.generalChatHistory = data.history;
-    }
-    if (data.visualization && data.visualization.type === 'bike_route') {
-      renderBikeRouteInChat(assistantMsg, data.visualization);
-    }
+    state.generalChatHistory = data.history;
   } catch (e) {
     typing.remove();
     appendMsg('general', 'assistant', `Error: ${e.message}`);

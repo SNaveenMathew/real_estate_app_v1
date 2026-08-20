@@ -344,7 +344,7 @@ input[type="text"] { border: 1px solid #ddd; border-radius: 6px; padding: 6px 8p
 }
 .bike-route-legend-title { width:100%; font-weight:700; margin-bottom:1px; }
 .bike-route-legend span { display:inline-flex; align-items:center; gap:3px; }
-.bike-route-legend i { width:15px; height:3px; border-radius:2px; display:inline-block; }
+.bike-route-legend i { width:15px; height:7px; border-radius:2px; display:inline-block; }
 .bike-route-directions {
   margin-top:8px;
   font-size:11px;
