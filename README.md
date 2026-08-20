@@ -523,3 +523,19 @@ These utility scripts are intended for debugging, data validation, and evaluatio
 - `diagnose_msa.py`: Finds `X`-coded MSA rows that don't match `cbsa_counties`, suggests best CBSA candidates using a fuzzy normalizer, and can apply fixes with `--apply`. Usage: `python diagnose_msa.py [--apply]`
 - `run_eval.py`: Agent evaluation pipeline (already described above). Runs the golden set examples, scores them, and writes timestamped reports to `eval/reports/`
 
+
+
+### Crime-aware bike routing
+Crime-aware bike route requests are now executed deterministically in `agents/general_agent.py` when the user asks for a bike route that avoids crime/high-crime/dangerous areas. This prevents a local LLM from omitting the `find_bike_route` tool call. The resulting `find_bike_route` tool span is visible in observability, and its intermediate filtered BikePGH/crime visualization remains attached to the response.
+
+
+## Crime-aware bike routing behavior
+
+For bike-route questions that explicitly ask to avoid crime-dense/high-crime areas, the app now treats crime avoidance as a deterministic spatial filter rather than a language-model preference. The routing graph is cloned per request, the top crime-density cells (default: top 10% of occupied cells) are expanded by a small exclusion buffer, and BikePGH edges intersecting those exclusion areas are removed before Dijkstra routing. The intermediate map shows the relevant high-density crime cells, the BikePGH edges removed by the filter, and the BikePGH network that remains. A final route map is rendered only when a continuous route exists in that filtered graph.
+
+The intermediate map is intentionally corridor-focused so the crime layer remains legible instead of painting the whole city with low-opacity cells. The visual is explanatory only; crime density is a heuristic and not a safety guarantee.
+
+
+### Crime-aware bike routing consistency
+
+The bike/crime intermediate visualization and the routing filter now share one crime-density model. Each occupied grid cell receives the same intensity score shown on the map: 75% normalized incident count + 25% normalized severity-weighted score. The routing hotspot percentile is applied to that same intensity score using a citywide baseline. The selected cells are buffered, then BikePGH geometry is evaluated at logical intersection-to-intersection segment granularity so one affected sub-edge does not create an inconsistent dark/orange/dark split within the same real-world segment.
