@@ -55,7 +55,8 @@ A local, AI-powered map app for analyzing houses with FEMA National Risk Index d
 
 - Python 3.11+
 - `llama-server` (llama.cpp) installed and running, or Ollama as an alternative
-- Optional local Phoenix for tracing: `python -m phoenix.server.main serve`
+- Phoenix is optional. When `PHOENIX_ENABLED=true`, the app starts a local Phoenix server automatically on `http://127.0.0.1:6006` if that port is available.
+- Internet access is needed for Nominatim geocoding when sold-home addresses or bike-route endpoints are not already cached.
 
 ---
 
@@ -109,6 +110,10 @@ The project reads `.env` via `pydantic-settings` and includes defaults for:
 - model timeout and token caps
 - Phoenix observability endpoint
 - app host/port and default map center
+
+All settings are optional. The defaults in `config.py` point at a local
+`llama-server` on port `8080`, Phoenix on port `6006`, and the database and
+data directories under this repository.
 
 ### 4. LLM: run `llama-server` (default)
 
@@ -312,6 +317,13 @@ After adding new CSV files, re-run:
 python setup_data.py --only redfin    # just Redfin
 python setup_data.py --only sold      # just sold homes
 python setup_data.py --only crime     # just crime data
+python setup_data.py --only bike      # just BikePGH route data
+python setup_data.py --only census    # CBSA crosswalk + tract/MSA populations
+python setup_data.py --only geocode   # retry pending sold-home geocodes
+python setup_data.py --only match     # link sold records to houses
+python setup_data.py --only repair    # repair X-coded MSA codes
+python setup_data.py --only sold --no-geocoding  # load sold data without network geocoding
+python setup_data.py --resolve-tracts # resolve missing house tract FIPS values
 python setup_data.py                  # everything
 ```
 
@@ -331,6 +343,8 @@ The vector database (ChromaDB) grows automatically as you paste descriptions in 
 | Slow tract resolution | Add TIGER/Line shapefiles to `data/shapefiles/` |
 | "Crime" layer is empty | Confirm `data/crime/<city>/` has files for a city your map view overlaps, then `python setup_data.py --only crime` |
 | "NRI" layer is empty / shows a warning | It needs both tract *geometry* (from the NRI shapefile, or TIGER/Line shapefiles in `data/shapefiles/`) and tract *attributes* (`python setup_data.py --only nri`) — the layer's warning message says which is missing |
+| Phoenix is unavailable | Set `PHOENIX_ENABLED=false` to run without tracing, or start it manually with `python -m phoenix.server.main serve` |
+| Bike route returns no route | Confirm BikePGH layers were loaded with `python setup_data.py --only bike`; the router does not fall back to an external road-routing service |
 
 ---
 
@@ -415,9 +429,10 @@ data/
 
 ## Observability & metrics
 
-The app can auto-start a local Phoenix trace collector when `PHOENIX_ENABLED=true`
-(which is the default in `.env.example`) and exposes Prometheus-compatible metrics
-at `/metrics`.
+The app auto-starts a local Phoenix trace collector when
+`PHOENIX_ENABLED=true` (the default in `.env.example`) and exposes
+Prometheus-compatible metrics at `/metrics`. If Phoenix is already listening on
+the configured port, the app reuses it and does not start a second process.
 
 - Trace collection is configured via `PHOENIX_COLLECTOR_ENDPOINT`, `PHOENIX_PROTOCOL`,
   and `PHOENIX_UI_URL`
@@ -429,7 +444,27 @@ at `/metrics`.
 python -m phoenix.server.main serve
 ```
 
-Then open the Phoenix UI at the configured local URL (default: http://127.0.0.1:6006).
+Use the command above only when starting Phoenix separately, for example after
+setting `PHOENIX_ENABLED=false`. Open the Phoenix UI at the configured local URL
+(default: http://127.0.0.1:6006).
+
+## HTTP API
+
+The browser uses these main endpoints:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/houses` | Return saved houses as GeoJSON |
+| `GET /api/layers/crime` | Return the viewport's severity-weighted crime grid |
+| `GET /api/layers/nri` | Return NRI tract geometry and attributes |
+| `GET /api/layers/bike` | Return BikePGH features for the current viewport |
+| `POST /api/bike/route` | Route between geocoded places on the local bike graph |
+| `POST /api/chat` | Ask the general cross-city agent |
+| `POST /api/house/{id}/chat` | Ask the agent about one house |
+| `GET /metrics` | Expose Prometheus metrics |
+
+The API also supports house document and photo operations; the interactive UI
+is the recommended way to use those endpoints.
 
 ---
 
