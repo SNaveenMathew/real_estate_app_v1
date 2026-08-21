@@ -16,6 +16,7 @@ import db.duckdb_store as store
 import db.vector_store as vs
 import db.schema_catalog as schema
 import services.bike_routing as bike_routing
+from agents.query_planner import build_query_plan
 import asyncio
 import threading
 
@@ -195,47 +196,29 @@ _TABLE_REF = re.compile(
     re.I,
 )
 
-def _live_agent_schema() -> str:
-    # Reuse the same live-schema renderer exposed to General Chat. This keeps
-    # the sub-agent aligned with real column names and documented joins.
-    return schema.render_schema_for_agent()
 
+SYSTEM_PROMPT = """You are the SQL Code Agent for a real-estate analytics application.
 
-SYSTEM_PROMPT = """You are the shared SQL Code Agent in a real-estate analytics application.
-
-Your job is to generate ONE safe DuckDB SELECT statement for General Chat.
-General Chat is responsible for interpretation, multi-step planning, and the
-final user-facing answer. You are responsible for translating its analytical
-need into SQL against the live database schema below.
+Generate exactly ONE safe DuckDB SELECT statement (WITH ... SELECT allowed).
+The query must directly answer the user's analytical request.
 
 Rules:
-1. Output ONLY the SQL statement itself — nothing before it, nothing after it.
-   No markdown fences, no explanation, no restating the request, no comments
-   about your reasoning or approach. If you notice yourself writing a
-   sentence that is not part of the SQL statement, stop and remove it.
-2. Only SELECT statements, or WITH ... SELECT statements, are allowed.
-3. Use only tables listed in the LIVE SCHEMA. Never invent tables or columns.
-4. Prefer the documented relationships and column notes over guessed joins.
-5. Honor table-specific default filters when the request is about valid/market data.
-6. Use explicit aliases and deterministic ORDER BY clauses where rankings are involved.
-7. Respect requested city/state/metro/time/price/risk filters exactly.
-8. For questions asking for a count, count the requested unit (incidents, houses,
-   routes, tracts, sales, etc.), not an unrelated join multiplication.
-9. For comparisons/rankings, return enough fields for General Chat to explain the
-   result, but keep the result set reasonably small with LIMIT when appropriate.
-10. If the request combines multiple datasets, use documented joins or CTEs.
-11. Do not parse serialized geometry/blobs in SQL when metadata says they are intended
-   for map rendering only.
-12. Never use SELECT * when a narrower projection can answer the request.
-13. If the request is ambiguous, prefer the interpretation explicitly stated in the
-   General Chat requirements/plan rather than inventing a new scope.
+1. Use ONLY physical tables and columns present in the TARGETED LIVE DATA MODEL below.
+2. Do not invent tables, columns, joins, or metrics.
+3. Prefer documented relationship paths and honor their cardinality / fanout warnings.
+4. Respect semantic aliases and canonical columns supplied by the metadata.
+5. For rankings, make the ranking universe explicit before applying the requested LIMIT.
+6. When a request says 'top N MSAs', first determine the MSA universe by population, then aggregate the requested risk metric over those MSAs; do not limit tracts before the MSA population ranking.
+7. For NRI tract-to-MSA analysis, use census_msa -> cbsa_counties -> nri_tracts. Do not invent a direct MSA-to-tract join.
+8. Preserve the requested hazard exactly (e.g. riverine flooding vs coastal flooding vs overall risk).
+9. Keep the output small and useful: return the identity/grouping fields plus the requested metric, with deterministic ORDER BY.
+10. Do not parse geometry/blob columns in SQL.
+11. Output ONLY SQL — no markdown fences or explanation.
 
-The query must answer the stated analytical request directly; do not write a generic
-schema-inspection query unless General Chat explicitly asks for metadata.
+TARGETED LIVE DATA MODEL
+========================
+"""
 
-LIVE SCHEMA
-===========
-""" + _live_agent_schema()
 
 
 def _extract_content(resp) -> str:
@@ -312,8 +295,14 @@ def get_code_agent() -> ChatOpenAI:
 
 
 def generate_sql(request: str, requirements: str = "", plan: str = "") -> str:
-    """Generate and validate a SELECT from a request and optional General Chat plan."""
-    prompt_parts = [f"USER REQUEST:\n{request.strip()}"]
+    """Generate and validate a SELECT using mandatory structured planning + metadata grounding."""
+    query_plan = build_query_plan(request, requirements=requirements, plan=plan)
+    targeted = schema.build_query_context(request, requirements=requirements, plan=plan)
+    prompt_parts = [
+        f"USER REQUEST:\n{request.strip()}",
+        "STRUCTURED QUERY PLAN:\n" + query_plan.render(),
+        f"TARGETED DATA MODEL RETRIEVAL:\n{targeted}",
+    ]
     if requirements.strip():
         prompt_parts.append(f"GENERAL CHAT REQUIREMENTS:\n{requirements.strip()}")
     if plan.strip():
@@ -329,20 +318,58 @@ def generate_sql(request: str, requirements: str = "", plan: str = "") -> str:
 
 
 def run_code_query(request: str, requirements: str = "", plan: str = "") -> tuple[str, str]:
-    """Generate SQL with the code agent, execute it, and return (sql, result_text)."""
-    sql = generate_sql(request, requirements=requirements, plan=plan)
-    try:
-        df = store.query(sql)
-    except Exception as exc:
-        raise RuntimeError(f"Generated SQL failed: {exc}\nSQL: {sql}") from exc
+    """Generate, execute, and (when needed) repair a SQL query.
 
-    if len(df) == 0:
-        diagnosis = schema.diagnose_empty_or_error(sql)
-        return sql, diagnosis or "Query returned 0 rows."
+    The repair remains inside the SQL Code Agent contract: the model receives
+    the actual zero-row/join diagnosis and generates a corrected SELECT.
+    This prevents General Chat from having to hard-code dataset-specific SQL.
+    """
+    last_sql = ""
+    repair_note = ""
 
-    if len(df) > 50:
-        return sql, df.head(50).to_string(index=False) + f"\n... ({len(df)} total rows, showing 50)"
-    return sql, df.to_string(index=False)
+    for attempt in range(2):
+        effective_plan = plan
+        if repair_note:
+            effective_plan = (
+                (plan + "\n\n") if plan.strip() else ""
+            ) + "SQL REPAIR CONTEXT FROM THE PREVIOUS EXECUTION:\n" + repair_note
+
+        sql = generate_sql(
+            request,
+            requirements=requirements,
+            plan=effective_plan,
+        )
+        last_sql = sql
+
+        try:
+            df = store.query(sql)
+        except Exception as exc:
+            if attempt == 0:
+                repair_note = (
+                    f"The previous generated SQL failed to execute with this error: {exc}\n"
+                    f"Previous SQL:\n{sql}\n"
+                    "Generate a corrected SELECT using only the live schema and documented joins."
+                )
+                continue
+            raise RuntimeError(f"Generated SQL failed: {exc}\nSQL: {sql}") from exc
+
+        if len(df) == 0:
+            diagnosis = schema.diagnose_empty_or_error(sql) or "Query returned 0 rows."
+            if attempt == 0:
+                repair_note = (
+                    f"The previous generated SQL returned no rows.\n"
+                    f"Diagnostic evidence:\n{diagnosis}\n"
+                    f"Previous SQL:\n{sql}\n"
+                    "Generate a corrected SELECT that still answers the original user request."
+                )
+                continue
+            return sql, diagnosis
+
+        if len(df) > 50:
+            return sql, df.head(50).to_string(index=False) + f"\n... ({len(df)} total rows, showing 50)"
+        return sql, df.to_string(index=False)
+
+    return last_sql, "Query could not be completed."
 
 # ── General tools ────────────────────────────────────────────────────────────
 
@@ -360,6 +387,28 @@ def check_data_availability(_: str = "") -> str:
     return report
 
 
+
+
+@tool
+def retrieve_data_model_context(query: str) -> str:
+    """Mandatory grounding retrieval: plan + targeted live schema + vector metadata."""
+    structured_plan = build_query_plan(query)
+    retrieval_query = query + "\n" + structured_plan.render()
+    parts = [
+        "[STRUCTURED QUERY PLAN]",
+        structured_plan.render(),
+        "[TARGETED LIVE DATA MODEL]",
+        schema.build_query_context(query, plan=structured_plan.render()),
+    ]
+    try:
+        docs = vs.search_data_model(retrieval_query, n_results=10)
+        if docs:
+            parts.append("[SEMANTIC METADATA RETRIEVAL]")
+            parts.extend(d["text"] for d in docs)
+    except Exception as exc:
+        parts.append(f"[VECTOR METADATA FALLBACK] unavailable: {exc}")
+    return "\n\n".join(p for p in parts if p)
+
 @tool
 def query_database(request: str, requirements: str = "", plan: str = "") -> str:
     """
@@ -373,12 +422,37 @@ def query_database(request: str, requirements: str = "", plan: str = "") -> str:
     Chat can inspect the evidence and continue thinking/planning before it
     answers the user.
     """
+    structured_plan = build_query_plan(request, requirements=requirements, plan=plan)
+    effective_plan = ((plan + "\n\n") if plan.strip() else "") + "STRUCTURED QUERY PLAN:\n" + structured_plan.render()
     try:
         sql, result = run_code_query(
-            request, requirements=requirements, plan=plan
+            request, requirements=requirements, plan=effective_plan
         )
     except Exception as exc:
-        return f"Code Agent error: {exc}"
+        sql, result = "", f"Code Agent error: {exc}"
+
+    # LLM-first architecture: only after generation/repair fails do we use the
+    # metadata-defined canonical recovery for the well-known MSA->county->NRI
+    # ranking shape. This does NOT create a view and does NOT bypass planning.
+    recovery_sql = None
+    lower_result = str(result).lower()
+    if ("0 rows" in lower_result or "returned no rows" in lower_result or
+            "code agent error" in lower_result):
+        recovery_sql = schema.canonical_nri_msa_query(request)
+    if recovery_sql:
+        try:
+            recovered = store.query(recovery_sql)
+            if len(recovered) > 0:
+                return (
+                    f"[GENERATED SQL]\n{sql or '[LLM query failed/returned no rows]'}\n"
+                    f"[CANONICAL RECOVERY SQL]\n{recovery_sql}\n[RESULT]\n"
+                    f"{recovered.head(50).to_string(index=False)}"
+                    + (f"\n... ({len(recovered)} total rows, showing 50)" if len(recovered) > 50 else "")
+                )
+            result = (str(result) + "\nCanonical recovery query also returned 0 rows.").strip()
+        except Exception as rec_exc:
+            result = (str(result) + f"\nCanonical recovery failed: {rec_exc}").strip()
+
     return f"[GENERATED SQL]\n{sql}\n[RESULT]\n{result}"
 
 
@@ -547,6 +621,7 @@ GENERAL_TOOLS = [
     check_data_availability,
     get_database_schema,
     query_database,
+    retrieve_data_model_context,
     find_bike_route,
     search_all_house_descriptions,
 ]

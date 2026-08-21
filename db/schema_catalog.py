@@ -55,19 +55,29 @@ class ColumnNote:
 
 @dataclass
 class Relationship:
-    """A documented join path between two tables."""
+    """A documented, machine-readable join edge between physical tables."""
     left_table: str
-    left_on: str        # SQL expression, evaluated against left_table
+    left_on: str
     right_table: str
-    right_on: str        # SQL expression, evaluated against right_table
-    note: str = ""        # gotcha / explanation — format quirks, reliability, caveats
+    right_on: str
+    note: str = ""
+    cardinality: str = "many-to-one"
+    confidence: str = "high"
+    bridge: bool = False
+    preferred: bool = True
+    nullable_side: str = ""
+    grain_note: str = ""
 
     def involves(self, tables: set[str]) -> bool:
         return self.left_table in tables and self.right_table in tables
 
     def render(self) -> str:
         line = f"{self.left_table}.{self.left_on} = {self.right_table}.{self.right_on}"
-        return f"{line}\n    Note: {self.note}" if self.note else line
+        attrs = f"[{self.cardinality}; confidence={self.confidence}; preferred={self.preferred}; bridge={self.bridge}]"
+        extra = []
+        if self.note: extra.append(self.note)
+        if self.grain_note: extra.append("Grain: " + self.grain_note)
+        return line + " " + attrs + ("\n    Note: " + "\n    Note: ".join(extra) if extra else "")
 
 
 @dataclass
@@ -109,6 +119,50 @@ NRI_HAZARD_COLUMNS: dict[str, str] = {
 }
 
 
+
+# Semantic vocabulary used by the planning/RAG layer. These are descriptive facts,
+# not replacement tables/views. They let the planner resolve user language to physical
+# columns and documented relationship paths before SQL generation.
+SEMANTIC_GLOSSARY = {
+    "walk_score": {"tables": ["houses"], "columns": ["houses.walk_score"], "aliases": ["walkability", "walk score", "most walkable"], "direction": "higher_is_better", "null_policy": "exclude_nulls"},
+    "favorite_house": {"tables": ["houses"], "columns": ["houses.is_favorite"], "aliases": ["my list", "saved houses", "favorites"], "filter": "houses.is_favorite = TRUE"},
+    "nri_overall_risk": {"tables": ["nri_tracts"], "columns": ["nri_tracts.risk_score"], "aliases": ["overall risk", "NRI risk", "composite risk"], "direction": "lower_is_better"},
+    "nri_riverine_flood_risk": {"tables": ["nri_tracts"], "columns": ["nri_tracts.rfld_risks"], "aliases": ["flood risk", "riverine flood", "riverine flooding"], "direction": "lower_is_better"},
+    "nri_coastal_flood_risk": {"tables": ["nri_tracts"], "columns": ["nri_tracts.cfld_risks"], "aliases": ["coastal flood", "coastal flooding"], "direction": "lower_is_better"},
+    "msa_population": {"tables": ["census_msa"], "columns": ["census_msa.population"], "aliases": ["top MSA", "largest metros", "top 50 MSAs"], "direction": "higher_is_larger"},
+}
+
+# Compound planning recipes. They describe *how data relates* without materializing a view.
+PLANNING_PATTERNS = {
+    "top_n_msa_nri": {
+        "tables": ["census_msa", "cbsa_counties", "nri_tracts"],
+        "steps": [
+            "select top N real MSA rows from census_msa ordered by CAST(population AS BIGINT) DESC and msa_code NOT LIKE 'X%'",
+            "join census_msa -> cbsa_counties on msa_code = cbsa_code",
+            "join cbsa_counties -> nri_tracts on state_fips || county_fips = nri_tracts.county_fips",
+            "aggregate the requested NRI metric at MSA grain",
+        ],
+        "warnings": ["The NRI source is tract-grain; aggregation choice matters. Use AVG unless the user specifies another statistic.", "Keep MSA population ranking separate from NRI aggregation.", "Do not place the final LIMIT inside the population-universe CTE."],
+        "canonical_sql_shape": (
+            "WITH top_msas AS (SELECT msa_code, name, CAST(population AS BIGINT) AS population "
+            "FROM census_msa WHERE population IS NOT NULL AND msa_code NOT LIKE 'X%' "
+            "ORDER BY CAST(population AS BIGINT) DESC LIMIT {universe_limit}), "
+            "msa_metric AS (SELECT m.msa_code, AVG(n.{metric}) AS metric_value "
+            "FROM top_msas m JOIN cbsa_counties cb ON m.msa_code = cb.cbsa_code "
+            "JOIN nri_tracts n ON (cb.state_fips || cb.county_fips) = n.county_fips "
+            "WHERE n.{metric} IS NOT NULL GROUP BY m.msa_code) "
+            "SELECT m.name AS msa_name, m.population, r.metric_value FROM top_msas m "
+            "JOIN msa_metric r ON m.msa_code = r.msa_code "
+            "ORDER BY r.metric_value {direction}, m.name ASC LIMIT {result_limit}"
+        ),
+    },
+    "favorite_house_ranking": {
+        "tables": ["houses"],
+        "steps": ["filter is_favorite = TRUE", "exclude NULL target score unless asked", "ORDER BY target score DESC for highest/best"],
+    },
+}
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Tables
 # ─────────────────────────────────────────────────────────────────────────
@@ -138,6 +192,14 @@ TABLES: dict[str, TableMeta] = {
             ColumnNote("price",
                        "List price as of the last Redfin export. For a sold price use "
                        "house_snapshots (source_type='sold') or sold_homes."),
+            ColumnNote("walk_score",
+                       "Walk Score for the current listing. Higher is better. This is the canonical field for questions such as 'which houses have the highest walk scores?'. Sort descending for highest/best and ascending for lowest/worst; keep NULL scores excluded unless the user asks for missing scores."),
+            ColumnNote("bike_score",
+                       "Bike Score for the current listing. Higher is better."),
+            ColumnNote("transit_score",
+                       "Transit Score for the current listing. Higher is better."),
+            ColumnNote("is_favorite",
+                       "TRUE means the house is in the user\'s saved/favorited list. Use this when the request explicitly says 'my list' or 'saved houses'."),
         ],
     ),
 
@@ -329,30 +391,29 @@ TABLES: dict[str, TableMeta] = {
 
 RELATIONSHIPS: list[Relationship] = [
     Relationship("houses", "tract_fips", "nri_tracts", "tract_fips",
-                 note="Always safe — tract_fips is well populated on houses."),
+                 note="Direct tract identity join. tract_fips is the canonical geographic key.",
+                 cardinality="many-to-one", confidence="high", grain_note="house -> census tract"),
     Relationship("houses", "tract_fips", "census_tracts", "tract_fips",
-                 note="Tract-level population for a house's neighborhood."),
+                 note="Direct tract identity join for Census population context.",
+                 cardinality="many-to-one", confidence="high", grain_note="house -> census tract"),
     Relationship("sold_homes", "tract_fips", "nri_tracts", "tract_fips",
-                 note="Only rows with sold_homes.geocode_status='success' have a tract_fips to join on."),
+                 note="Use only geocoded sold rows with tract_fips populated.",
+                 cardinality="many-to-one", confidence="high", nullable_side="sold_homes.tract_fips"),
     Relationship("houses", "msa_code", "census_msa", "msa_code",
-                 note="Weak join — houses.msa_code is usually NULL (Redfin doesn't export CBSA codes). "
-                      "Prefer grouping houses by city/state; only use this for the minority of rows "
-                      "that do have msa_code populated."),
+                 note="Weak because houses.msa_code is usually NULL in Redfin exports. Do not rely on it for a complete house-to-MSA mapping.",
+                 cardinality="many-to-one", confidence="low", preferred=False, nullable_side="houses.msa_code"),
     Relationship("census_msa", "msa_code", "cbsa_counties", "cbsa_code",
-                 note="Exclude unmatched rows first: WHERE census_msa.msa_code NOT LIKE 'X%'."),
+                 note="Canonical MSA-to-county bridge. Filter placeholder X* msa codes before joining.",
+                 cardinality="one-to-many", confidence="high", bridge=True, grain_note="MSA -> constituent counties"),
     Relationship("cbsa_counties", "state_fips || county_fips", "nri_tracts", "county_fips",
-                 note="Concatenation join — cbsa_counties splits state and county into two "
-                      "zero-padded fields; nri_tracts already stores the combined county code. "
-                      "This is the only path from MSA-level rollups down to NRI risk scores."),
+                 note="Canonical county-to-NRI relationship. state_fips is 2-digit and county_fips is 3-digit; concatenate to 5-digit county FIPS.",
+                 cardinality="one-to-many", confidence="high", bridge=True, grain_note="county -> NRI tracts"),
     Relationship("house_snapshots", "house_id", "houses", "house_id",
-                 note="Full history per house — use for price-over-time / days-on-market questions."),
+                 note="History-to-current-house relationship.",
+                 cardinality="many-to-one", confidence="high", grain_note="house snapshots -> house"),
     Relationship("houses", "crime_city", "crime_incidents", "city",
-                 note="Weak join — houses.crime_city is only populated when a Redfin CSV set it "
-                      "explicitly, or when the house's own city exactly matches a covered crime-data "
-                      "city (see services/data_loader._infer_crime_city). A house in a suburb (e.g. "
-                      "Cambridge, MA) won't auto-match Boston's crime data unless crime_city was set "
-                      "explicitly. This is a plain city-name join, not spatial — it does NOT restrict "
-                      "to the house's own neighborhood, only its city."),
+                 note="City-level contextual join only; not spatial and not neighborhood-specific.",
+                 cardinality="many-to-many", confidence="medium", preferred=False, nullable_side="houses.crime_city"),
 ]
 
 
@@ -360,98 +421,204 @@ RELATIONSHIPS: list[Relationship] = [
 # Live introspection — always asks the running database, never hardcoded.
 # ─────────────────────────────────────────────────────────────────────────
 
-def _live_columns(table: str) -> list[tuple[str, str]]:
-    """[(column_name, column_type), ...] straight from the running database."""
+def _live_columns(table_name: str):
     try:
-        df = store.query(f"DESCRIBE {table}")
-        return list(zip(df["column_name"].tolist(), df["column_type"].tolist()))
+        rows = store.query(f"DESCRIBE {table_name}")
+        return [(str(r[0]), str(r[1])) for r in rows.itertuples(index=False, name=None)]
     except Exception:
         return []
 
 
-def _row_count(table: str) -> int | None:
+def _row_count(table_name: str) -> int:
     try:
-        return int(store.query(f"SELECT COUNT(*) AS n FROM {table}").iloc[0]["n"])
+        df = store.query(f"SELECT COUNT(*) AS n FROM {table_name}")
+        return int(df.iloc[0, 0]) if not df.empty else 0
     except Exception:
-        return None
+        return 0
 
 
-def list_table_names(agent_visible_only: bool = False) -> list[str]:
-    names = list(TABLES.keys())
-    if agent_visible_only:
-        names = [n for n in names if TABLES[n].agent_visible]
-    return names
+def list_table_names(agent_visible_only: bool = True) -> list[str]:
+    """Return physical DuckDB tables allowed in agent-generated SQL."""
+    return sorted(
+        name for name, meta in TABLES.items()
+        if (not agent_visible_only or meta.agent_visible)
+    )
 
-
-# ─────────────────────────────────────────────────────────────────────────
-# Rendering — what the agent (and the tools it calls) actually see.
-# ─────────────────────────────────────────────────────────────────────────
 
 def availability_report() -> tuple[str, dict[str, int]]:
-    """
-    Row counts for every registered table, plus setup hints for empty ones.
-    Returns (rendered_text, {table: row_count}). Backs both the
-    check_data_availability tool and the passive per-turn system context,
-    so the two can never drift out of sync with each other again.
-    """
-    lines = ["Table row counts (0 = not loaded yet):"]
+    """Return a live availability report for physical agent-visible tables."""
     counts: dict[str, int] = {}
-    empty_hints = []
+    lines: list[str] = []
     for name, meta in TABLES.items():
+        if not meta.agent_visible:
+            continue
         n = _row_count(name)
-        counts[name] = n or 0
-        if n is None:
-            lines.append(f"  ?  {name:<20} (table missing or query failed)")
-        else:
-            status = "✓" if n > 0 else "✗ EMPTY"
-            lines.append(f"  {status}  {name:<20} {n:>10,} rows")
-            if n == 0 and meta.setup_hint:
-                empty_hints.append(f"  {name}: {meta.setup_hint}")
-    if empty_hints:
-        lines.append("")
-        lines.append("Setup instructions for empty tables:")
-        lines.extend(empty_hints)
+        counts[name] = n
+        status = "loaded" if n > 0 else "EMPTY"
+        lines.append(f"{name}: {status} ({n:,} rows)")
     return "\n".join(lines), counts
 
 
 def render_schema_for_agent() -> str:
-    """
-    The LLM-facing schema: live columns/types for every agent-visible table,
-    plus curated notes and the documented join graph. This is the one place
-    that formats "what tables exist and how do I query them" — replacing
-    what used to be a hardcoded docstring plus a chunk of the system prompt.
-    """
+    """Render physical schema + semantic glossary + relationship graph."""
     parts = []
     for name, meta in TABLES.items():
         if not meta.agent_visible:
             continue
         cols = [(c, t) for c, t in _live_columns(name) if c not in meta.hidden_columns]
-
         parts.append(f"### {name}")
         parts.append(meta.description)
         if cols:
-            col_lines = "\n".join(f"    {c:<20} {t}" for c, t in cols)
-            parts.append(f"  Columns (live, from the database you're running against):\n{col_lines}")
+            parts.append("  Columns (live):\n" + "\n".join(f"    {c:<20} {t}" for c, t in cols))
         if name == "nri_tracts":
-            hz = "\n".join(f"    {c:<12} {label}" for c, label in NRI_HAZARD_COLUMNS.items())
-            parts.append(f"  Per-hazard risk columns (0-100, higher = more risk):\n{hz}")
+            parts.append("  Per-hazard risk columns (0-100, higher = more risk):\n" + "\n".join(f"    {c:<12} {label}" for c, label in NRI_HAZARD_COLUMNS.items()))
         if meta.filter_hint:
             parts.append(f"  Default filter for valid rows: WHERE {meta.filter_hint}")
         if meta.column_notes:
-            notes = "\n".join(f"    - {n.column}: {n.note}" for n in meta.column_notes)
-            parts.append(f"  Notes:\n{notes}")
+            parts.append("  Notes:\n" + "\n".join(f"    - {n.column}: {n.note}" for n in meta.column_notes))
         parts.append("")
 
+    parts.append("### Semantic glossary")
+    for key, item in SEMANTIC_GLOSSARY.items():
+        parts.append(f"  {key}: columns={', '.join(item['columns'])}; aliases={', '.join(item['aliases'])}")
+        if item.get("direction"): parts.append(f"    direction: {item['direction']}")
+        if item.get("filter"): parts.append(f"    default filter: {item['filter']}")
+
+    parts.append("### Planning patterns")
+    for key, item in PLANNING_PATTERNS.items():
+        parts.append(f"  {key}: tables={', '.join(item['tables'])}")
+        for step in item.get("steps", []): parts.append(f"    - {step}")
+        for warning in item.get("warnings", []): parts.append(f"    warning: {warning}")
+    parts.append("")
+
     parts.append("### Relationships (joins)")
-    parts.append(
-        "There is no ORM/FK enforcement in DuckDB here — these are the join paths that "
-        "actually return matching rows. Prefer them over guessing a natural-looking join."
-    )
+    parts.append("These are documented relationship edges; prefer high-confidence/preferred paths.")
     for rel in RELATIONSHIPS:
         parts.append(f"  {rel.render()}")
-
     return "\n".join(parts)
 
+
+def semantic_matches(query: str) -> list[dict]:
+    """Deterministically resolve common user concepts to physical columns/tables."""
+    q = (query or "").lower()
+    matches = []
+    for key, item in SEMANTIC_GLOSSARY.items():
+        aliases = [key, *item.get("aliases", [])]
+        score = sum(1 for alias in aliases if alias.lower() in q)
+        if score:
+            matches.append({
+                "key": key,
+                "score": score,
+                "tables": list(item.get("tables", [])),
+                "columns": list(item.get("columns", [])),
+                "aliases": list(item.get("aliases", [])),
+                "direction": item.get("direction"),
+                "filter": item.get("filter"),
+            })
+    return sorted(matches, key=lambda x: (-x["score"], x["key"]))
+
+
+def relevant_relationships(tables: set[str]) -> list[Relationship]:
+    """Return documented relationships touching the requested tables."""
+    out = []
+    for rel in RELATIONSHIPS:
+        if rel.left_table in tables or rel.right_table in tables:
+            out.append(rel)
+    return sorted(out, key=lambda r: (not r.preferred, r.confidence != "high", r.left_table, r.right_table))
+
+
+def render_compact_schema(table_names: set[str]) -> str:
+    """Render only the live/curated metadata needed by the SQL Code Agent."""
+    parts = []
+    allowed = set(list_table_names(agent_visible_only=True))
+    selected = sorted(t for t in table_names if t in allowed)
+    if not selected:
+        selected = sorted(allowed)
+    for name in selected:
+        meta = TABLES[name]
+        cols = [(c, t) for c, t in _live_columns(name) if c not in meta.hidden_columns]
+        parts.append(f"### {name}\n{meta.description}")
+        if cols:
+            parts.append("Columns: " + ", ".join(f"{c} ({t})" for c, t in cols))
+        if meta.filter_hint:
+            parts.append(f"Default filter: {meta.filter_hint}")
+        if meta.column_notes:
+            parts.append("Notes: " + " | ".join(f"{n.column}: {n.note}" for n in meta.column_notes))
+        if name == "nri_tracts":
+            parts.append("Hazards: " + ", ".join(f"{c}={label}" for c, label in NRI_HAZARD_COLUMNS.items()))
+    rels = relevant_relationships(set(selected))
+    if rels:
+        parts.append("Relationships:")
+        parts.extend("- " + r.render().replace("\n", " ") for r in rels)
+    sem = semantic_matches(" ".join(selected))
+    if sem:
+        parts.append("Semantic matches:")
+        parts.extend("- " + str(x) for x in sem[:8])
+    return "\n".join(parts)
+
+
+def build_query_context(request: str, requirements: str = "", plan: str = "") -> str:
+    """Build targeted metadata context for a single analytical request."""
+    text = " ".join(x for x in (request, requirements, plan) if x)
+    sem = semantic_matches(text)
+    tables = {t for m in sem for t in m.get("tables", [])}
+    for pattern in PLANNING_PATTERNS.values():
+        if all(token in text.lower() for token in ("msa", "risk")) and "census_msa" in pattern.get("tables", []):
+            tables.update(pattern["tables"])
+    if "house" in text.lower() or "walk score" in text.lower() or "my list" in text.lower():
+        tables.add("houses")
+    # infer from explicit table names in the request/context as a final deterministic fallback
+    for name in TABLES:
+        if _re.search(rf"\b{_re.escape(name)}\b", text, flags=_re.I):
+            tables.add(name)
+    context = render_compact_schema(tables)
+    lower = text.lower()
+    if "msa" in lower and "risk" in lower:
+        pattern = PLANNING_PATTERNS["top_n_msa_nri"]
+        context += "\n\nPLANNING RECIPE: top_n_msa_nri\n"
+        context += "\n".join(f"- {step}" for step in pattern["steps"])
+        context += "\nWarnings: " + " | ".join(pattern["warnings"])
+    if "my list" in lower or "saved" in lower or "favorite" in lower:
+        pattern = PLANNING_PATTERNS["favorite_house_ranking"]
+        context += "\n\nPLANNING RECIPE: favorite_house_ranking\n"
+        context += "\n".join(f"- {step}" for step in pattern["steps"])
+    return context
+
+
+
+
+def canonical_nri_msa_query(request: str) -> str | None:
+    """Return a metadata-defined recovery query for the common MSA/NRI ranking pattern.
+
+    This is intentionally a *recovery path*, not the primary SQL generator. The
+    LLM still generates the first query; this deterministic query is only used
+    after execution proves that the model's query produced no rows or failed.
+    """
+    text = (request or "").lower()
+    if "msa" not in text and "metro" not in text:
+        return None
+    if "risk" not in text:
+        return None
+    m = _re.search(r"\btop\s+(\d+)\b", text)
+    if not m:
+        return None
+    universe_limit = int(m.group(1))
+    direction = "DESC" if any(x in text for x in ("highest", "most risk", "worst")) else "ASC"
+    metric = None
+    if "coastal" in text and "flood" in text:
+        metric = "cfld_risks"
+    elif "flood" in text:
+        metric = "rfld_risks"
+    elif "overall" in text or "composite" in text or "nri" in text:
+        metric = "risk_score"
+    if metric is None:
+        return None
+    return PLANNING_PATTERNS["top_n_msa_nri"]["canonical_sql_shape"].format(
+        universe_limit=universe_limit,
+        metric=metric,
+        direction=direction,
+        result_limit=10,
+    )
 
 def diagnose_empty_or_error(sql: str) -> str:
     """

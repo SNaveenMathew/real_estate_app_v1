@@ -170,3 +170,99 @@ def _format_results(results: dict) -> list[dict]:
 
 def collection_count() -> int:
     return _get_collection().count()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Data-model RAG
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _schema_collection():
+    client = _get_client()
+    return client.get_or_create_collection(
+        name="data_model_metadata",
+        metadata={"hnsw:space": "cosine", "purpose": "schema_relationship_rag"},
+    )
+
+
+def _schema_documents():
+    """Build deterministic metadata documents from the physical schema catalog."""
+    from db import schema_catalog as schema
+    docs = []
+    for name, meta in schema.TABLES.items():
+        if not meta.agent_visible:
+            continue
+        cols = ", ".join(c for c, _ in schema._live_columns(name) if c not in meta.hidden_columns)
+        notes = " ".join(f"{n.column}: {n.note}" for n in meta.column_notes)
+        docs.append((
+            f"table:{name}",
+            f"TABLE {name}. {meta.description} Columns: {cols}. "
+            f"Filter hint: {meta.filter_hint or 'none'}. Setup: {meta.setup_hint or 'none'}. "
+            f"Notes: {notes}"
+        ))
+    for rel in schema.RELATIONSHIPS:
+        key = f"relationship:{rel.left_table}:{rel.right_table}:{rel.left_on}:{rel.right_on}"
+        docs.append((key, f"RELATIONSHIP {rel.left_table}.{rel.left_on} = {rel.right_table}.{rel.right_on}. {rel.note} Cardinality={rel.cardinality}. Confidence={rel.confidence}. Preferred={rel.preferred}. Bridge={rel.bridge}. {rel.grain_note}"))
+    for key, item in schema.SEMANTIC_GLOSSARY.items():
+        docs.append((f"semantic:{key}", f"SEMANTIC {key}. Columns: {', '.join(item['columns'])}. User aliases: {', '.join(item['aliases'])}. Direction: {item.get('direction','')}. Filter: {item.get('filter','')}"))
+    for key, item in schema.PLANNING_PATTERNS.items():
+        canonical = item.get("canonical_sql_shape", "")
+        docs.append((
+            f"pattern:{key}",
+            f"PLANNING PATTERN {key}. Tables: {', '.join(item['tables'])}. "
+            f"Steps: {'; '.join(item.get('steps',[]))}. "
+            f"Warnings: {'; '.join(item.get('warnings',[]))}. "
+            f"Canonical SQL shape: {canonical}"
+        ))
+    return docs
+
+
+def ensure_schema_metadata_index() -> int:
+    """Synchronize the small metadata corpus into Chroma."""
+    col = _schema_collection()
+    emb = _get_embeddings()
+    docs = _schema_documents()
+    # Upsert rather than add-only: curated metadata changes (especially relationship
+    # definitions and planning recipes) must invalidate the vector representation.
+    if docs:
+        vectors = emb.embed_documents([t for _, t in docs])
+        col.upsert(
+            ids=[i for i, _ in docs],
+            embeddings=vectors,
+            documents=[t for _, t in docs],
+            metadatas=[{"kind": i.split(":", 1)[0]} for i, _ in docs],
+        )
+    return len(docs)
+
+
+def search_data_model(query: str, n_results: int = 10) -> list[dict]:
+    """Retrieve relevant data-model metadata with vector search and lexical fallback."""
+    ensure_schema_metadata_index()
+    col = _schema_collection()
+    try:
+        emb = _get_embeddings()
+        vector = emb.embed_query(query)
+        results = col.query(
+            query_embeddings=[vector],
+            n_results=n_results,
+            include=["documents", "metadatas", "distances"],
+        )
+        formatted = _format_results(results)
+        if formatted:
+            return formatted
+    except Exception:
+        # Metadata retrieval is a grounding aid, not a reason to fail the whole chat.
+        pass
+
+    # Deterministic fallback: rank the small metadata corpus by token overlap.
+    rows = col.get(include=["documents", "metadatas"])
+    import re
+    q_tokens = set(re.findall(r"[a-z0-9_]+", (query or "").lower()))
+    scored = []
+    for doc_id, doc, meta in zip(rows.get("ids", []), rows.get("documents", []), rows.get("metadatas", [])):
+        d_tokens = set(re.findall(r"[a-z0-9_]+", (doc or "").lower()))
+        overlap = len(q_tokens & d_tokens)
+        phrase_bonus = sum(2 for phrase in ("walk score", "flood risk", "overall risk", "top 50 msa", "my list", "saved houses") if phrase in (query or "").lower() and phrase in (doc or "").lower())
+        score = overlap + phrase_bonus
+        if score:
+            scored.append({"id": doc_id, "text": doc, "metadata": meta or {}, "score": score})
+    scored.sort(key=lambda x: (-x["score"], x["id"]))
+    return scored[:n_results]

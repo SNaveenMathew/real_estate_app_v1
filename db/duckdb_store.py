@@ -24,6 +24,11 @@ def get_conn() -> duckdb.DuckDBPyConnection:
 
 
 def _ensure_schema(conn: duckdb.DuckDBPyConnection):
+    # Remove legacy semantic views from earlier builds. The current architecture
+    # is physical-table-only; semantics live in db.schema_catalog + metadata RAG.
+    conn.execute("DROP VIEW IF EXISTS house_rankings")
+    conn.execute("DROP VIEW IF EXISTS nri_msa_risk")
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS houses (
             house_id        VARCHAR PRIMARY KEY,

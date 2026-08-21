@@ -1,347 +1,395 @@
 """
-General agent — answers broad questions about metro areas, national risk,
-portfolio-level analysis across all houses, etc.
-"""
-from typing import Annotated, Sequence, TypedDict, Literal
+General Chat implemented as a Code Agent.
 
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
-from langchain_ollama import ChatOllama
+Architecture:
+    user request
+        -> LLM generates a small, declarative Python program
+        -> AST validator permits only approved function calls/literals
+        -> deterministic application functions execute that program
+        -> execution evidence is returned to the LLM
+        -> LLM produces the final grounded response
+
+The LLM therefore decides WHAT computation is needed and WHICH approved
+function(s) to call by generating code.  The application owns execution and
+security; it never regex-classifies the user's intent to choose a tool.
+"""
+from __future__ import annotations
+
+import ast
+import json
+import re
+import inspect
+from typing import Any, Sequence
+
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
-from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import ToolNode
 
 from config import settings, LLM_STOP_SEQUENCES
-from agents.tools import GENERAL_TOOLS
-import json
-
+from agents.tools import (
+    check_data_availability,
+    get_database_schema,
+    query_database,
+    retrieve_data_model_context,
+    find_bike_route,
+    search_all_house_descriptions,
+)
+from agents.response_validator import validate_response
 import db.schema_catalog as schema
+from agents.query_planner import build_query_plan
 
 
-SYSTEM_PROMPT = """You are a real estate and risk analyst assistant backed by a local DuckDB database.
+CODE_AGENT_MAX_STEPS = 3
+CODE_AGENT_MAX_CHARS = 16000
+FINAL_RESPONSE_MAX_CHARS = 18000
 
-A live snapshot of what's actually loaded (row counts per table) is included
-below — you don't need to re-check it unless you suspect it changed mid-conversation.
+APPROVED_FUNCTIONS = {
+    "check_data_availability": check_data_availability,
+    "get_database_schema": get_database_schema,
+    "query_database": query_database,
+    "retrieve_data_model_context": retrieve_data_model_context,
+    "find_bike_route": find_bike_route,
+    "search_all_house_descriptions": search_all_house_descriptions,
+}
 
-Ground rules:
-1. Every number, ranking, or comparison you state must come from a tool call
-   made in this conversation — never estimate or recall a figure from memory.
-2. If a table is empty or a query returns 0 rows, say so plainly. Do not fill
-   the gap with a plausible-sounding invented answer.
-3. For ANY question that requires analytical data from DuckDB, use the
-   `query_database` tool instead of writing SQL yourself. This applies to
-   houses, snapshots, sales, NRI, Census, crime, bike, and every other
-   agent-visible dataset. `query_database` is backed by the shared SQL Code
-   Agent, which generates the SQL from the live table metadata and documented
-   relationships. Put the user's analytical request in `request`; when your
-   reasoning has explicit requirements or a multi-step plan, pass those in
-   `requirements` and `plan`.
-4. Treat the `query_database` result as evidence, not as the final answer.
-   Inspect the generated SQL and returned rows, reconcile them with the user's
-   intent, and continue your reasoning/planning before responding. If the
-   question needs another query after seeing the first result, call
-   `query_database` again with the updated requirements or plan.
-5. If `query_database` errors or returns 0 rows, read the message carefully.
-   Revise the request/requirements/plan and retry when appropriate, or explain
-   the data limitation. Never fabricate a result.
+def _invoke_approved(name: str, function_obj, args: tuple[Any, ...], kwargs: dict[str, Any]):
+    """Invoke an approved application function robustly.
 
-`get_database_schema` remains available when you need to inspect the live schema
-directly, but do not bypass `query_database` by writing SQL yourself for an
-analytical data question.
+    The Code Agent is instructed to emit keyword arguments, but local models can
+    occasionally emit positional arguments. Because the callable set is already
+    allow-listed, it is safe to normalize positional arguments here rather than
+    failing the entire chat turn.
+    """
+    if args:
+        if hasattr(function_obj, "args_schema"):
+            fields = list(getattr(function_obj.args_schema, "model_fields", {}).keys())
+        elif hasattr(function_obj, "func"):
+            fields = list(inspect.signature(function_obj.func).parameters.keys())
+        else:
+            fields = list(inspect.signature(function_obj).parameters.keys())
 
-Formatting: dollar amounts as $1,234,567; scores/percentages to one decimal
-place; use a markdown table when comparing more than a couple of rows.
+        if len(args) > len(fields):
+            raise CodeAgentProgramError(
+                f"Too many positional arguments for approved function '{name}'."
+            )
+        for field, value in zip(fields, args):
+            if field in kwargs:
+                raise CodeAgentProgramError(
+                    f"Argument '{field}' was supplied both positionally and by keyword."
+                )
+            kwargs[field] = value
 
-BIKING / BIKE-ROUTING PRESENTATION RULES:
-1. For a question such as "is there a safe way to bike from A to B?" determine
-   whether the locally loaded BikePGH network documents a continuous bikeable
-   path. Treat "safe" as "supported by documented BikePGH bicycle
-   infrastructure"; do NOT claim a safety guarantee. The final answer MUST
-   start with exactly one of: "Yes", "No", or "No data available for <city or MSA>
-   to answer this question." If there is no BikePGH data, use the third form.
-2. For a request to FIND/SHOW/ROUTE a bike path between two endpoints, call
-   find_bike_route. Endpoints may be neighborhoods, landmarks, parks,
-   addresses, or coordinates; exact map clicks are not required.
-3. For FIND/SHOW/ROUTE requests that explicitly ask to avoid crime-dense,
-   high-crime, dangerous, or crime-heavy areas, call find_bike_route with
-   avoid_crime_dense_areas=true. The application execution layer will enforce
-   this flag even if the model omits it. Let the tool apply the spatial crime
-   filter before Dijkstra; do not invent a safety route yourself.
-4. For every crime-aware route request, an intermediate map MUST be preserved and
-   rendered showing the post-filter BikePGH network, crime density, source, and
-   destination. This map is required whether or not Dijkstra finds a path.
-5. For crime-aware requests, NEVER present a route unless the tool explicitly
-   reports that the crime filter was applied. If the filter could not be applied,
-   treat the route as unavailable and explain the limitation. Do not fall back to
-   an ordinary or neighborhood route.
-6. If find_bike_route returns a successful crime-filtered route, return a concise
-   text summary and let the application render a separate final route map. If
-   kind="no_route", return text explaining that no continuous path exists using
-   the filtered BikePGH network. Do NOT request an external routing service or
-   invent a road route.
-6. If find_bike_route returns kind="no_data", return exactly:
-   "No data available for <city or MSA> to answer this question."
-"""
+    if hasattr(function_obj, "invoke"):
+        return function_obj.invoke(kwargs)
+    return function_obj(**kwargs)
 
 
 def _get_data_availability_context() -> str:
-    """Live data-availability summary, prepended to every system message.
-    Shares its table list and counting logic with the check_data_availability
-    tool (both read db/schema_catalog.py) so the two can't drift apart."""
+    # Keep the routing prompt small. The General Code Agent does not need table
+    # schemas; the SQL Code Agent owns schema/relationship reasoning. It only needs
+    # to know which analytical capabilities are available.
     report, _ = schema.availability_report()
-    return f"[LIVE DATABASE STATUS]\n{report}\n[END STATUS]\n"
-
-
-class AgentState(TypedDict):
-    messages: Annotated[Sequence[BaseMessage], lambda x, y: list(x) + list(y)]
-
-
-def _message_requests_crime_avoidance(messages: Sequence[BaseMessage]) -> bool:
-    """Deterministically detect crime-avoidance routing intent.
-
-    This is an execution guard, not an LLM replacement: the local LLM still
-    decides to use find_bike_route, but it cannot accidentally downgrade an
-    explicitly crime-aware routing request into an ordinary route.
-    """
-    text_parts = []
-    for msg in messages:
-        if isinstance(msg, HumanMessage):
-            content = msg.content
-            if isinstance(content, str):
-                text_parts.append(content.lower())
-            elif isinstance(content, list):
-                text_parts.extend(str(x.get("text", "")) for x in content if isinstance(x, dict))
-    text = "\n".join(text_parts)
-    crime_terms = (
-        "crime", "criminal", "dangerous", "unsafe", "high-crime",
-        "high crime", "crime-prone", "crime prone", "avoid crime",
-        "avoid high-crime", "avoid dangerous", "avoid unsafe",
+    compact = "\n".join(
+        line for line in report.splitlines()
+        if line.strip().lower().startswith(("nri_tracts", "census_msa", "cbsa_counties", "houses", "crime_incidents", "bike_routes"))
     )
-    return any(term in text for term in crime_terms)
-
-
-def _extract_bike_route_endpoints(message: str) -> tuple[str, str] | None:
-    """Extract endpoints from a direct bike-route request.
-
-    Keeping this deterministic avoids sending route requests through the
-    general LLM agent, which can otherwise accumulate a very large history
-    and hit the local model context limit.
-    """
-    import re
-    text = " ".join((message or "").split())
-    if not re.search(r"\bbike\b", text, re.I) or not re.search(r"\broute\b", text, re.I):
-        return None
-    m = re.search(
-        r"\bfrom\s+(.+?)\s+\bto\s+(.+?)(?=\s+(?:that\s+)?(?:avoids?|avoiding|without)\b|[.!?]?$)",
-        text, re.I,
+    return (
+        "[SEMANTIC CAPABILITIES]\n"
+        "- General property analytics: houses / walk scores / price / listings\n"
+        "- NRI tract risk: nri_tracts\n"
+        "- NRI MSA analytics: physical tables census_msa + cbsa_counties + nri_tracts\n"
+        "- MSA population universe: census_msa\n"
+        "- MSA-to-NRI path: census_msa -> cbsa_counties -> nri_tracts\n"
+        "- Crime analytics: crime_incidents\n"
+        "- Bike routing: BikePGH network via find_bike_route\n"
+        "[LIVE AVAILABILITY SUMMARY]\n" + compact + "\n[END CAPABILITIES]\n"
     )
-    if not m:
-        return None
-    start_text = m.group(1).strip(" ,")
-    end_text = m.group(2).strip(" ,")
-    if not start_text or not end_text:
-        return None
-    return start_text, end_text
 
 
-def _extract_crime_aware_bike_route_endpoints(message: str) -> tuple[str, str] | None:
-    """Backward-compatible wrapper for crime-aware route detection."""
-    text = " ".join((message or "").split())
-    if not _message_requests_crime_avoidance([HumanMessage(content=text)]):
-        return None
-    return _extract_bike_route_endpoints(text)
-
-
-def _bounded_agent_history(history: list[dict] | None, max_chars: int = 24000) -> list[dict]:
-    """Keep general-agent prompts comfortably below the local model context limit."""
+def _bounded_history(history: list[dict] | None, max_chars: int = 12000) -> list[dict]:
+    """Keep only a compact recent conversation context."""
     items = list(history or [])
-    if not items:
-        return []
-    kept = []
+    kept: list[dict] = []
     total = 0
     for item in reversed(items):
         content = str(item.get("content") or "")
-        size = len(content)
-        if kept and total + size > max_chars:
+        if kept and total + len(content) > max_chars:
             break
         kept.append({"role": item.get("role", "user"), "content": content})
-        total += size
+        total += len(content)
     kept.reverse()
     return kept
 
 
-def build_general_agent():
-    tool_map = {getattr(t, "name", ""): t for t in GENERAL_TOOLS}
-
-    def tools_node(state: AgentState):
-        """Execute tool calls while enforcing explicit crime-aware routing.
-
-        We keep the existing tools and LangGraph architecture. The only added
-        behavior is a deterministic guard at execution time: for an explicitly
-        crime-aware bike request, any find_bike_route call is forced to enable
-        the crime filter.
-        """
-        last = state["messages"][-1]
-        tool_calls = getattr(last, "tool_calls", None) or []
-        enforce_crime = _message_requests_crime_avoidance(state["messages"])
-        outputs = []
-        for call in tool_calls:
-            name = call.get("name", "")
-            tool = tool_map.get(name)
-            if tool is None:
-                outputs.append(ToolMessage(
-                    content=f"Unknown tool: {name}",
-                    tool_call_id=call.get("id", ""),
-                    name=name,
-                ))
-                continue
-            args = dict(call.get("args") or {})
-            if enforce_crime and name == "find_bike_route":
-                args["avoid_crime_dense_areas"] = True
-                # Preserve the caller's explicit percentile if supplied.
-                args.setdefault("crime_density_percentile", 90.0)
-            try:
-                result = tool.invoke(args)
-                if isinstance(result, ToolMessage):
-                    outputs.append(result)
-                else:
-                    outputs.append(ToolMessage(
-                        content=str(result),
-                        tool_call_id=call.get("id", ""),
-                        name=name,
-                    ))
-            except Exception as exc:
-                outputs.append(ToolMessage(
-                    content=f"Tool error in {name}: {exc}",
-                    tool_call_id=call.get("id", ""),
-                    name=name,
-                    status="error",
-                ))
-        return {"messages": outputs}
-    # For 'llama-server -hf DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M -ngl 999 -c 28672 -fa on --cache-type-k q8_0 --cache-type-v q8_0'
-    llm = ChatOpenAI(
-        base_url=settings.llama_server_base_url,
-        api_key="not-needed",  # llama-server doesn't check the key, but LangChain requires a non-empty string
-        model=settings.llama_server_model,
-        temperature=0.0,
-        max_tokens=settings.agent_max_tokens,  # hard backstop against runaway generation
-        timeout=settings.llm_request_timeout,
-        stop=LLM_STOP_SEQUENCES,               # text-level stop, robust to a broken EOG token list
-    ).bind_tools(GENERAL_TOOLS)
-    # For 'ollama run --model llama3.1:8b'
-    # llm = ChatOllama(
-    #     base_url=settings.ollama_base_url,
-    #     model=settings.ollama_model,
-    #     temperature=0.0,
-    # ).bind_tools(GENERAL_TOOLS)
-
-    def agent_node(state: AgentState):
-        # Inject live data availability into every system message so the model
-        # always knows what's loaded without needing to call the tool first
-        availability = _get_data_availability_context()
-        system = SystemMessage(content=f"{availability}\n{SYSTEM_PROMPT}")
-        messages = [system] + list(state["messages"])
-        response = llm.invoke(messages)
-        return {"messages": [response]}
-
-    def router(state: AgentState) -> Literal["tools", "end"]:
-        last = state["messages"][-1]
-        if hasattr(last, "tool_calls") and last.tool_calls:
-            return "tools"
-        return "end"
-
-    graph = StateGraph(AgentState)
-    graph.add_node("agent", agent_node)
-    graph.add_node("tools", tools_node)
-    graph.set_entry_point("agent")
-    graph.add_conditional_edges("agent", router, {"tools": "tools", "end": END})
-    graph.add_edge("tools", "agent")
-    return graph.compile()
+def _messages_to_text(history: list[dict] | None, current_message: str) -> str:
+    lines = []
+    for item in _bounded_history(history):
+        role = item.get("role", "user").upper()
+        lines.append(f"{role}: {item.get('content', '')}")
+    lines.append(f"USER: {current_message}")
+    return "\n\n".join(lines)
 
 
-# Singleton — rebuilt if you call invalidate_general_agent()
-_general_agent = None
+def _extract_text(resp: Any) -> str:
+    content = getattr(resp, "content", resp)
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    parts.append(str(item.get("text", "")))
+            else:
+                parts.append(str(item))
+        return "".join(parts).strip()
+    return str(content).strip()
 
 
-def get_general_agent():
-    global _general_agent
-    if _general_agent is None:
-        _general_agent = build_general_agent()
-    return _general_agent
+def _clean_code(raw: str) -> str:
+    text = (raw or "").strip()
+    text = re.sub(r"^```(?:python)?\s*", "", text, flags=re.I)
+    text = re.sub(r"\s*```$", "", text)
+    return text.strip()
 
 
-def invalidate_general_agent():
-    """Call after loading new data so the agent picks up updated availability."""
-    global _general_agent
-    _general_agent = None
+class CodeAgentProgramError(ValueError):
+    pass
 
 
-def _extract_bike_visualization_from_payload(payload: dict, crime_request: bool = False):
-    """Normalize one authoritative bike-route tool payload for the frontend.
+def _validate_program(source: str) -> ast.Module:
+    """Validate generated code as a tiny safe DSL over approved functions."""
+    if not source:
+        raise CodeAgentProgramError("Code agent returned empty code.")
+    if len(source) > CODE_AGENT_MAX_CHARS:
+        raise CodeAgentProgramError("Generated code exceeded the maximum size.")
 
-    The current user request, not prior chat history, determines whether a
-    final route must prove crime filtering was applied.
-    """
-    if not isinstance(payload, dict):
-        return None
-    analysis = payload.get("analysis_visualization")
-    crime_meta = payload.get("crime_avoidance") or {}
-    applied = bool(crime_meta.get("enabled")) and bool(crime_meta.get("applied"))
+    try:
+        tree = ast.parse(source, mode="exec")
+    except SyntaxError as exc:
+        raise CodeAgentProgramError(f"Generated code is invalid Python: {exc}") from exc
 
-    final_route = None
-    if payload.get("presentation") == "route_map" and payload.get("route_shape") and (not crime_request or applied):
-        final_route = {
-            "type": "bike_route",
-            "city": payload.get("city") or "Pittsburgh, PA",
-            "start": payload.get("start"),
-            "end": payload.get("end"),
-            "route_shape": payload.get("route_shape") or [],
-            "bbox": payload.get("bbox"),
-            "distance_miles": payload.get("distance_miles"),
-            "duration_minutes": payload.get("duration_minutes"),
-            "turn_by_turn": payload.get("turn_by_turn") or [],
-            "bike_infrastructure_near_route": payload.get("bike_infrastructure_near_route") or [],
-            "used_infrastructure": payload.get("used_infrastructure") or {"type": "FeatureCollection", "features": []},
-            "provider": payload.get("provider"),
-            "attribution": payload.get("attribution"),
-        }
+    allowed_stmt = (ast.Assign, ast.Expr)
+    allowed_expr = (
+        ast.Call, ast.Constant, ast.Name, ast.Dict, ast.List, ast.Tuple,
+        ast.keyword,
+    )
 
-    if analysis:
-        result = {"type": "bike_crime_analysis", "analysis": analysis}
-        if final_route:
-            result["final_route"] = final_route
-        return result
-    return final_route
+    assigned_names: set[str] = set()
+    call_count = 0
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.stmt) and not isinstance(node, allowed_stmt):
+            raise CodeAgentProgramError(
+                f"Unsupported statement {type(node).__name__}; only assignments and function calls are allowed."
+            )
+
+        if isinstance(node, ast.Import | ast.ImportFrom | ast.Attribute | ast.Subscript | ast.Lambda):
+            raise CodeAgentProgramError(f"Unsupported expression {type(node).__name__}.")
+
+        if isinstance(node, ast.Assign):
+            if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+                raise CodeAgentProgramError("Assignments must target one simple variable name.")
+            assigned_names.add(node.targets[0].id)
+
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            if node.id not in assigned_names and node.id not in APPROVED_FUNCTIONS:
+                raise CodeAgentProgramError(f"Unknown variable '{node.id}' in generated code.")
+
+        if isinstance(node, ast.Call):
+            call_count += 1
+            if not isinstance(node.func, ast.Name) or node.func.id not in APPROVED_FUNCTIONS:
+                raise CodeAgentProgramError("Generated code may call only approved application functions.")
+            if node.args:
+                raise CodeAgentProgramError("Use keyword arguments for application functions.")
+            for kw in node.keywords:
+                if kw.arg is None:
+                    raise CodeAgentProgramError("**kwargs are not allowed.")
+
+            # Prefer keyword arguments, but do not make a harmless local-model
+            # formatting deviation fatal. Positional arguments are normalized to
+            # the approved callable's declared parameter order during execution.
+
+        if isinstance(node, ast.Expr) and not isinstance(node.value, ast.Call):
+            raise CodeAgentProgramError("Only bare function-call expressions are allowed.")
+
+        if isinstance(node, ast.If | ast.For | ast.While | ast.Try | ast.With | ast.FunctionDef | ast.ClassDef):
+            raise CodeAgentProgramError("Control flow and definitions are not allowed in generated code.")
+
+    if call_count == 0:
+        raise CodeAgentProgramError("Generated code must call at least one approved application function.")
+    return tree
 
 
-def _extract_bike_visualization(messages: list[BaseMessage], crime_request: bool | None = None):
-    """Extract bike visualizations using the current request intent, not stale history."""
-    import json
-    if crime_request is None:
-        crime_request = _message_requests_crime_avoidance(messages[-1:])
+def _execute_program(source: str) -> tuple[Any, list[tuple[str, Any]]]:
+    tree = _validate_program(source)
+    calls: list[tuple[str, Any]] = []
 
-    for message in reversed(messages):
-        if not isinstance(message, ToolMessage):
-            continue
-        content = message.content
-        if not isinstance(content, str):
+    namespace: dict[str, Any] = {}
+    for name, fn in APPROVED_FUNCTIONS.items():
+        def make_wrapper(function_name: str, function_obj):
+            def wrapped(*args, **kwargs):
+                result = _invoke_approved(function_name, function_obj, args, kwargs)
+                calls.append((function_name, result))
+                return result
+            return wrapped
+        namespace[name] = make_wrapper(name, fn)
+
+    namespace["__builtins__"] = {}
+    exec(compile(tree, "<code-agent>", "exec"), namespace, namespace)
+
+    final_result = namespace.get("final_result")
+    if final_result is None and calls:
+        final_result = calls[-1][1]
+    if final_result is None:
+        raise CodeAgentProgramError("Generated code did not produce a result.")
+    return final_result, calls
+
+
+CODE_AGENT_PROMPT = """You are the General Chat Code Agent for a real-estate application.
+
+Your job is to translate the user's request into a SMALL Python program that calls
+approved application functions. The program is executed by the application.
+You are NOT writing SQL directly and you are NOT answering the user yet.
+
+APPROVED FUNCTIONS
+==================
+1. check_data_availability() -> str
+2. get_database_schema() -> str
+3. query_database(request: str, requirements: str = "", plan: str = "") -> str
+4. find_bike_route(start: str, end: str, city: str = "Pittsburgh, PA",
+                   avoid_crime_dense_areas: bool = False,
+                   crime_density_percentile: float = 90.0) -> str
+5. search_all_house_descriptions(query: str) -> str
+
+RULES
+=====
+1. Output ONLY executable Python code. No markdown fences and no explanation.
+2. The code may contain only assignments and calls to the approved functions.
+3. Use keyword arguments only.
+4. For ANY analytical/data question, you MUST call query_database exactly as the execution step. Do not answer from memory and do not write SQL.
+5. The application has already performed mandatory data-model retrieval and supplies a structured query plan. Preserve that plan when calling query_database.
+6. For bike-route requests, call find_bike_route.
+7. For crime-avoidance bike requests, set avoid_crime_dense_areas=True.
+8. For ordinary shortest bike-route requests, set avoid_crime_dense_areas=False.
+9. Do not substitute another routing service.
+10. Keep queries focused and results reasonably small.
+11. For “top N MSAs” + NRI questions, preserve the population universe and the MSA->county->tract relationship described by the structured plan.
+12. For NRI hazard questions, preserve the user's hazard exactly. The SQL Code Agent
+    maps it to the canonical semantic column.
+13. When a request needs multiple independent evidence sources, you may make
+    multiple approved calls and assign each result to a variable.
+14. Set `final_result` to the most useful result for the final-response model.
+
+Examples
+========
+
+User: Find the shortest bike route from A to B
+Code:
+final_result = find_bike_route(start="A", end="B", city="Pittsburgh, PA", avoid_crime_dense_areas=False)
+
+User: Find a bike route from A to B that avoids crime-prone areas
+Code:
+final_result = find_bike_route(start="A", end="B", city="Pittsburgh, PA", avoid_crime_dense_areas=True, crime_density_percentile=90.0)
+
+User: Which houses in my list have the highest walk scores?
+Code:
+final_result = query_database(
+    request="Which houses in the user's current house list have the highest walk scores?",
+    requirements="Return house identity/address and walk_score; rank descending; keep the result concise.",
+    plan="Use the house/list dataset available to General Chat and return the top-ranked houses."
+)
+"""
+
+
+FINAL_RESPONSE_PROMPT = """You are the final response writer for a real-estate Code Agent.
+
+Use ONLY the evidence produced by the executed application functions. Do not
+invent facts, numbers, routes, or map conclusions.
+
+For bike routes:
+- If the executed find_bike_route result says a route exists, summarize it.
+- If it says no_route, clearly say it is not possible using the applicable
+  BikePGH network; never invent an alternative.
+- For crime-aware routing, never describe an unfiltered route as crime-aware.
+- The application renders maps separately from your prose.
+
+For analytical questions:
+- Answer directly from query_database evidence.
+- Use markdown tables when comparing several rows.
+- Format dollar amounts with commas and scores/percentages to one decimal where appropriate.
+
+Return only the user-facing answer.
+"""
+
+
+_code_agent: ChatOpenAI | None = None
+_response_agent: ChatOpenAI | None = None
+
+
+def _get_code_agent() -> ChatOpenAI:
+    global _code_agent
+    if _code_agent is None:
+        _code_agent = ChatOpenAI(
+            base_url=settings.llama_server_base_url,
+            api_key="not-needed",
+            model=settings.llama_server_model,
+            temperature=0.0,
+            max_tokens=min(getattr(settings, "agent_max_tokens", 2000), 1800),
+            timeout=settings.llm_request_timeout,
+            stop=LLM_STOP_SEQUENCES,
+        )
+    return _code_agent
+
+
+def _get_response_agent() -> ChatOpenAI:
+    global _response_agent
+    if _response_agent is None:
+        _response_agent = ChatOpenAI(
+            base_url=settings.llama_server_base_url,
+            api_key="not-needed",
+            model=settings.llama_server_model,
+            temperature=0.0,
+            max_tokens=min(getattr(settings, "agent_max_tokens", 2000), 1400),
+            timeout=settings.llm_request_timeout,
+            stop=LLM_STOP_SEQUENCES,
+        )
+    return _response_agent
+
+
+def _tool_messages_from_calls(calls: list[tuple[str, Any]]) -> list[ToolMessage]:
+    messages = []
+    for index, (name, result) in enumerate(calls):
+        messages.append(
+            ToolMessage(
+                content=str(result),
+                tool_call_id=f"code-agent-{index}",
+                name=name,
+            )
+        )
+    return messages
+
+
+def _parse_bike_payloads(calls: list[tuple[str, Any]]) -> list[dict]:
+    payloads: list[dict] = []
+    for name, result in calls:
+        if name != "find_bike_route" or not isinstance(result, str):
             continue
         try:
-            payload = json.loads(content)
+            parsed = json.loads(result)
         except Exception:
             continue
-        if not isinstance(payload, dict):
-            continue
+        if isinstance(parsed, dict):
+            payloads.append(parsed)
+    return payloads
 
+
+def _extract_bike_visualization(payloads: list[dict]):
+    for payload in reversed(payloads):
         analysis = payload.get("analysis_visualization")
+        crime = payload.get("crime_avoidance") or {}
+        applied = bool(crime.get("enabled")) and bool(crime.get("applied"))
         final_route = None
-        crime_meta = payload.get("crime_avoidance") or {}
-        crime_filter_applied = bool(crime_meta.get("enabled")) and bool(
-            crime_meta.get("applied", crime_meta.get("enabled"))
-        )
-
-        if (payload.get("presentation") == "route_map" or payload.get("status") == "ok") and (
-            not crime_request or crime_filter_applied
-        ):
+        if payload.get("presentation") == "route_map" and payload.get("route_shape"):
             final_route = {
                 "type": "bike_route",
                 "city": payload.get("city") or "Pittsburgh, PA",
@@ -357,26 +405,127 @@ def _extract_bike_visualization(messages: list[BaseMessage], crime_request: bool
                 "provider": payload.get("provider"),
                 "attribution": payload.get("attribution"),
             }
-
         if analysis:
             result = {"type": "bike_crime_analysis", "analysis": analysis}
-            if final_route and final_route.get("route_shape"):
+            if final_route:
                 result["final_route"] = final_route
             return result
-
         if final_route:
             return final_route
-
     return None
+
+
+def _generate_program(user_message: str, history: list[dict] | None, prior_evidence: str = "", data_model_context: str = "") -> str:
+    query_plan = build_query_plan(user_message)
+    prompt = [
+        _get_data_availability_context(),
+        "MANDATORY STRUCTURED QUERY PLAN:\n" + query_plan.render(),
+        "MANDATORY DATA MODEL RETRIEVAL:\n" + (data_model_context or "No targeted metadata retrieved."),
+        CODE_AGENT_PROMPT,
+        "CONVERSATION CONTEXT:\n" + _messages_to_text(history, user_message),
+    ]
+    if prior_evidence:
+        prompt.append("EXECUTED EVIDENCE FROM A PREVIOUS STEP:\n" + prior_evidence[:12000])
+    prompt.append("Generate the next small Python program now.")
+    response = _get_code_agent().invoke([
+        SystemMessage(content="\n\n".join(prompt)),
+        HumanMessage(content=user_message),
+    ])
+    code = _clean_code(_extract_text(response))
+    if code:
+        return code
+
+    # Local models can occasionally emit an empty completion. Recover without
+    # re-classifying the user's intent: ask the same Code Agent for the minimal
+    # program and include only the semantic capabilities it needs.
+    retry_prompt = (
+        "You are a code generator. Return exactly one executable Python statement "
+        "calling an approved function. For this user request, the usual analytical "
+        "choice is query_database(...). No explanation, no markdown, no blank response.\n"
+        f"USER REQUEST: {user_message}\n"
+        "If it is an MSA/NRI risk question, call query_database with the request verbatim "
+        "and mention the documented census_msa -> cbsa_counties -> nri_tracts relationship in requirements."
+    )
+    retry = _get_code_agent().invoke([
+        SystemMessage(content=retry_prompt),
+        HumanMessage(content="Generate the statement now."),
+    ])
+    return _clean_code(_extract_text(retry))
+
+
+def _render_evidence(calls: list[tuple[str, Any]]) -> str:
+    chunks = []
+    for name, result in calls:
+        text = str(result)
+        if len(text) > 10000:
+            text = text[:10000] + "\n...[truncated]"
+        chunks.append(f"[{name}]\n{text}")
+    return "\n\n".join(chunks)
+
+
+def _extract_query_result_fallback(evidence: str) -> str:
+    """Return the most useful executed result when the response LLM is empty.
+
+    Code Agent execution is authoritative; an empty response from the final
+    response model must never become an empty chat message. For database
+    results, strip the generated-SQL wrapper and expose the result table/text.
+    """
+    if not evidence:
+        return "I could not produce a response from the executed application functions."
+
+    blocks = evidence.split("[query_database]")
+    if len(blocks) > 1:
+        candidate = blocks[-1].strip()
+        if "[RESULT]" in candidate:
+            candidate = candidate.split("[RESULT]", 1)[1].strip()
+        if candidate and not candidate.lower().startswith(("code agent error", "query returned 0 rows", "0 rows")):
+            return candidate
+
+    # Generic fallback: use the final non-empty executed tool result.
+    for block in reversed(evidence.split("\n\n")):
+        block = block.strip()
+        if block and not block.startswith("[GENERATED SQL]"):
+            return block
+    return evidence.strip()
+
+
+def _write_final_answer(user_message: str, history: list[dict] | None, evidence: str) -> str:
+    context = _messages_to_text(history, user_message)
+    prompt = (
+        FINAL_RESPONSE_PROMPT
+        + "\n\nCONVERSATION:\n" + context
+        + "\n\nEXECUTED EVIDENCE:\n" + evidence[:FINAL_RESPONSE_MAX_CHARS]
+    )
+    response = _get_response_agent().invoke([
+        SystemMessage(content=prompt),
+        HumanMessage(content="Write the final answer to the user's current request. Return non-empty text grounded in the evidence."),
+    ])
+    answer = _extract_text(response)
+    if answer:
+        return answer
+
+    # Retry with a deliberately tiny prompt. This handles local models that
+    # occasionally emit an empty completion after a long/complex system prompt.
+    retry_prompt = (
+        "Answer the user's request using ONLY the evidence below.\n"
+        "Do not invent facts. Return concise, non-empty plain text or markdown.\n\n"
+        f"USER REQUEST:\n{user_message}\n\nEVIDENCE:\n{evidence[:12000]}"
+    )
+    retry = _get_response_agent().invoke([
+        SystemMessage(content=retry_prompt),
+        HumanMessage(content="Answer now."),
+    ])
+    answer = _extract_text(retry)
+    return answer or _extract_query_result_fallback(evidence)
 
 
 def run_general_chat(
     message: str,
-    history: list[dict] = None,
+    history: list[dict] | None = None,
     include_metadata: bool = False,
     session_id: str | None = None,
 ):
-    """Run General Chat and emit one Phoenix trace per answer."""
+    """Run the General Chat Code Agent and emit one Phoenix trace per answer."""
     from time import perf_counter
     from observability import (
         start_general_chat,
@@ -385,209 +534,124 @@ def run_general_chat(
         set_span_output,
         mark_span_error,
         end_general_chat,
+        record_general_chat_success,
+        record_general_chat_error,
     )
 
     started_at = perf_counter()
-    _, root_span, trace_id, trace_url = start_general_chat(
-        message, session_id, len(history or [])
-    )
+    _, root_span, trace_id, trace_url = start_general_chat(message, session_id, len(history or []))
+
+    all_tool_messages: list[ToolMessage] = []
+    all_calls: list[tuple[str, Any]] = []
+    generated_programs: list[str] = []
+
     try:
-        agent = get_general_agent()
+        evidence = ""
+        with trace_span(
+            "general_chat.query_planner",
+            attributes={"openinference.span.kind": "CHAIN"},
+        ) as plan_span:
+            planned = build_query_plan(message)
+            set_span_input(plan_span, {"request": message}, mime_type="application/json")
+            set_span_output(plan_span, planned.to_dict(), mime_type="application/json")
 
-        # Route requests are handled deterministically below, but other LLM
-        # requests still need a bounded history to avoid exceeding the local
-        # model context window after long sessions.
-        bounded_history = _bounded_agent_history(history)
-        lc_messages: list[BaseMessage] = []
-        for h in bounded_history:
-            if h["role"] == "user":
-                lc_messages.append(HumanMessage(content=h["content"]))
-            else:
-                lc_messages.append(AIMessage(content=h["content"]))
-        lc_messages.append(HumanMessage(content=message))
+        with trace_span(
+            "general_chat.data_model_rag",
+            attributes={"openinference.span.kind": "RETRIEVER"},
+        ) as rag_span:
+            set_span_input(rag_span, {"query": message}, mime_type="application/json")
+            model_context = retrieve_data_model_context.invoke(message)
+            set_span_output(rag_span, {"context": str(model_context)[:12000]}, mime_type="application/json")
 
-        # Initialize routing state before branching. Ordinary questions may not
-        # take the deterministic bike-route path, but the downstream routing
-        # reconciliation code still inspects this value.
-        bike_tool_result = None
-
-        deterministic_route = _extract_bike_route_endpoints(message)
-        route_is_crime_aware = _message_requests_crime_avoidance([HumanMessage(content=message)])
-        if deterministic_route:
-            start_text, end_text = deterministic_route
-            from agents.tools import find_bike_route
+        for step in range(CODE_AGENT_MAX_STEPS):
             with trace_span(
-                "general_chat.bike_route",
+                f"general_chat.code_agent.step_{step + 1}",
+                attributes={
+                    "openinference.span.kind": "LLM",
+                    "code_agent.step": step + 1,
+                },
+            ) as code_span:
+                set_span_input(code_span, {
+                    "message": message,
+                    "prior_evidence": evidence[:6000],
+                }, mime_type="application/json")
+                try:
+                    program = _generate_program(message, history, prior_evidence=evidence, data_model_context=str(model_context))
+                    generated_programs.append(program)
+                    set_span_output(code_span, {"generated_code": program}, mime_type="application/json")
+                except Exception as exc:
+                    mark_span_error(code_span, exc)
+                    raise
+
+            with trace_span(
+                f"general_chat.code_execution.step_{step + 1}",
                 attributes={
                     "openinference.span.kind": "TOOL",
-                    "bike_route.start": start_text,
-                    "bike_route.end": end_text,
-                    "bike_route.crime_avoidance": route_is_crime_aware,
+                    "code_agent.step": step + 1,
                 },
-            ) as route_span:
+            ) as exec_span:
+                set_span_input(exec_span, {"code": program}, mime_type="application/json")
                 try:
-                    tool_json = find_bike_route.invoke({
-                        "start": start_text,
-                        "end": end_text,
-                        "city": "Pittsburgh, PA",
-                        "avoid_crime_dense_areas": bool(route_is_crime_aware),
-                        "crime_density_percentile": 90.0,
-                    })
-                    try:
-                        deterministic_payload = json.loads(tool_json) if isinstance(tool_json, str) else None
-                    except Exception:
-                        deterministic_payload = None
-                    set_span_output(route_span, {
-                        "result": deterministic_payload if isinstance(deterministic_payload, dict) else str(tool_json),
-                    }, mime_type="application/json" if isinstance(deterministic_payload, dict) else "text/plain")
+                    final_result, calls = _execute_program(program)
+                    all_calls.extend(calls)
+                    step_evidence = _render_evidence(calls)
+                    evidence = (evidence + "\n\n" + step_evidence).strip()
+                    all_tool_messages.extend(_tool_messages_from_calls(calls))
+                    set_span_output(exec_span, {
+                        "function_calls": [name for name, _ in calls],
+                        "result": final_result,
+                    }, mime_type="application/json")
                 except Exception as exc:
-                    mark_span_error(route_span, exc)
-                    raise
-            all_messages = [*lc_messages, ToolMessage(
-                content=str(tool_json),
-                tool_call_id="deterministic-bike-route",
-                name="find_bike_route",
-            )]
-            ai_messages = []
-            bike_tool_result = deterministic_payload if isinstance(deterministic_payload, dict) else None
-            if bike_tool_result:
-                raw_reply = bike_tool_result.get("message") or (
-                    f"Yes — a BikePGH route was found from {start_text} to {end_text}."
-                    if bike_tool_result.get("status") == "ok"
-                    else "The bike-routing request could not be completed."
+                    mark_span_error(exec_span, exc)
+                    # A malformed recovery program from a local model should not
+                    # erase useful evidence from the previous execution. Give the
+                    # next step a chance to regenerate instead of aborting the
+                    # entire user turn.
+                    all_calls.append(("code_execution_error", str(exc)))
+                    evidence = (evidence + f"\n\n[code_execution_error]\n{exc}").strip()
+                    continue
+
+            # The code agent is intentionally a small program generator. A
+            # second step is only useful when the application has evidence and
+            # the model needs another targeted query/call.
+            if step == 0:
+                # Normally one generated program is enough. If the first
+                # application call produced no substantive result (especially a
+                # zero-row SQL query or a diagnostic telling us the join was
+                # likely wrong), give the Code Agent one targeted recovery step
+                # with the real execution evidence. This keeps recovery inside
+                # the Code Agent architecture instead of hard-coding intent
+                # or SQL fixes in application code.
+                names = [name for name, _ in calls]
+                step_failed = any(
+                    isinstance(result, str) and
+                    ("Query returned 0 rows" in result
+                     or "Code Agent error:" in result
+                     or "does not match" in result.lower()
+                     or "join" in result.lower() and "likely" in result.lower())
+                    for _, result in calls
                 )
-            else:
-                raw_reply = "The crime-aware bike-routing tool returned an unreadable result."
-        else:
-            with trace_span(
-                "general_chat.agent",
-                attributes={
-                    "openinference.span.kind": "AGENT",
-                    "general_chat.history_length": len(history or []),
-                    "general_chat.session_id": session_id or "",
-                },
-            ) as agent_span:
-                set_span_input(agent_span, {"message": message, "history": history or []}, mime_type="application/json")
-                try:
-                    result = agent.invoke({"messages": lc_messages})
-                    all_messages = list(result["messages"])
-                    set_span_output(agent_span, {"message_count": len(all_messages)}, mime_type="application/json")
-                except Exception as exc:
-                    mark_span_error(agent_span, exc)
-                    raise
+                if not any(name in {"query_database", "find_bike_route", "search_all_house_descriptions"} for name in names) or step_failed:
+                    continue
+            break
 
-            ai_messages = [m for m in all_messages if isinstance(m, AIMessage)]
-            raw_reply = ai_messages[-1].content if ai_messages else "I couldn't generate a response."
+        evidence = _render_evidence(all_calls)
+        with trace_span(
+            "general_chat.response",
+            attributes={"openinference.span.kind": "LLM"},
+        ) as response_span:
+            set_span_input(response_span, {"message": message, "evidence": evidence[:12000]}, mime_type="application/json")
+            raw_reply = _write_final_answer(message, history, evidence)
+            set_span_output(response_span, {"reply": raw_reply}, mime_type="application/json")
 
-        # Routing tool results are authoritative. In particular, when a
-        # crime-aware bike request returns kind="no_route", do not let the
-        # local LLM invent a neighborhood/approximate fallback route. The
-        # intermediate filtered-network/crime map remains attached to the
-        # tool result and is rendered independently by the UI.
-        if not isinstance(bike_tool_result, dict):
-            bike_tool_result = None
-        for message_item in reversed(all_messages):
-            # Prefer an already-parsed deterministic routing result.
-            if isinstance(bike_tool_result, dict):
-                break
-            if not isinstance(message_item, ToolMessage):
-                continue
-            try:
-                payload = json.loads(message_item.content) if isinstance(message_item.content, str) else None
-            except Exception:
-                payload = None
-            if isinstance(payload, dict) and (
-                payload.get("kind") in {"no_route", "no_data"}
-                or payload.get("analysis_visualization")
-                or payload.get("presentation") == "route_map"
-            ):
-                bike_tool_result = payload
-                break
-
-        crime_request = _message_requests_crime_avoidance([HumanMessage(content=message)])
-        if crime_request and bike_tool_result:
-            crime_meta = bike_tool_result.get("crime_avoidance") or {}
-            if bike_tool_result.get("kind") in {"routing_service", "input"}:
-                raw_reply = (
-                    bike_tool_result.get("message")
-                    or "The crime-aware routing request could not be evaluated."
-                )
-            elif bike_tool_result.get("presentation") == "route_map" and not bool(crime_meta.get("enabled")):
-                raw_reply = (
-                    "The requested crime-aware route could not be produced because "
-                    "the crime-avoidance filter was not applied. No unfiltered route "
-                    "is being substituted."
-                )
-                bike_tool_result["kind"] = "crime_filter_error"
-                bike_tool_result["status"] = "error"
-                bike_tool_result["message"] = raw_reply
-                # Keep the intermediate visualization, if present, but prevent a
-                # final route visualization from being rendered.
-                if "analysis_visualization" in bike_tool_result:
-                    bike_tool_result["presentation"] = None
-
-        if bike_tool_result and bike_tool_result.get("kind") in {"no_route", "crime_filter_error"}:
-            raw_reply = bike_tool_result.get("message") or (
-                "No continuous path exists between the two endpoints using the "
-                "filtered BikePGH infrastructure."
-            )
-
-        # Crime-aware routing is deterministic: the routing tool result is
-        # authoritative. Do not let the final LLM rewrite a no-route, filter
-        # failure, or successfully filtered route into a different outcome.
-        crime_request = _message_requests_crime_avoidance([HumanMessage(content=message)])
-        direct_routing_reply = None
-        if crime_request and bike_tool_result:
-            crime_meta = bike_tool_result.get("crime_avoidance") or {}
-            analysis_present = bool(bike_tool_result.get("analysis_visualization"))
-            applied = bool(crime_meta.get("enabled")) and bool(
-                crime_meta.get("applied", False)
-            )
-
-            if bike_tool_result.get("kind") in {"no_route", "no_data"}:
-                direct_routing_reply = bike_tool_result.get("message") or (
-                    "No continuous path exists between the two endpoints using "
-                    "the filtered BikePGH infrastructure."
-                )
-            elif bike_tool_result.get("kind") in {"routing_service", "crime_filter_error", "input"}:
-                direct_routing_reply = bike_tool_result.get("message") or (
-                    "The crime-aware routing request could not be evaluated."
-                )
-            elif bike_tool_result.get("presentation") == "route_map" and applied:
-                # Let the normal validator check the generated route prose, but
-                # never allow it to disable crime filtering or substitute a
-                # different route.
-                direct_routing_reply = raw_reply
-            elif analysis_present:
-                # We have the required intermediate map, but the route itself
-                # was not proven crime-aware. Never present the unfiltered route.
-                direct_routing_reply = (
-                    "The requested crime-aware route could not be produced because "
-                    "the crime-avoidance filter was not successfully applied. "
-                    "No unfiltered route is being substituted."
-                )
-
-        if direct_routing_reply is not None:
-            raw_reply = direct_routing_reply
-
-        from agents.response_validator import validate_response
-
-        # The routing result is authoritative for crime-aware route requests.
-        # For ordinary General Chat, keep the normal response validator.
-        # Initialize the reply on every path so non-crime conversations cannot
-        # reach updated_history with an undefined local variable.
+        all_messages: list[BaseMessage] = [
+            HumanMessage(content=message),
+            *all_tool_messages,
+            AIMessage(content=raw_reply),
+        ]
         reply = validate_response(raw_reply, all_messages, strict=True)
-        if crime_request and bike_tool_result:
-            if direct_routing_reply is not None and not (
-                bike_tool_result.get("presentation") == "route_map"
-                and bool((bike_tool_result.get("crime_avoidance") or {}).get("applied", False))
-            ):
-                reply = raw_reply
-            else:
-                # A successfully crime-filtered route may still be checked for prose quality.
-                reply = validate_response(raw_reply, all_messages, strict=True)
 
-        updated_history = (history or []) + [
+        updated_history = list(history or []) + [
             {"role": "user", "content": message},
             {
                 "role": "assistant",
@@ -597,32 +661,29 @@ def run_general_chat(
             },
         ]
 
-        visualization = _extract_bike_visualization(all_messages, crime_request=crime_request)
-        if isinstance(bike_tool_result, dict):
-            direct_visualization = _extract_bike_visualization_from_payload(
-                bike_tool_result, crime_request=crime_request
-            )
-            # The current request controls whether an ordinary route or a
-            # crime-filtered route is allowed to render. Never let stale
-            # conversation history suppress a valid ordinary route map.
-            if direct_visualization is not None:
-                if not crime_request or (
-                    direct_visualization.get("type") == "bike_crime_analysis"
-                    or direct_visualization.get("type") == "bike_route"
-                ):
-                    visualization = direct_visualization
+        bike_payloads = _parse_bike_payloads(all_calls)
+        visualization = _extract_bike_visualization(bike_payloads)
+
         end_general_chat(
             root_span,
             trace_id=trace_id,
             reply=reply,
             started_at=started_at,
-            tool_call_count=sum(len(getattr(m, "tool_calls", None) or []) for m in ai_messages),
+            tool_call_count=len(all_calls),
+        )
+        record_general_chat_success(
+            latency_seconds=perf_counter() - started_at,
+            llm_calls=len(generated_programs) + 1,
+            tool_calls=len(all_calls),
+            reply_chars=len(reply),
+            validation_changed=(reply != raw_reply),
         )
 
         if include_metadata:
             return reply, updated_history, visualization, {
                 "trace_id": trace_id,
                 "trace_url": trace_url,
+                "generated_code": generated_programs,
             }
         return reply, updated_history
     except Exception as exc:
@@ -632,6 +693,8 @@ def run_general_chat(
             trace_id=trace_id,
             reply=None,
             started_at=started_at,
+            tool_call_count=len(all_calls),
             error=exc,
         )
+        record_general_chat_error(perf_counter() - started_at)
         raise
