@@ -40,3 +40,5 @@ venv*/
 
 # Evaluation reports produced by run_eval.py
 /eval/reports/
+
+*.zip
