@@ -2,6 +2,56 @@
 
 A local, AI-powered map app for analyzing houses with FEMA National Risk Index data, Census demographics, Redfin listings, severity-weighted crime data, and an LLM chat interface — all running on your machine.
 
+## Data-model planning / RAG
+
+The SQL agent intentionally queries **physical tables only**. Semantic SQL views
+such as `house_rankings` and `nri_msa_risk` are not part of this architecture.
+Instead, `db/schema_catalog.py` defines table and column meaning, aliases, grain,
+nullability, relationship cardinality and confidence, bridge tables, and reusable
+planning patterns. `agents/query_planner.py` creates a deterministic structured
+plan for analytical requests before SQL generation.
+
+`db/vector_store.py` indexes the small metadata documents in a dedicated Chroma
+collection named `data_model_metadata`. General Chat performs targeted
+data-model retrieval before code generation and records it as the
+`general_chat.data_model_rag` span. The SQL Code Agent receives targeted live
+schema and relationship context rather than the entire database schema, and the
+planner is recorded separately in the `general_chat.query_planner` Phoenix span.
+
+The metadata vector store is a **retrieval accelerator**, not the authoritative
+schema: live DuckDB `DESCRIBE` output and row counts remain the source of truth
+for actual availability. If the Ollama embedding service is unavailable, metadata
+retrieval falls back to lexical matching. Chroma metadata documents are updated
+with `upsert`, keeping the collection synchronized with curated relationship and
+planning metadata. On startup, `_ensure_schema()` removes legacy
+`house_rankings` and `nri_msa_risk` views left by older builds.
+
+The structured plan keeps `universe_limit` separate from `result_limit`. For
+example, “top 50 MSAs with the lowest risk” first selects the 50 largest MSAs,
+then ranks those 50 by the requested NRI metric and returns the best results.
+The MSA/NRI planning recipe uses the canonical relational path
+`census_msa -> cbsa_counties -> nri_tracts` and aggregates the risk metric at
+MSA grain.
+
+The SQL Code Agent generates the first query and receives a repair attempt if
+execution fails or returns no rows. If recovery is still needed, the system can
+use a metadata-defined canonical MSA/NRI query path. This recovery path is not
+the primary execution path, and malformed recovery programs are treated as
+non-fatal so prior evidence is preserved for another generation step.
+
+The data-model retriever searches using both the user's question and the
+structured query plan. Common semantic mappings include walk score, saved or
+favorite houses, overall NRI risk, riverine and coastal flood risk, and MSA
+population. The resulting flow is:
+
+`question -> structured plan -> targeted live schema and relationship retrieval -> metadata retrieval -> SQL Code Agent -> execute -> repair -> canonical recovery -> final response`
+
+The metadata recovery query keeps the population universe separate from NRI
+aggregation and applies the final result limit only after the MSA-level metric is
+computed. The physical database remains normalized; no MSA-risk or house-ranking
+views are introduced.
+
+
 ---
 
 ## Architecture
@@ -383,6 +433,7 @@ run_eval.py            Agent evaluation pipeline entry point
 
 agents/
   tools.py            LangChain tools (SQL, vector search, price estimation)
+  query_planner.py    Deterministic analytical query planning and semantic mappings
   house_agent.py      Per-house ReAct agent (LangGraph)
   general_agent.py    General ReAct agent (LangGraph)
   response_validator.py  Post-hoc check that replies are grounded in real tool output
