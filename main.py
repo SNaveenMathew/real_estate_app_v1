@@ -29,7 +29,7 @@ from services import layers as layer_service
 from services import bike_routing
 from agents.house_agent import run_house_chat
 from agents.general_agent import run_general_chat
-from observability import initialize_observability, phoenix_enabled
+from observability import initialize_observability, ensure_phoenix_server, stop_phoenix_server
 
 
 def _safe(v):
@@ -44,110 +44,18 @@ def _safe_dict(d: dict) -> dict:
 
 
 # ── Phoenix process lifecycle ────────────────────────────────────────────────
-# Phoenix is a local, free/open-source service. Start it automatically with
-# the FastAPI app so the OTLP endpoint exists before tracing is initialized.
-_phoenix_process = None
-_phoenix_started_by_app = False
-
-def _phoenix_port_open(host: str, port: int) -> bool:
-    try:
-        with socket.create_connection((host, port), timeout=0.25):
-            return True
-    except OSError:
-        return False
-
-
-def _start_phoenix_server() -> None:
-    global _phoenix_process, _phoenix_started_by_app
-
-    if not settings.phoenix_enabled:
-        return
-
-    host = "127.0.0.1"
-    port = 6006
-    endpoint = settings.phoenix_ui_url.rstrip("/")
-    try:
-        from urllib.parse import urlparse
-        parsed = urlparse(endpoint)
-        host = parsed.hostname or host
-        port = parsed.port or port
-    except Exception:
-        pass
-
-    if _phoenix_port_open(host, port):
-        _phoenix_started_by_app = False
-        print(f"Phoenix already running at {endpoint}")
-        return
-
-    creationflags = 0
-    kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.STDOUT}
-    if os.name == "nt":
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        kwargs["creationflags"] = creationflags
-
-    cmd = [
-        sys.executable,
-        "-m",
-        "phoenix.server.main",
-        "serve",
-        "--host",
-        host,
-        "--port",
-        str(port),
-    ]
-
-    try:
-        _phoenix_process = subprocess.Popen(cmd, **kwargs)
-        _phoenix_started_by_app = True
-        print(f"Started Phoenix in background (PID {_phoenix_process.pid}) at {endpoint}")
-    except Exception as exc:
-        _phoenix_process = None
-        _phoenix_started_by_app = False
-        print(f"WARNING: Could not start Phoenix automatically: {exc}")
-        return
-
-    deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline:
-        if _phoenix_process.poll() is not None:
-            print("WARNING: Phoenix exited during startup; tracing will be disabled.")
-            _phoenix_process = None
-            _phoenix_started_by_app = False
-            return
-        if _phoenix_port_open(host, port):
-            print("Phoenix is ready; enabling General Chat tracing.")
-            return
-        time.sleep(0.2)
-
-    print("WARNING: Phoenix did not become ready within 15 seconds; continuing without blocking the app.")
-
-
-def _stop_phoenix_server() -> None:
-    global _phoenix_process, _phoenix_started_by_app
-    if not _phoenix_started_by_app or _phoenix_process is None:
-        return
-    proc = _phoenix_process
-    _phoenix_process = None
-    _phoenix_started_by_app = False
-    if proc.poll() is not None:
-        return
-    try:
-        proc.terminate()
-        proc.wait(timeout=5)
-    except Exception:
-        try:
-            proc.kill()
-        except Exception:
-            pass
+# Shared with run_eval.py so both the web app and evaluations can bootstrap
+# the same local collector.
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    _start_phoenix_server()
+    ensure_phoenix_server()
     initialize_observability()
     try:
         yield
     finally:
-        _stop_phoenix_server()
+        stop_phoenix_server()
 
 
 # ── App setup ────────────────────────────────────────────────────────────────

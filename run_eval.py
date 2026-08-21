@@ -37,6 +37,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import settings
+from observability import ensure_phoenix_server, stop_phoenix_server, initialize_observability
 from eval.fixtures import build_fixture
 from eval.golden_set import GOLDEN_SET, GoldenExample
 from eval.scoring import score_structured, ScoreResult
@@ -113,18 +114,34 @@ def main():
         print("*** --mock: smoke-testing the harness only. This is NOT a real evaluation. ***")
 
     results: list[tuple[GoldenExample, ScoreResult]] = []
+
+    # run_eval does not enter FastAPI lifespan, so explicitly bootstrap Phoenix
+    # before any agent call creates spans. This prevents OTLP connection-refused
+    # noise and preserves traces for the evaluation run.
+    if settings.phoenix_enabled:
+        if ensure_phoenix_server():
+            initialize_observability()
+        else:
+            print("WARNING: Phoenix is unavailable; evaluation will continue without trace export.")
+            # Prevent every agent span from repeatedly attempting an OTLP
+            # connection to a collector that failed to start.
+            settings.phoenix_enabled = False
+
     print(f"\nRunning {len(examples)} example(s){' [MOCK]' if args.mock else ''}...\n")
-    for ex in examples:
-        t0 = time.time()
-        result = run_example(ex, judge, args.mock)
-        dt = time.time() - t0
-        icon = {"PASS": "\u2713", "FAIL": "\u2717", "ERROR": "!"}[result.verdict]
-        print(f"  [{icon}] {ex.id:<42s} {result.verdict:<6s} ({result.method}, {dt:.1f}s)")
-        if result.verdict != "PASS":
-            print(f"        {result.reason}")
-            if result.verdict == "ERROR" and result.extra.get("traceback"):
-                print("        (full traceback in the report)")
-        results.append((ex, result))
+    try:
+        for ex in examples:
+            t0 = time.time()
+            result = run_example(ex, judge, args.mock)
+            dt = time.time() - t0
+            icon = {"PASS": "\u2713", "FAIL": "\u2717", "ERROR": "!"}[result.verdict]
+            print(f"  [{icon}] {ex.id:<42s} {result.verdict:<6s} ({result.method}, {dt:.1f}s)")
+            if result.verdict != "PASS":
+                print(f"        {result.reason}")
+                if result.verdict == "ERROR" and result.extra.get("traceback"):
+                    print("        (full traceback in the report)")
+            results.append((ex, result))
+    finally:
+        stop_phoenix_server()
 
     _write_report(results, mock=args.mock)
     _print_summary(results)

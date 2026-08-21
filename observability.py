@@ -10,6 +10,11 @@ import json
 import logging
 import threading
 import time
+import os
+import socket
+import subprocess
+import sys
+from urllib.parse import urlparse
 from contextlib import nullcontext
 from typing import Any, Iterator
 
@@ -21,6 +26,8 @@ _setup_lock = threading.Lock()
 _tracer_provider = None
 _tracer = None
 _metrics_ready = False
+_phoenix_process = None
+_phoenix_started_by_app = False
 
 # Prometheus is already a project dependency, so metrics remain free,
 # local, and vendor-neutral.
@@ -58,6 +65,99 @@ GENERAL_CHAT_REPLY_CHARS = Histogram(
 )
 
 
+def _phoenix_endpoint_parts() -> tuple[str, int, str]:
+    endpoint = settings.phoenix_ui_url.rstrip("/")
+    try:
+        parsed = urlparse(endpoint)
+        return parsed.hostname or "127.0.0.1", parsed.port or 6006, endpoint
+    except Exception:
+        return "127.0.0.1", 6006, endpoint
+
+
+def _phoenix_port_open(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+
+def ensure_phoenix_server(wait_seconds: float = 15.0) -> bool:
+    """Start local Phoenix when needed and wait for its HTTP port.
+
+    This is shared by the FastAPI app and the offline evaluation runner, so
+    evaluations do not accidentally configure an OTLP exporter before a
+    collector exists. Failure is fail-open: the caller may still run with
+    tracing disabled.
+    """
+    global _phoenix_process, _phoenix_started_by_app
+
+    if not settings.phoenix_enabled:
+        return False
+
+    host, port, endpoint = _phoenix_endpoint_parts()
+    if _phoenix_port_open(host, port):
+        _phoenix_started_by_app = False
+        return True
+
+    if _phoenix_process is not None and _phoenix_process.poll() is None:
+        return True
+
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+    kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.STDOUT}
+    if creationflags:
+        kwargs["creationflags"] = creationflags
+
+    cmd = [
+        sys.executable, "-m", "phoenix.server.main", "serve",
+        "--host", host, "--port", str(port),
+    ]
+    try:
+        _phoenix_process = subprocess.Popen(cmd, **kwargs)
+        _phoenix_started_by_app = True
+        logger.info("Started Phoenix in background: pid=%s endpoint=%s", _phoenix_process.pid, endpoint)
+    except Exception:
+        _phoenix_process = None
+        _phoenix_started_by_app = False
+        logger.exception("Could not start Phoenix automatically")
+        return False
+
+    deadline = time.monotonic() + wait_seconds
+    while time.monotonic() < deadline:
+        if _phoenix_process.poll() is not None:
+            logger.error("Phoenix exited during startup")
+            _phoenix_process = None
+            _phoenix_started_by_app = False
+            return False
+        if _phoenix_port_open(host, port):
+            logger.info("Phoenix is ready at %s", endpoint)
+            return True
+        time.sleep(0.2)
+
+    logger.warning("Phoenix did not become ready within %.1fs", wait_seconds)
+    return False
+
+
+def stop_phoenix_server() -> None:
+    """Stop only a Phoenix process started by this Python process."""
+    global _phoenix_process, _phoenix_started_by_app
+    if not _phoenix_started_by_app or _phoenix_process is None:
+        return
+    proc = _phoenix_process
+    _phoenix_process = None
+    _phoenix_started_by_app = False
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            logger.debug("Unable to stop Phoenix process", exc_info=True)
+
+
 def initialize_observability() -> None:
     """Initialize Phoenix OTEL tracing once per Python process.
 
@@ -89,7 +189,7 @@ def initialize_observability() -> None:
                 project_name=settings.phoenix_project_name,
                 endpoint=endpoint,
                 protocol=settings.phoenix_protocol,
-                batch=False,
+                batch=True,
                 auto_instrument=False,
             )
             _tracer = _tracer_provider.get_tracer(

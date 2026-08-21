@@ -196,6 +196,11 @@ _TABLE_REF = re.compile(
     re.I,
 )
 
+def _live_agent_schema() -> str:
+    # Reuse the same live-schema renderer exposed to General Chat. This keeps
+    # the sub-agent aligned with real column names and documented joins.
+    return schema.render_schema_for_agent()
+
 
 SYSTEM_PROMPT = """You are the SQL Code Agent for a real-estate analytics application.
 
