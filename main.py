@@ -29,7 +29,7 @@ from services import layers as layer_service
 from services import bike_routing
 from agents.house_agent import run_house_chat
 from agents.general_agent import run_general_chat
-from observability import initialize_observability, ensure_phoenix_server, stop_phoenix_server
+from observability import initialize_observability, ensure_phoenix_server, stop_phoenix_server, phoenix_enabled
 
 
 def _safe(v):

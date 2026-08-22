@@ -37,15 +37,24 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import settings
-from observability import ensure_phoenix_server, stop_phoenix_server, initialize_observability
 from eval.fixtures import build_fixture
 from eval.golden_set import GOLDEN_SET, GoldenExample
 from eval.scoring import score_structured, ScoreResult
 from eval.judge import LLMJudge, MockJudge
 
 
-def run_example(example: GoldenExample, judge, mock: bool) -> ScoreResult:
+def run_example(example: GoldenExample, judge, mock: bool):
     """Get the agent's reply, then dispatch to the right scorer."""
+    trace_id = None
+    trace_url = None
+    if not mock:
+        try:
+            from observability import initialize_observability, clear_local_trace_capture
+            initialize_observability()
+            clear_local_trace_capture()
+        except Exception:
+            pass
+
     if mock:
         from eval.mock_agent import mock_reply
         try:
@@ -57,17 +66,32 @@ def run_example(example: GoldenExample, judge, mock: bool) -> ScoreResult:
         try:
             if example.agent == "general":
                 from agents.general_agent import run_general_chat
-                reply, _ = run_general_chat(example.question, history=[])
+                reply, _, _, metadata = run_general_chat(example.question, history=[], include_metadata=True)
+                trace_id = metadata.get("trace_id") if metadata else None
+                trace_url = metadata.get("trace_url") if metadata else None
             else:
                 from agents.house_agent import run_house_chat
                 reply, _ = run_house_chat(example.house_id, example.question, history=[])
         except Exception as e:
-            return ScoreResult(example.id, "ERROR", "n/a", f"agent call failed: {e}",
-                                extra={"traceback": traceback.format_exc()})
+            trace_id = None
+            try:
+                from observability import latest_local_trace_id
+                trace_id = latest_local_trace_id()
+            except Exception:
+                pass
+            extra = {"traceback": traceback.format_exc()}
+            if trace_id:
+                extra["trace_id"] = trace_id
+            return ScoreResult(example.id, "ERROR", "n/a", f"agent call failed: {e}", extra=extra)
 
     if example.answer_type == "structured":
-        return score_structured(example, reply)
-    return judge.judge(example, reply)
+        result = score_structured(example, reply)
+    else:
+        result = judge.judge(example, reply)
+    if trace_id:
+        result.extra["trace_id"] = trace_id
+        result.extra["trace_url"] = trace_url
+    return result
 
 
 def _filter_examples(args) -> list[GoldenExample]:
@@ -114,34 +138,54 @@ def main():
         print("*** --mock: smoke-testing the harness only. This is NOT a real evaluation. ***")
 
     results: list[tuple[GoldenExample, ScoreResult]] = []
-
-    # run_eval does not enter FastAPI lifespan, so explicitly bootstrap Phoenix
-    # before any agent call creates spans. This prevents OTLP connection-refused
-    # noise and preserves traces for the evaluation run.
-    if settings.phoenix_enabled:
-        if ensure_phoenix_server():
-            initialize_observability()
-        else:
-            print("WARNING: Phoenix is unavailable; evaluation will continue without trace export.")
-            # Prevent every agent span from repeatedly attempting an OTLP
-            # connection to a collector that failed to start.
-            settings.phoenix_enabled = False
-
     print(f"\nRunning {len(examples)} example(s){' [MOCK]' if args.mock else ''}...\n")
-    try:
-        for ex in examples:
-            t0 = time.time()
-            result = run_example(ex, judge, args.mock)
-            dt = time.time() - t0
-            icon = {"PASS": "\u2713", "FAIL": "\u2717", "ERROR": "!"}[result.verdict]
-            print(f"  [{icon}] {ex.id:<42s} {result.verdict:<6s} ({result.method}, {dt:.1f}s)")
-            if result.verdict != "PASS":
-                print(f"        {result.reason}")
-                if result.verdict == "ERROR" and result.extra.get("traceback"):
-                    print("        (full traceback in the report)")
-            results.append((ex, result))
-    finally:
-        stop_phoenix_server()
+    for ex in examples:
+        t0 = time.time()
+        result = run_example(ex, judge, args.mock)
+        if not args.mock:
+            try:
+                from observability import export_trace
+                trace_path = settings.eval_traces_dir / f"{ex.id}.json"
+                trace_id = result.extra.get("trace_id")
+                if trace_id:
+                    export_trace(trace_id, trace_path, metadata={
+                        "eval_id": ex.id,
+                        "agent": ex.agent,
+                        "answer_type": ex.answer_type,
+                        "tags": list(ex.tags),
+                        "question": ex.question,
+                        "verdict": result.verdict,
+                        "method": result.method,
+                        "reason": result.reason,
+                        "reply": result.reply,
+                        "trace_url": result.extra.get("trace_url"),
+                    })
+                else:
+                    trace_path.parent.mkdir(parents=True, exist_ok=True)
+                    trace_path.write_text(json.dumps({
+                        "trace_id": None,
+                        "span_count": 0,
+                        "metadata": {
+                            "eval_id": ex.id, "agent": ex.agent,
+                            "answer_type": ex.answer_type, "tags": list(ex.tags),
+                            "question": ex.question, "verdict": result.verdict,
+                            "method": result.method, "reason": result.reason,
+                            "reply": result.reply,
+                            "note": "No OpenTelemetry trace was emitted by this agent path."
+                        },
+                        "spans": []
+                    }, indent=2, ensure_ascii=False), encoding="utf-8")
+                result.extra["trace_file"] = str(trace_path)
+            except Exception as exc:
+                result.extra["trace_export_error"] = str(exc)
+        dt = time.time() - t0
+        icon = {"PASS": "\u2713", "FAIL": "\u2717", "ERROR": "!"}[result.verdict]
+        print(f"  [{icon}] {ex.id:<42s} {result.verdict:<6s} ({result.method}, {dt:.1f}s)")
+        if result.verdict != "PASS":
+            print(f"        {result.reason}")
+            if result.verdict == "ERROR" and result.extra.get("traceback"):
+                print("        (full traceback in the report)")
+        results.append((ex, result))
 
     _write_report(results, mock=args.mock)
     _print_summary(results)
@@ -193,6 +237,8 @@ def _write_report(results: list[tuple[GoldenExample, ScoreResult]], mock: bool):
                 "answer_type": ex.answer_type, "question": ex.question,
                 "verdict": r.verdict, "method": r.method, "reason": r.reason,
                 "reply": r.reply, "traceback": r.extra.get("traceback"),
+                "trace_id": r.extra.get("trace_id"), "trace_url": r.extra.get("trace_url"),
+                "trace_file": r.extra.get("trace_file"), "trace_export_error": r.extra.get("trace_export_error"),
             }
             for ex, r in results
         ],
@@ -216,6 +262,12 @@ def _write_report(results: list[tuple[GoldenExample, ScoreResult]], mock: bool):
         lines.append(f"- **question:** {ex.question}")
         lines.append(f"- **reason:** {r.reason}")
         lines.append(f"- **reply:** {reply_snippet}")
+        if r.extra.get("trace_file"):
+            lines.append(f"- **trace file:** `{r.extra['trace_file']}`")
+        if r.extra.get("trace_id"):
+            lines.append(f"- **trace id:** `{r.extra['trace_id']}`")
+        if r.extra.get("trace_export_error"):
+            lines.append(f"- **trace export error:** `{r.extra['trace_export_error']}`")
         if r.verdict == "ERROR" and r.extra.get("traceback"):
             lines.append(f"- **traceback:**\n```\n{r.extra['traceback']}```")
     md_path.write_text("\n".join(lines))

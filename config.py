@@ -95,6 +95,7 @@ class Settings(BaseSettings):
     # ── Evaluation: fixtures & reports ──────────────────────────────────────
     eval_fixture_duckdb_path: Path = BASE_DIR / "eval" / "fixture_data" / "eval_fixture.duckdb"
     eval_reports_dir: Path = BASE_DIR / "eval" / "reports"
+    eval_traces_dir: Path = BASE_DIR / "eval" / "traces"
 
     # ── App ──────────────────────────────────────────────────────────────────
     app_host: str = "0.0.0.0"

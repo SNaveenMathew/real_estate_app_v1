@@ -28,6 +28,7 @@ _tracer = None
 _metrics_ready = False
 _phoenix_process = None
 _phoenix_started_by_app = False
+_local_trace_exporter = None
 
 # Prometheus is already a project dependency, so metrics remain free,
 # local, and vendor-neutral.
@@ -63,6 +64,92 @@ GENERAL_CHAT_REPLY_CHARS = Histogram(
     "Characters in final General Chat responses.",
     buckets=(100, 250, 500, 1000, 2000, 4000, 8000, 16000),
 )
+
+
+class EvaluationTraceExporter:
+    """In-process OTEL exporter used to persist complete eval traces locally."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._spans = []
+
+    def export(self, spans):
+        with self._lock:
+            self._spans.extend(spans)
+        try:
+            from opentelemetry.sdk.trace.export import SpanExportResult
+            return SpanExportResult.SUCCESS
+        except Exception:
+            return None
+
+    def shutdown(self):
+        return None
+
+    def force_flush(self, timeout_millis: int = 30000):
+        return True
+
+    def clear(self):
+        with self._lock:
+            self._spans.clear()
+
+    def snapshot(self, trace_id: str):
+        with self._lock:
+            spans = [s for s in self._spans if get_trace_id(s) == trace_id]
+        return spans
+
+
+def _serialize_span(span) -> dict[str, Any]:
+    ctx = span.get_span_context()
+    parent = getattr(span, "parent", None)
+    parent_id = None
+    if parent is not None and getattr(parent, "span_id", 0):
+        parent_id = f"{parent.span_id:016x}"
+    status = getattr(span, "status", None)
+    status_code = getattr(getattr(status, "status_code", None), "name", None)
+    events = []
+    for event in getattr(span, "events", ()) or ():
+        events.append({
+            "name": event.name,
+            "timestamp_ns": getattr(event, "timestamp", None),
+            "attributes": dict(event.attributes or {}),
+        })
+    resource = getattr(span, "resource", None)
+    resource_attrs = dict(getattr(resource, "attributes", {}) or {})
+    instrumentation = getattr(span, "instrumentation_scope", None)
+    return {
+        "name": span.name,
+        "span_id": f"{ctx.span_id:016x}",
+        "trace_id": f"{ctx.trace_id:032x}",
+        "parent_span_id": parent_id,
+        "start_time_ns": getattr(span, "start_time", None),
+        "end_time_ns": getattr(span, "end_time", None),
+        "status": status_code,
+        "status_description": getattr(status, "description", None),
+        "attributes": dict(span.attributes or {}),
+        "events": events,
+        "resource": resource_attrs,
+        "instrumentation_scope": {
+            "name": getattr(instrumentation, "name", None),
+            "version": getattr(instrumentation, "version", None),
+        },
+    }
+
+
+def export_trace(trace_id: str, output_path, *, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Write one complete local JSON trace for an evaluation example."""
+    from pathlib import Path
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    spans = _local_trace_exporter.snapshot(trace_id) if _local_trace_exporter else []
+    payload = {
+        "trace_id": trace_id,
+        "exported_at": time.time(),
+        "metadata": metadata or {},
+        "span_count": len(spans),
+        "spans": [_serialize_span(span) for span in sorted(spans, key=lambda x: (getattr(x, "start_time", 0) or 0, x.name))],
+    }
+    output_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    return payload
 
 
 def _phoenix_endpoint_parts() -> tuple[str, int, str]:
@@ -164,7 +251,7 @@ def initialize_observability() -> None:
     Tracing failure is deliberately non-fatal: the chat app must continue to
     work even when the local Phoenix collector is stopped.
     """
-    global _tracer_provider, _tracer, _metrics_ready
+    global _tracer_provider, _tracer, _metrics_ready, _local_trace_exporter
 
     if not settings.phoenix_enabled:
         _tracer = False
@@ -189,9 +276,17 @@ def initialize_observability() -> None:
                 project_name=settings.phoenix_project_name,
                 endpoint=endpoint,
                 protocol=settings.phoenix_protocol,
-                batch=True,
+                batch=False,
                 auto_instrument=False,
             )
+            try:
+                from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+                _local_trace_exporter = EvaluationTraceExporter()
+                _tracer_provider.add_span_processor(SimpleSpanProcessor(_local_trace_exporter))
+            except Exception:
+                _local_trace_exporter = None
+                logger.exception("Unable to install local evaluation trace exporter")
+
             _tracer = _tracer_provider.get_tracer(
                 "real_estate_app.general_chat",
                 "1.0.0",
@@ -211,6 +306,28 @@ def initialize_observability() -> None:
 def phoenix_enabled() -> bool:
     initialize_observability()
     return bool(_tracer and _tracer is not False)
+
+
+def clear_local_trace_capture() -> None:
+    if _local_trace_exporter:
+        _local_trace_exporter.clear()
+
+
+def latest_local_trace_id() -> str | None:
+    if not _local_trace_exporter:
+        return None
+    with _local_trace_exporter._lock:
+        spans = list(_local_trace_exporter._spans)
+    if not spans:
+        return None
+    spans.sort(key=lambda s: getattr(s, "end_time", 0) or getattr(s, "start_time", 0) or 0, reverse=True)
+    return get_trace_id(spans[0])
+
+
+def local_trace_span_count(trace_id: str) -> int:
+    if not _local_trace_exporter:
+        return 0
+    return len(_local_trace_exporter.snapshot(trace_id))
 
 
 def tracer():
