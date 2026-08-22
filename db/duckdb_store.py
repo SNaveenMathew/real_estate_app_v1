@@ -336,7 +336,7 @@ _HOUSES_COLS = [
     "status", "price", "beds", "baths", "sqft", "year_built",
     "hoa_fee", "walk_score", "bike_score", "transit_score",
     "tract_fips", "msa_code", "nearest_big_city", "crime_city",
-    "source_file", "raw_json",
+    "source_file", "raw_json", "is_favorite",
 ]
 _HOUSES_INSERT = f"INSERT OR REPLACE INTO houses ({', '.join(_HOUSES_COLS)}) SELECT {', '.join(_HOUSES_COLS)} FROM __tmp_houses"
 

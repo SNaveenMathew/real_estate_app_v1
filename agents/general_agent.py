@@ -276,7 +276,11 @@ RULES
 11. For “top N MSAs” + NRI questions, preserve the population universe and the MSA->county->tract relationship described by the structured plan.
 12. For NRI hazard questions, preserve the user's hazard exactly. The SQL Code Agent
     maps it to the canonical semantic column.
-13. When a request needs multiple independent evidence sources, you may make
+13. IMPORTANT HOUSE-SCOPE RULE: phrases such as "my houses", "houses I have",
+    "my Austin houses", or "houses in Austin" refer to the full house inventory.
+    Do NOT add is_favorite = TRUE unless the user explicitly says "my list",
+    "saved houses", "favorites", or "favorited houses".
+14. When a request needs multiple independent evidence sources, you may make
     multiple approved calls and assign each result to a variable.
 14. Set `final_result` to the most useful result for the final-response model.
 
@@ -433,9 +437,19 @@ def _generate_program(user_message: str, history: list[dict] | None, prior_evide
     ])
     code = _clean_code(_extract_text(response))
     if code:
-        return code
+        try:
+            _validate_program(code)
+            return code
+        except Exception as first_exc:
+            first_error = str(first_exc)
+        else:
+            first_error = ""
+    else:
+        first_error = "Code agent returned empty code."
 
-    # Local models can occasionally emit an empty completion. Recover without
+    # Local models can occasionally emit an empty completion or malformed
+    # Python. Recover with a tiny, syntax-constrained prompt rather than
+    # allowing the failure to become a user-facing "no data" answer.
     # re-classifying the user's intent: ask the same Code Agent for the minimal
     # program and include only the semantic capabilities it needs.
     retry_prompt = (
@@ -447,10 +461,27 @@ def _generate_program(user_message: str, history: list[dict] | None, prior_evide
         "and mention the documented census_msa -> cbsa_counties -> nri_tracts relationship in requirements."
     )
     retry = _get_code_agent().invoke([
-        SystemMessage(content=retry_prompt),
+        SystemMessage(content=retry_prompt + f"\nFIRST GENERATION ERROR: {first_error}"),
         HumanMessage(content="Generate the statement now."),
     ])
-    return _clean_code(_extract_text(retry))
+    retry_code = _clean_code(_extract_text(retry))
+    if retry_code:
+        try:
+            _validate_program(retry_code)
+            return retry_code
+        except Exception:
+            pass
+
+    # Last deterministic escape hatch for the common analytical case. This
+    # still goes through query_database, which preserves the LLM-first/data-
+    # model-grounded architecture while making malformed local-model output
+    # non-fatal.
+    return (
+        "final_result = query_database("
+        f"request={user_message!r}, "
+        "requirements='Answer the user request from the database; preserve the structured plan and documented relationships.', "
+        f"plan={query_plan.render()!r})"
+    )
 
 
 def _render_evidence(calls: list[tuple[str, Any]]) -> str:

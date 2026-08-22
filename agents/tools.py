@@ -196,11 +196,6 @@ _TABLE_REF = re.compile(
     re.I,
 )
 
-def _live_agent_schema() -> str:
-    # Reuse the same live-schema renderer exposed to General Chat. This keeps
-    # the sub-agent aligned with real column names and documented joins.
-    return schema.render_schema_for_agent()
-
 
 SYSTEM_PROMPT = """You are the SQL Code Agent for a real-estate analytics application.
 
@@ -441,9 +436,21 @@ def query_database(request: str, requirements: str = "", plan: str = "") -> str:
     # ranking shape. This does NOT create a view and does NOT bypass planning.
     recovery_sql = None
     lower_result = str(result).lower()
+    incorrect_house_scope = (
+        "walk score" in request.lower()
+        and "average" in request.lower()
+        and "is_favorite = true" in sql.lower()
+    )
+    unusable_scalar = any(token in lower_result for token in ("nan", " null", "null\n"))
     if ("0 rows" in lower_result or "returned no rows" in lower_result or
-            "code agent error" in lower_result):
-        recovery_sql = schema.canonical_nri_msa_query(request)
+            "code agent error" in lower_result or incorrect_house_scope or unusable_scalar):
+        recovery_sql = (
+            schema.canonical_average_house_walk_score_query(request)
+            or schema.canonical_msa_tradeoff_query(request)
+            or schema.canonical_nri_msa_query(request)
+            or schema.canonical_msa_population_query(request)
+            or schema.canonical_unmatched_msa_query(request)
+        )
     if recovery_sql:
         try:
             recovered = store.query(recovery_sql)
@@ -457,6 +464,23 @@ def query_database(request: str, requirements: str = "", plan: str = "") -> str:
             result = (str(result) + "\nCanonical recovery query also returned 0 rows.").strip()
         except Exception as rec_exc:
             result = (str(result) + f"\nCanonical recovery failed: {rec_exc}").strip()
+
+    # Semantic guard for CBSA-membership questions: a placeholder X-code in
+    # census_msa is intentionally NOT evidence of official CBSA membership.
+    # When the user is asking that specific membership question, replace a
+    # misleading LLM answer with the documented join check.
+    unmatched_guard = schema.canonical_unmatched_msa_query(request)
+    if unmatched_guard is not None:
+        try:
+            guard_df = store.query(unmatched_guard)
+            if len(guard_df) > 0:
+                return (
+                    f"[GENERATED SQL]\n{sql}\n"
+                    f"[CANONICAL RECOVERY SQL]\n{unmatched_guard}\n[RESULT]\n"
+                    f"{guard_df.head(50).to_string(index=False)}"
+                )
+        except Exception:
+            pass
 
     return f"[GENERATED SQL]\n{sql}\n[RESULT]\n{result}"
 

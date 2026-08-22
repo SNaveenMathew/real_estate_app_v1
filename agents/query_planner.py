@@ -89,10 +89,27 @@ def build_query_plan(request: str, requirements: str = "", plan: str = "") -> Qu
         qp.ordering = "houses.walk_score DESC for highest/best, ASC for lowest/worst"
         qp.data_quality_rules.append("Exclude NULL walk_score unless missing values are explicitly requested")
 
-    if "my list" in lower or "saved houses" in lower or "favorites" in lower or "favorite houses" in lower:
+    explicit_saved_scope = (
+        "my list" in lower
+        or "saved houses" in lower
+        or "favorites" in lower
+        or "favorite houses" in lower
+        or "favorited houses" in lower
+    )
+    if explicit_saved_scope:
         qp.scope["type"] = "saved_houses"
         qp.scope["filter"] = "houses.is_favorite = TRUE"
         qp.required_tables.append("houses")
+    elif re.search(r"\b(?:my|i have|i own|in my)\b.*\bhouses?\b", lower):
+        # Possessive language describes the application's house inventory.
+        # It must NOT be silently narrowed to is_favorite unless the user
+        # explicitly asks for saved/favorited houses or their list.
+        qp.scope["type"] = "house_inventory"
+        qp.scope["filter"] = "none"
+        qp.required_tables.append("houses")
+        qp.data_quality_rules.append(
+            "Do not infer houses.is_favorite = TRUE from possessive language such as 'my houses' or 'houses I have'"
+        )
 
     m = re.search(r"\btop\s+(\d+)\b", lower)
     if m:
@@ -116,6 +133,25 @@ def build_query_plan(request: str, requirements: str = "", plan: str = "") -> Qu
         qp.data_quality_rules.append("Filter census_msa.msa_code NOT LIKE 'X%' before joining to cbsa_counties")
         if qp.universe_limit is not None:
             qp.ordering = "population DESC inside the MSA universe; requested NRI metric ASC for lowest/best or DESC for highest/worst"
+        elif qp.question_type == "ranking" and "population" in lower:
+            qp.ordering = "census_msa.population DESC"
+        elif qp.question_type == "ranking" and "risk" in lower:
+            if any(x in lower for x in ("highest", "most risk", "worst")):
+                qp.ordering = "requested NRI risk metric DESC at MSA grain"
+            else:
+                qp.ordering = "requested NRI risk metric ASC at MSA grain"
+
+        # Capture explicit named MSAs so the SQL generator does not have to
+        # rediscover the requested entity universe from prose.
+        explicit = []
+        m_named = re.search(r"(?:the|among|between)\s+(.+?)\s+(?:metro areas|metros|msas|metro area)\b", lower)
+        if m_named:
+            raw = m_named.group(1)
+            raw = raw.replace(" and ", ", ")
+            explicit = [x.strip() for x in raw.split(",") if x.strip()]
+        if explicit:
+            qp.scope["named_msa_terms"] = explicit
+            qp.filters.append("MSA name contains one of the requested named metro terms")
 
     qp.required_tables = sorted(set(qp.required_tables))
     qp.metrics = sorted(set(qp.metrics))
