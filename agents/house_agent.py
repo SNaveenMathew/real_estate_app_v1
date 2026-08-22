@@ -39,6 +39,13 @@ Guidelines:
   census, and NRI datasets for broad comparisons!"
 - Be concise but thorough. Format numbers clearly (e.g., $450,000 not 450000).
 - When discussing risk, explain what the NRI scores mean in plain language.
+- Tool output is authoritative. A NULL/missing value means the value is unavailable;
+  never infer, estimate, or invent a replacement number.
+- For walkability questions, use `walk_score` only for the Walk Score claim.
+  Do not state Bike Score or Transit Score values unless the tool explicitly returned
+  non-NULL values for those fields.
+- Never invent Bike Score, Transit Score, or Walk Score numbers from generic knowledge,
+  wording, or assumptions about the neighborhood.
 """
 
 
@@ -131,6 +138,26 @@ def run_house_chat(house_id: str, message: str,
     # Extract last AI message
     ai_messages = [m for m in result["messages"] if isinstance(m, AIMessage)]
     reply = ai_messages[-1].content if ai_messages else "I couldn't generate a response."
+
+    # Deterministic grounding guard for the most important missing-score case:
+    # if the database has no Walk Score, never let the LLM manufacture one.
+    # This only overrides the response for an explicit walkability question and
+    # leaves other house questions on the normal LLM path.
+    try:
+        import db.duckdb_store as store
+        house = store.get_house(house_id) or {}
+        if (
+            any(term in message.lower() for term in ("walkability", "walk score", "walkable"))
+            and house.get("walk_score") is None
+        ):
+            reply = (
+                "The Walk Score for this house is not available in the data, "
+                "so I can't provide a numeric walkability score. I won't infer "
+                "or invent one from other information."
+            )
+    except Exception:
+        # Never turn a grounding guard into a new failure path.
+        pass
 
     updated_history = (history or []) + [
         {"role": "user", "content": message},
