@@ -6,6 +6,15 @@ Run this BEFORE run_eval.py from the project root:
     python .\update_eval_ground_truth.py
     python .\run_eval.py
 
+To keep CLI workflows consistent with run_eval.py, the updater also accepts:
+
+    python .\update_eval_ground_truth.py --skip-house-agent
+
+The flag does not change SQL ground truth generation: it only documents that the
+subsequent evaluation run may omit house-agent examples. The updater must still
+keep house-agent examples in the golden file so they remain available when the
+flag is not used.
+
 This script intentionally derives the structured expected values and the
 numeric facts embedded in the free-text rubrics from SQL executed against the
 actual evaluation fixture.  It does NOT ask the agent to generate SQL and it
@@ -328,53 +337,78 @@ def replace_assignment(text: str, variable: str, value) -> str:
 
 def patch_golden(text: str, truth: dict) -> str:
     """
-    Replace the imported fixture constants in golden_set.py by replacing the
-    corresponding `expected=` expressions in the individual GoldenExample
-    blocks.  This keeps the golden file readable and reviewable.
+    Update only fixture-derived values embedded in the golden set.
 
-    The free-text rubrics are also updated because they embed the SQL-derived
-    population/flood-risk facts.
+    The golden set has grown beyond the original 14 examples, so patching is
+    deliberately AST-based rather than regex-based.  This avoids stopping at
+    commas/brackets inside list literals and prevents corruption of nested
+    GoldenExample(...) expressions or multi-line rubrics.
     """
 
-    def patch_expected(example_id: str, new_expr: str, source: str) -> str:
-        marker = f'id="{example_id}"'
-        start = source.find(marker)
-        if start < 0:
+    tree = ast.parse(text, filename=str(GOLDEN_PATH))
+
+    def line_offsets(source: str) -> list[int]:
+        offsets = [0]
+        for i, ch in enumerate(source):
+            if ch == "\n":
+                offsets.append(i + 1)
+        return offsets
+
+    offsets = line_offsets(text)
+
+    def abs_offset(lineno: int, col: int) -> int:
+        return offsets[lineno - 1] + col
+
+    examples: dict[str, ast.Call] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func_name = getattr(node.func, "id", None)
+        if func_name != "GoldenExample":
+            continue
+        example_id = None
+        for kw in node.keywords:
+            if kw.arg == "id" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                example_id = kw.value.value
+                break
+        if example_id:
+            examples[example_id] = node
+
+    def replace_keyword_value(source: str, example_id: str, keyword: str, value_text: str) -> str:
+        node = examples.get(example_id)
+        if node is None:
             raise RuntimeError(f"Example {example_id} not found")
-        block_start = source.rfind("GoldenExample(", 0, start)
-        block_end = source.find("    ),", start)
-        if block_start < 0 or block_end < 0:
-            raise RuntimeError(f"Could not locate block for {example_id}")
-        block = source[block_start:block_end]
-        # Expected values are emitted on a single GoldenExample field line.
-        # Replace the entire physical line rather than stopping at the first
-        # comma, because list literals legitimately contain commas.  Replacing
-        # the whole line also repairs a previously-corrupted line such as:
-        #   expected=['Austin', 'Denver'], 'Miami', ...],
-        # which older versions of this updater could generate.
-        new_block, n = re.subn(
-            r"(?m)^(?P<indent>[ \t]*)expected\s*=.*$",
-            lambda m: f"{m.group('indent')}expected={new_expr},",
-            block,
-            count=1,
-        )
-        if n != 1:
-            raise RuntimeError(f"Could not patch expected for {example_id}")
-        return source[:block_start] + new_block + source[block_end:]
+        target = next((kw.value for kw in node.keywords if kw.arg == keyword), None)
+        if target is None:
+            raise RuntimeError(f"Example {example_id} has no {keyword}= field")
+        start = abs_offset(target.lineno, target.col_offset)
+        end = abs_offset(target.end_lineno, target.end_col_offset)
+        return source[:start] + value_text + source[end:]
 
-    text = patch_expected("cities_with_houses", repr(truth["cities_with_houses"]), text)
-    text = patch_expected("msa_population_rank", repr(truth["msa_population_rank"]), text)
-    text = patch_expected("msa_flood_risk_rank", repr(truth["msa_flood_risk_rank"]), text)
-    text = patch_expected("pittsburgh_house_count", repr([truth["pittsburgh_house_count"]]), text)
-    text = patch_expected("total_house_count", repr([truth["total_house_count"]]), text)
-    text = patch_expected("austin_avg_walk_score", repr([truth["austin_avg_walk_score"]]), text)
-    text = patch_expected("pittsburgh_arms_length_avg_sold_price", repr([truth["pittsburgh_arms_length_avg_sold_price"]]), text)
-    text = patch_expected("pittsburgh_tract_population", repr([truth["pittsburgh_tract_population"]]), text)
-    text = patch_expected("miami_house_walk_score", repr([truth["miami_house_walk_score"]]), text)
-    text = patch_expected("pittsburgh_house_nri_score", repr([truth["pittsburgh_house_nri_score"]]), text)
+    replacements = [
+        ("cities_with_houses", "expected", repr(truth["cities_with_houses"])),
+        ("msa_population_rank", "expected", repr(truth["msa_population_rank"])),
+        ("msa_flood_risk_rank", "expected", repr(truth["msa_flood_risk_rank"])),
+        ("pittsburgh_house_count", "expected", repr([truth["pittsburgh_house_count"]])),
+        ("total_house_count", "expected", repr([truth["total_house_count"]])),
+        ("austin_avg_walk_score", "expected", repr([truth["austin_avg_walk_score"]])),
+        ("pittsburgh_arms_length_avg_sold_price", "expected", repr([truth["pittsburgh_arms_length_avg_sold_price"]])),
+        ("pittsburgh_tract_population", "expected", repr([truth["pittsburgh_tract_population"]])),
+        ("miami_house_walk_score", "expected", repr([truth["miami_house_walk_score"]])),
+        ("pittsburgh_house_nri_score", "expected", repr([truth["pittsburgh_house_nri_score"]])),
+    ]
 
-    # Replace the two free-text rubrics completely so their numeric claims are
-    # guaranteed to be derived from the current fixture.
+    # Apply replacements from right to left so the original AST offsets stay valid.
+    edits: list[tuple[int, int, str]] = []
+    for example_id, keyword, value_text in replacements:
+        node = examples.get(example_id)
+        if node is None:
+            raise RuntimeError(f"Example {example_id} not found")
+        target = next((kw.value for kw in node.keywords if kw.arg == keyword), None)
+        if target is None:
+            raise RuntimeError(f"Example {example_id} has no {keyword}= field")
+        edits.append((abs_offset(target.lineno, target.col_offset), abs_offset(target.end_lineno, target.end_col_offset), value_text))
+
     p = truth["tradeoff"]["Pittsburgh"]
     m = truth["tradeoff"]["Miami"]
     tradeoff_rubric = (
@@ -386,45 +420,29 @@ def patch_golden(text: str, truth: dict) -> str:
         "has higher flood risk than Miami, and should not invent figures not "
         "derivable from the two metros' data."
     )
-
-    def patch_rubric(example_id: str, rubric: str, source: str) -> str:
-        marker = f'id="{example_id}"'
-        start = source.find(marker)
-        if start < 0:
+    for example_id, rubric_text in [
+        ("tradeoff_pittsburgh_vs_miami", tradeoff_rubric),
+        (
+            "unmatched_msa_explanation",
+            "'Sample Micro Area' has no matching row in cbsa_counties. A good answer "
+            "says no CBSA match was found. It should not claim a specific CBSA/metro "
+            "affiliation that is not present in the data.",
+        ),
+    ]:
+        node = examples.get(example_id)
+        if node is None:
             raise RuntimeError(f"Example {example_id} not found")
-        block_start = source.rfind("GoldenExample(", 0, start)
-        close_marker = "\n    ),"
-        close_start = source.find(close_marker, start)
-        block_end = close_start + len(close_marker) if close_start >= 0 else -1
-        if block_start < 0 or block_end < 0:
-            raise RuntimeError(f"Could not locate {example_id} GoldenExample block")
-        block = source[block_start:block_end]
+        target = next((kw.value for kw in node.keywords if kw.arg == "rubric"), None)
+        if target is None:
+            raise RuntimeError(f"Example {example_id} has no rubric= field")
+        edits.append((abs_offset(target.lineno, target.col_offset), abs_offset(target.end_lineno, target.end_col_offset), repr(rubric_text)))
 
-        rubric_match = re.search(
-            r'(?ms)^(?P<indent>[ \t]*)rubric\s*=\s*.*?(?=^    \),\s*$)',
-            block,
-        )
-        if not rubric_match:
-            raise RuntimeError(f"Could not locate rubric for {example_id}")
+    for start, end, replacement in sorted(edits, key=lambda x: x[0], reverse=True):
+        text = text[:start] + replacement + text[end:]
 
-        indent = rubric_match.group("indent")
-        replacement = f"{indent}rubric={repr(rubric)},\n"
-        patched_block = (
-            block[:rubric_match.start()]
-            + replacement
-            + block[rubric_match.end():]
-        )
-        return source[:block_start] + patched_block + source[block_end:]
-
-    text = patch_rubric("tradeoff_pittsburgh_vs_miami", tradeoff_rubric, text)
-
-    unmatched_rubric = (
-        "'Sample Micro Area' has no matching row in cbsa_counties. A good answer "
-        "says no CBSA match was found. It should not claim a specific CBSA/metro "
-        "affiliation that is not present in the data."
-    )
-    text = patch_rubric("unmatched_msa_explanation", unmatched_rubric, text)
-
+    # Validate after mutation as a local invariant; main() validates again
+    # before writing the file.
+    ast.parse(text, filename=str(GOLDEN_PATH))
     return text
 
 
@@ -433,6 +451,11 @@ def main() -> None:
     parser.add_argument("--db", type=Path, default=DB_PATH)
     parser.add_argument("--golden", type=Path, default=GOLDEN_PATH)
     parser.add_argument("--check-only", action="store_true")
+    parser.add_argument(
+        "--skip-house-agent",
+        action="store_true",
+        help="accepted for CLI consistency with run_eval.py; does not remove house-agent examples from the golden set",
+    )
     args = parser.parse_args()
 
     if not args.db.exists():
@@ -451,6 +474,9 @@ def main() -> None:
 
     print("\nSQL ground truth:")
     print(json.dumps(truth, indent=2, sort_keys=True))
+
+    if args.skip_house_agent:
+        print("House-agent examples are retained in golden_set.py; --skip-house-agent only affects run_eval.py.")
 
     source = args.golden.read_text(encoding="utf-8")
     updated = patch_golden(source, truth)
