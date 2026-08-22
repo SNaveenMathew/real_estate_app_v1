@@ -41,4 +41,10 @@ venv*/
 # Evaluation reports produced by run_eval.py
 /eval/reports/
 
+# Stored tracing artifacts
+/traces/
+/data/traces/
+/eval/traces/
+/temp_data/llama_logs/
+
 *.zip
