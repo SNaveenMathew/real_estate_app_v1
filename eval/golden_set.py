@@ -72,9 +72,9 @@ GOLDEN_SET: list[GoldenExample] = [
         id="cities_with_houses",
         agent="general",
         tags=("redfin",),
-        question="Which cities do I have saved houses in?",
+        question="Which cities do I have houses in?",
         answer_type="structured",
-        expected=list(HOUSE_COUNT_BY_CITY.keys()),
+        expected=['Austin', 'Denver', 'Miami', 'Pittsburgh'],
         order_matters=False,
         value_type="string",
         distractors=["Seattle", "Boston"],  # cities not in the fixture at all
@@ -88,7 +88,7 @@ GOLDEN_SET: list[GoldenExample] = [
         question=("Rank the Pittsburgh, Denver, Miami, and Austin metro areas "
                    "from highest to lowest population."),
         answer_type="structured",
-        expected=MSA_POPULATION_RANK_DESC,
+        expected=['Miami', 'Denver', 'Pittsburgh', 'Austin'],
         order_matters=True,
         value_type="string",
     ),
@@ -99,7 +99,7 @@ GOLDEN_SET: list[GoldenExample] = [
         question=("Rank the Pittsburgh, Denver, Miami, and Austin metro areas "
                    "from highest to lowest riverine flood risk."),
         answer_type="structured",
-        expected=MSA_FLOOD_RISK_RANK_DESC,
+        expected=['Miami', 'Denver', 'Austin', 'Pittsburgh'],
         order_matters=True,
         value_type="string",
     ),
@@ -109,9 +109,9 @@ GOLDEN_SET: list[GoldenExample] = [
         id="pittsburgh_house_count",
         agent="general",
         tags=("redfin",),
-        question="How many houses do I have saved in Pittsburgh?",
+        question="How many houses do I have in Pittsburgh?",
         answer_type="structured",
-        expected=[HOUSE_COUNT_BY_CITY["Pittsburgh"]],
+        expected=[2],
         value_type="number",
         tolerance=0,
     ),
@@ -119,9 +119,9 @@ GOLDEN_SET: list[GoldenExample] = [
         id="total_house_count",
         agent="general",
         tags=("redfin",),
-        question="How many houses do I have saved in total, across all cities?",
+        question="How many houses do I have in total, across all cities?",
         answer_type="structured",
-        expected=[TOTAL_HOUSE_COUNT],
+        expected=[6],
         value_type="number",
         tolerance=0,
     ),
@@ -131,9 +131,9 @@ GOLDEN_SET: list[GoldenExample] = [
         id="austin_avg_walk_score",
         agent="general",
         tags=("redfin",),
-        question="What is the average walk score of my Austin houses?",
+        question="What is the average walk score of the houses I have in Austin?",
         answer_type="structured",
-        expected=[AUSTIN_AVG_WALK_SCORE],
+        expected=[55],
         value_type="number",
         distractors=[AUSTIN_AVG_WALK_SCORE_WRONG_IF_NULL_TREATED_AS_ZERO],
     ),
@@ -146,7 +146,7 @@ GOLDEN_SET: list[GoldenExample] = [
         question=("What was the average sold price of arm's-length sales in census "
                    "tract 42003140300, only counting sales over $1,000?"),
         answer_type="structured",
-        expected=[PITTSBURGH_ARMS_LENGTH_AVG_SOLD_PRICE],
+        expected=[340000],
         value_type="currency",
         distractors=[PITTSBURGH_AVG_SOLD_PRICE_WRONG_IF_FILTER_SKIPPED],
     ),
@@ -158,7 +158,7 @@ GOLDEN_SET: list[GoldenExample] = [
         tags=("census",),
         question="What is the census population of tract 42003140300?",
         answer_type="structured",
-        expected=[METROS["Pittsburgh"]["tract_population"]],
+        expected=[4200],
         value_type="number",
         tolerance=0,
     ),
@@ -182,7 +182,7 @@ GOLDEN_SET: list[GoldenExample] = [
         tags=("nri",),
         question="What is the composite NRI risk score for this house's census tract?",
         answer_type="structured",
-        expected=[METROS["Pittsburgh"]["risk_score"]],
+        expected=[45.2],
         value_type="number",
     ),
 
@@ -194,15 +194,7 @@ GOLDEN_SET: list[GoldenExample] = [
         question=("I'm deciding between buying in Pittsburgh or Miami. Considering "
                    "flood risk and metro population, what should I weigh?"),
         answer_type="free_text",
-        rubric=(
-            "A good answer notes that Miami has much higher riverine flood risk "
-            f"(~{METROS['Miami']['rfld_risks']} vs ~{METROS['Pittsburgh']['rfld_risks']} for Pittsburgh) "
-            f"and a larger metro population (~{METROS['Miami']['msa_population']:,} vs "
-            f"~{METROS['Pittsburgh']['msa_population']:,}), and frames this as a genuine "
-            "tradeoff rather than just repeating numbers with no takeaway. It should not "
-            "claim Pittsburgh has higher flood risk than Miami, and should not invent "
-            "figures not derivable from the two metros' data."
-        ),
+        rubric="A good answer notes that Miami has much higher riverine flood risk (~68 vs ~12.5 for Pittsburgh) and a larger metro population (~6,091,747 vs ~2,370,930), and frames this as a genuine tradeoff rather than just repeating numbers with no takeaway. It should not claim Pittsburgh has higher flood risk than Miami, and should not invent figures not derivable from the two metros' data.",
     ),
     GoldenExample(
         id="no_houses_in_seattle",
@@ -210,8 +202,8 @@ GOLDEN_SET: list[GoldenExample] = [
         tags=("redfin",),
         question="What houses do I have in Seattle?",
         answer_type="free_text",
-        rubric=("None of the saved houses are in Seattle. A good answer clearly states "
-                 "there are zero/no saved houses in Seattle. It must NOT fabricate a "
+        rubric=("None of the houses in the fixture are in Seattle. A good answer clearly states "
+                 "there are zero/no houses in Seattle. It must NOT fabricate a "
                  "Seattle listing or its details."),
     ),
     GoldenExample(
@@ -232,11 +224,7 @@ GOLDEN_SET: list[GoldenExample] = [
         question=(f"Is '{UNMATCHED_MSA_NAME}' officially part of a recognized Core Based "
                    "Statistical Area (CBSA)? Explain your reasoning."),
         answer_type="free_text",
-        rubric=(f"'{UNMATCHED_MSA_NAME}' has no matching row in cbsa_counties (in the real "
-                 "app this shows up as a placeholder code starting with 'X' — see "
-                 "db/schema_catalog.py). A good answer says no CBSA match was found. It "
-                 "must NOT claim a specific CBSA/metro affiliation for it that isn't in "
-                 "the data."),
+        rubric="'Sample Micro Area' has no matching row in cbsa_counties. A good answer says no CBSA match was found. It should not claim a specific CBSA/metro affiliation that is not present in the data.",
     ),
 ]
 

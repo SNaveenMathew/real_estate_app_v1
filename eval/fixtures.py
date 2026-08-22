@@ -75,12 +75,12 @@ UNMATCHED_MSA_POPULATION = 15000
 # ─────────────────────────────────────────────────────────────────────────
 
 HOUSES = [
-    dict(house_id="h1", city="Pittsburgh", metro="Pittsburgh", walk_score=82, price=350000, status="Active"),
-    dict(house_id="h2", city="Pittsburgh", metro="Pittsburgh", walk_score=45, price=275000, status="Active"),
-    dict(house_id="h3", city="Denver", metro="Denver", walk_score=70, price=525000, status="Active"),
-    dict(house_id="h4", city="Miami", metro="Miami", walk_score=90, price=610000, status="Pending"),
-    dict(house_id="h5", city="Austin", metro="Austin", walk_score=55, price=430000, status="Active"),
-    dict(house_id="h6", city="Austin", metro="Austin", walk_score=None, price=399000, status="Sold"),
+    dict(house_id="h1", city="Pittsburgh", metro="Pittsburgh", walk_score=82, price=350000, status="Active", is_favorite=True),
+    dict(house_id="h2", city="Pittsburgh", metro="Pittsburgh", walk_score=45, price=275000, status="Active", is_favorite=True),
+    dict(house_id="h3", city="Denver", metro="Denver", walk_score=70, price=525000, status="Active", is_favorite=True),
+    dict(house_id="h4", city="Miami", metro="Miami", walk_score=90, price=610000, status="Pending", is_favorite=True),
+    dict(house_id="h5", city="Austin", metro="Austin", walk_score=55, price=430000, status="Active", is_favorite=True),
+    dict(house_id="h6", city="Austin", metro="Austin", walk_score=None, price=399000, status="Sold", is_favorite=True),
 ]
 
 HOUSE_COUNT_BY_CITY = {"Pittsburgh": 2, "Denver": 1, "Miami": 1, "Austin": 2}
@@ -160,6 +160,11 @@ def build_fixture(db_path: Path) -> None:
 
     # ── houses ────────────────────────────────────────────────────────────
     import pandas as pd
+    if not HOUSES or any(not bool(h.get("is_favorite")) for h in HOUSES):
+        raise RuntimeError(
+            "Evaluation fixture invariant failed: every fixture house must be saved/favorite "
+            "because the golden set exercises saved-house semantics."
+        )
     houses_df = pd.DataFrame([
         {
             "house_id": h["house_id"], "address": f"{100 + i} Main St", "city": h["city"],
@@ -168,7 +173,7 @@ def build_fixture(db_path: Path) -> None:
             "sqft": 1500.0, "year_built": 1990, "hoa_fee": 0.0,
             "walk_score": h["walk_score"], "bike_score": 50, "transit_score": 50,
             "tract_fips": METROS[h["metro"]]["tract_fips"], "msa_code": None,
-            "source_file": "eval_fixture.csv", "raw_json": "{}",
+            "source_file": "eval_fixture.csv", "raw_json": "{}", "is_favorite": True,
         }
         for i, h in enumerate(HOUSES)
     ])
