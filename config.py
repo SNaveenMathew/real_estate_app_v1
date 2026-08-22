@@ -51,11 +51,10 @@ class Settings(BaseSettings):
     phoenix_ui_url: str = "http://127.0.0.1:6006"
     phoenix_project_name: str = "real-estate-general-chat"
 
-    # ── Ollama ─────────────────────────────────────────────────────────
-    # ollama_base_url: str = "http://localhost:11434"
-    # ollama_model: str = "llama3.1:8b"
+    # ── Ollama embeddings ───────────────────────────────────────────────────
+    ollama_base_url: str = "http://127.0.0.1:11434"
 
-    # ── Embedding model ─────────────────────────────────────────────────────────
+    # ── Embedding model ─────────────────────────────────────────────────────
     ollama_embed_model: str = "nomic-embed-text"  # pull once: ollama pull nomic-embed-text
 
     # ── Paths ────────────────────────────────────────────────────────────────

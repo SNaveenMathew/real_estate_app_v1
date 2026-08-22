@@ -216,10 +216,18 @@ def _schema_documents():
 
 
 def ensure_schema_metadata_index() -> int:
-    """Synchronize the small metadata corpus into Chroma."""
+    """Synchronize the small metadata corpus into Chroma.
+
+    The application must remain usable when Ollama is not running. In that
+    case the deterministic lexical path in ``search_data_model`` remains the
+    source of truth and vector indexing is simply skipped.
+    """
     col = _schema_collection()
-    emb = _get_embeddings()
     docs = _schema_documents()
+    try:
+        emb = _get_embeddings()
+    except Exception:
+        return len(docs)
     # Upsert rather than add-only: curated metadata changes (especially relationship
     # definitions and planning recipes) must invalidate the vector representation.
     if docs:
