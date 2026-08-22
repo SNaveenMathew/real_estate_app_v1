@@ -430,6 +430,7 @@ main.py               FastAPI app + all HTTP endpoints
 config.py             All settings (paths, models, ports)
 setup_data.py         One-time data loader script
 run_eval.py            Agent evaluation pipeline entry point
+update_eval_ground_truth.py  Regenerate golden expectations from fixture SQL
 
 agents/
   tools.py            LangChain tools (SQL, vector search, price estimation)
@@ -531,6 +532,7 @@ python run_eval.py                 # full run against your configured model
 python run_eval.py --list          # see what's in the golden set
 python run_eval.py --tags nri,sold_homes    # run a subset
 python run_eval.py --mock          # smoke-test the harness itself, no model server needed
+python .\run_eval.py --skip-house-agent     # skip evals on house agent
 ```
 
 Each golden example is one of:
@@ -554,6 +556,124 @@ To add a golden example: add fixture data to `eval/fixtures.py` if needed
 (prefer deriving expected values from the fixture data programmatically, the
 way the existing examples do, over hand-typing a number), then add one
 `GoldenExample` to `eval/golden_set.py`.
+
+### Updating evaluation ground truth
+
+`update_eval_ground_truth.py` regenerates structured expected values and the
+numeric facts used in free-text rubrics from SQL executed against
+`eval/fixture_data/eval_fixture.duckdb`. It does not ask an agent to generate
+SQL and never uses previous agent answers as ground truth. It also validates
+fixture invariants before rewriting `eval/golden_set.py`.
+
+Run it after changing `eval/fixtures.py` or the fixture schema, and before
+running the evaluation suite:
+
+```bash
+python update_eval_ground_truth.py
+python run_eval.py
+```
+
+The updater accepts an alternate fixture database or golden-set path:
+
+```bash
+python update_eval_ground_truth.py --db path/to/eval_fixture.duckdb
+python update_eval_ground_truth.py --golden path/to/golden_set.py
+```
+
+`--skip-house-agent` is accepted for workflow consistency with `run_eval.py`;
+it does not remove house-agent examples from the golden file. It only documents
+that the subsequent evaluation run may skip those examples. DuckDB must be
+installed in the active Python environment.
+
+---
+
+## Capability matrix
+
+This section distinguishes capabilities implemented by the application from
+capabilities currently covered by the deterministic evaluation fixture.
+
+### Explicitly supported
+
+| Area | Supported questions and behavior | Fixture coverage |
+|------|----------------------------------|------------------|
+| House inventory | Counts, city/state/status filters, price aggregates, Walk/Bike/Transit scores, missing-score checks, and rankings | Strong |
+| House inventory scope | “My houses” means the full inventory; saved/favorites require explicit list or favorite wording | Supported, but weakly tested because all fixture houses are favorites |
+| MSA and tract population | Population totals, rankings, named-MSA comparisons, and specific tract queries | Strong |
+| NRI risk | Overall/composite risk, riverine flooding, hurricane, wildfire, other canonical hazards, averages, and rankings | Strong for documented joins and populated fixture columns |
+| MSA to NRI analysis | Uses `census_msa -> cbsa_counties -> nri_tracts`, including top-N-by-population universes and MSA-grain aggregation | Strong for the documented pattern |
+| Sold homes | Arm’s-length filtering, price averages/rankings, and tract-scoped sold comparables | Strong |
+| Individual houses | Stored details, NRI data, risk percentile, EAL, vulnerability/resilience fields, and data-derived price estimates | Strong or partial when fields are NULL |
+| House documents | Search a house’s stored descriptions/documents or search across all houses | Supported when documents are loaded |
+| Bike routing | Route addresses, neighborhoods, landmarks, parks, or coordinates on the loaded BikePGH network | Supported when BikePGH data is loaded |
+| Crime-aware routing | Remove BikePGH edges intersecting buffered high-density crime cells before Dijkstra and return analysis visualization | Supported, but heuristic |
+| Crime analytics | Incident counts, severity-weighted crime, standardized categories, and city/month analysis | Supported when crime data is loaded |
+
+### Supported with caveats
+
+- A house’s `msa_code` is usually NULL in Redfin data. Tract-based MSA lookup
+  should use the documented county bridge rather than assuming the house row
+  carries a reliable CBSA/MSA code.
+- The distinction between full inventory and favorites is implemented, but the
+  current fixture marks every house `is_favorite = TRUE`, so it cannot detect a
+  mistaken favorite filter. Add a non-favorite fixture house to test this rule.
+- Arbitrary multi-table questions and unusual MSA/NRI ranking variants depend on
+  LLM-generated SQL. The application provides a two-attempt generation/repair
+  loop and a limited set of canonical recovery queries, not a universal query
+  planner for every possible join.
+- Sold-home tract questions require geocoded rows; pending rows have NULL
+  geography and must not be treated as tract-local.
+- Historical house questions require populated `house_snapshots`; the current
+  fixture does not populate that table.
+- Description search requires documents in the vector store. Crime sources are
+  city-specific, and missing or incompatible files are skipped.
+- Crime severity means `SUM(severity_weight)`, while incident volume means
+  `COUNT(*)`; ambiguous wording can lead to different valid metrics.
+- Bike endpoints too far from the loaded network are rejected, and no route
+  means no continuous path in the loaded BikePGH graph, not necessarily no
+  real-world route. Crime avoidance is a density heuristic, not a safety
+  guarantee.
+- Geometry/blob columns are hidden from the SQL agent, so arbitrary polygon or
+  geometry analytics are not available through `query_database`.
+- General Chat is grounded in loaded application data and approved functions; it
+  is not a web-search or general recommendation agent.
+
+### Not currently supported
+
+The current data model and approved General Chat functions do not provide:
+
+- Mortgage payment, loan affordability, down-payment, or rate calculations
+- Property-tax liability or tax forecasting
+- School ratings or school-assignment quality
+- Insurance quotes or premium prediction
+- Future price-appreciation or five-year value forecasting
+- Current Internet market, news, traffic, or live route conditions
+- A guarantee that a route is safe
+
+### Evaluation fixture limits
+
+The 53-example golden set covers only data populated by `eval/fixtures.py`:
+
+- Six houses across Pittsburgh, Denver, Miami, and Austin
+- Census tract and MSA populations for four named metros
+- NRI overall, riverine flood, hurricane, and wildfire values
+- Six sold-home records, including one deliberately invalid/non-market $1 sale
+  and one pending-geocode record
+- One unmatched MSA with placeholder code `Xplaceholder1` and no CBSA bridge row
+
+The fixture does not populate crime incidents, BikePGH routes, or house snapshot
+history. Those capabilities need a separate integration fixture using
+representative loaded data rather than invented expected values.
+
+### Recommended evaluation strategy
+
+Keep the golden set as the deterministic fixture regression suite and maintain a
+separate integration suite for:
+
+1. Crime analysis across at least two loaded cities and multiple categories or months
+2. Successful, no-route, and crime-avoidance BikePGH routing cases
+3. Multiple price/status observations in `house_snapshots`
+4. Several house documents and document types
+5. A non-favorite fixture house so inventory scope is genuinely tested
 
 ---
 
