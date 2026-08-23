@@ -1,20 +1,13 @@
-"""Deterministic query planning metadata for General Chat.
-
-The planner does not generate SQL. It resolves user-language concepts to
-physical tables/columns, documented relationship paths, aggregation guidance,
-and data-quality constraints before the SQL Code Agent runs.
-"""
+"""Generic semantic planner built entirely from the schema catalog."""
 from __future__ import annotations
-
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field, asdict
 import re
-
 import db.schema_catalog as schema
-
 
 @dataclass
 class QueryPlan:
     question_type: str = "analytical"
+    semantic_keys: list[str] = field(default_factory=list)
     entities: list[str] = field(default_factory=list)
     metrics: list[str] = field(default_factory=list)
     filters: list[str] = field(default_factory=list)
@@ -22,138 +15,143 @@ class QueryPlan:
     required_relationships: list[str] = field(default_factory=list)
     aggregation: str | None = None
     ordering: str | None = None
-    limit: int | None = None
-    universe_limit: int | None = None
+    grouping: list[str] = field(default_factory=list)
     result_limit: int | None = None
-    scope: dict = field(default_factory=dict)
-    data_quality_rules: list[str] = field(default_factory=list)
-    unresolved_items: list[str] = field(default_factory=list)
+    resolved_entities: list[dict] = field(default_factory=list)
+    entity_filters: list[str] = field(default_factory=list)
+    null_policy: list[str] = field(default_factory=list)
+    select_expression: str | None = None
+    operation: str | None = None
+    rollup_spec: dict = field(default_factory=dict)
 
-    def to_dict(self) -> dict:
-        return asdict(self)
-
+    def to_dict(self): return asdict(self)
     def render(self) -> str:
-        lines = [
+        return "\n".join([
             f"question_type: {self.question_type}",
-            f"entities: {', '.join(self.entities) or 'none'}",
-            f"metrics: {', '.join(self.metrics) or 'none'}",
-            f"filters: {', '.join(self.filters) or 'none'}",
+            f"semantic_keys: {', '.join(self.semantic_keys) or 'none'}",
             f"required_tables: {', '.join(self.required_tables) or 'none'}",
             f"required_relationships: {', '.join(self.required_relationships) or 'none'}",
+            f"metrics: {', '.join(self.metrics) or 'none'}",
             f"aggregation: {self.aggregation or 'none'}",
             f"ordering: {self.ordering or 'none'}",
-            f"limit: {self.limit if self.limit is not None else 'none'}",
-            f"universe_limit: {self.universe_limit if self.universe_limit is not None else 'none'}",
+            f"grouping: {', '.join(self.grouping) or 'none'}",
+            f"filters: {' | '.join(self.filters) or 'none'}",
+            f"null_policy: {' | '.join(self.null_policy) or 'none'}",
+            f"select_expression: {self.select_expression or 'none'}",
+            f"operation: {self.operation or 'none'}",
+            f"rollup_spec: {self.rollup_spec or {}}",
             f"result_limit: {self.result_limit if self.result_limit is not None else 'none'}",
-            f"scope: {self.scope or 'none'}",
-            f"data_quality_rules: {' | '.join(self.data_quality_rules) or 'none'}",
-            f"unresolved_items: {', '.join(self.unresolved_items) or 'none'}",
-        ]
-        return "\n".join(lines)
+            f"resolved_entities: {self.resolved_entities or 'none'}",
+            f"entity_filters: {' | '.join(self.entity_filters) or 'none'}",
+        ])
 
+def _top_n(text):
+    m = re.search(r"\btop\s+(\d+)\b", text, re.I)
+    return int(m.group(1)) if m else None
+
+def _select_operation(concepts, text):
+    best = None
+    for c in concepts:
+        for op in c.get("operations", []):
+            for alias in op.get("aliases", []):
+                if schema._alias_matches(text, alias):
+                    score = len(alias.split())
+                    cand = (score, op, c)
+                    if best is None or score > best[0]: best = cand
+    if best:
+        return best[1], best[2]
+    return None, None
 
 def build_query_plan(request: str, requirements: str = "", plan: str = "") -> QueryPlan:
-    text = " ".join(x for x in (request, requirements, plan) if x).strip()
-    lower = text.lower()
-    qp = QueryPlan()
+    text = request.strip()
+    concepts = schema.semantic_matches(text)
+    intent = schema.match_request_intents(text)
+    qp = QueryPlan(question_type=intent[0]["name"] if intent else "analytical")
+    qp.semantic_keys = [c["key"] for c in concepts]
+    qp.metrics = sorted({m for c in concepts for m in c.get("columns", [])})
+    qp.filters = list(dict.fromkeys(f for c in concepts for f in c.get("filters", [])))
+    qp.null_policy = list(dict.fromkeys(c.get("null_policy", "") for c in concepts if c.get("null_policy")))
+    qp.grouping = []
+    qp.rollup_spec = next((c.get("rollup_spec", {}) for c in concepts if c.get("rollup_spec")), {})
 
-    if any(x in lower for x in ("top ", "highest", "lowest", "rank", "best", "worst")):
-        qp.question_type = "ranking"
-    elif any(x in lower for x in ("how many", "count", "number of")):
-        qp.question_type = "aggregation"
-    elif any(x in lower for x in ("compare", "versus", "vs.")):
-        qp.question_type = "comparison"
+    op, op_concept = _select_operation(concepts, text.lower())
+    if op:
+        qp.operation = op.get("op")
+        qp.select_expression = op.get("expr")
+        if op.get("op") in {"avg", "sum", "median", "min", "max", "count"}: qp.aggregation = op.get("expr")
+        if op.get("op") == "rank":
+            qp.ordering = f"{op['expr']} {op.get('direction','DESC')}"
+        if op.get("group_by"):
+            qp.grouping = [op["group_by"]]
+            qp.select_expression = f"{op['group_by']}, {op['expr']}"
+    else:
+        default_concept = next((c for c in concepts if c.get("default_operation")), None)
+        if default_concept:
+            desired = default_concept.get("default_operation")
+            candidate = next((x for x in default_concept.get("operations", []) if x.get("op") == desired), None)
+            if candidate:
+                qp.operation = candidate.get("op")
+                qp.select_expression = candidate.get("expr")
+                qp.aggregation = candidate.get("expr") if desired in {"avg", "sum", "median", "min", "max", "count"} else None
+        if not qp.operation:
+            for c in concepts:
+                ops = c.get("operations", [])
+                if len(ops) == 1:
+                    if ops[0].get("op") == "count": qp.aggregation = ops[0]["expr"]; qp.operation = "count"; qp.select_expression = ops[0]["expr"]
+                    elif ops[0].get("op") in {"avg", "sum", "median", "min", "max"}: qp.aggregation = ops[0]["expr"]; qp.operation = ops[0]["op"]; qp.select_expression = ops[0]["expr"]
 
-    sem = schema.semantic_matches(text)
-    for item in sem:
-        qp.metrics.extend(item.get("columns", []))
-        if item.get("filter"):
-            qp.filters.append(item["filter"])
-        qp.required_tables.extend(item.get("tables", []))
+    missing_semantic = "house_missing_walk" in {c.get("key") for c in concepts}
+    for c in concepts:
+        if c.get("null_policy") and not missing_semantic and any(op.get("op") in {"avg","min","max","sum","median","rank"} for op in c.get("operations", [])):
+            for col in c.get("columns", []):
+                if col.endswith("walk_score") or col.endswith("bike_score") or col.endswith("transit_score"):
+                    qp.filters.append(f"{col} IS NOT NULL")
 
-    if "flood risk" in lower and "coastal" not in lower:
-        qp.metrics.append("nri_tracts.rfld_risks")
-        qp.required_tables.append("nri_tracts")
-        qp.aggregation = "AVG(rfld_risks) at MSA grain unless another statistic is requested"
-        qp.data_quality_rules.append("Exclude NULL rfld_risks; do not average coastal and riverine scores together")
+    resolved_all = schema.resolve_request_entities(text, None)
+    requested_entity_types = {et for c in concepts for et in c.get("entity_types", [])}
+    preferred_tables = {t for c in concepts for t in c.get("tables", [])}
+    concept_keys = {c.get("key") for c in concepts}
+    explicit_tracts = [e for e in resolved_all if e["entity_type"] == "tract_fips"]
+    if requested_entity_types:
+        resolved = [e for e in resolved_all if e["entity_type"] in requested_entity_types]
+        if explicit_tracts:
+            preferred_domains = {e["domain"] for e in explicit_tracts if e["table"] in preferred_tables}
+            if not preferred_domains:
+                preferred_domains = {
+                    d.name for d in schema.ENTITY_DOMAINS
+                    if d.entity_type == "tract_fips" and any(k in concept_keys for k in d.preferred_for)
+                }
+            if preferred_domains:
+                resolved = [e for e in resolved if e["entity_type"] != "tract_fips" or e["domain"] in preferred_domains]
+    else:
+        resolved = [e for e in resolved_all if e["table"] in preferred_tables]
+        for e in explicit_tracts:
+            if e["table"] in preferred_tables and e not in resolved:
+                resolved.append(e)
+    qp.resolved_entities = resolved
+    qp.entities = sorted({e["entity_type"] for e in resolved})
 
-    if "overall risk" in lower or "composite risk" in lower:
-        qp.metrics.append("nri_tracts.risk_score")
-        qp.required_tables.append("nri_tracts")
-        qp.aggregation = "AVG(risk_score) at MSA grain unless another statistic is requested"
-        qp.data_quality_rules.append("Exclude NULL risk_score")
+    tables = {t for c in concepts for t in c.get("tables", [])}
+    tables.update(e["table"] for e in resolved)
+    tables.update(schema.tables_mentioned_in_text(text))
 
-    if "walk score" in lower or "walkability" in lower:
-        qp.metrics.append("houses.walk_score")
-        qp.required_tables.append("houses")
-        qp.ordering = "houses.walk_score DESC for highest/best, ASC for lowest/worst"
-        qp.data_quality_rules.append("Exclude NULL walk_score unless missing values are explicitly requested")
+    # Geography is selected from the entity domain, not from a question branch.
+    if any(e["entity_type"] == "MSA" for e in resolved) and any("MSA" in c.get("entity_types", []) for c in concepts):
+        tables.add("census_msa")
+        if any(c.get("rollup") for c in concepts): tables.update({"cbsa_counties", "nri_tracts"})
+    if any(e["entity_type"] == "tract_fips" for e in resolved):
+        if any(c.get("key") == "census_tract_population" for c in concepts): tables.add("census_tracts")
+        if any(c.get("rollup") for c in concepts): tables.add("nri_tracts")
 
-    explicit_saved_scope = (
-        "my list" in lower
-        or "saved houses" in lower
-        or "favorites" in lower
-        or "favorite houses" in lower
-        or "favorited houses" in lower
-    )
-    if explicit_saved_scope:
-        qp.scope["type"] = "saved_houses"
-        qp.scope["filter"] = "houses.is_favorite = TRUE"
-        qp.required_tables.append("houses")
-    elif re.search(r"\b(?:my|i have|i own|in my)\b.*\bhouses?\b", lower):
-        # Possessive language describes the application's house inventory.
-        # It must NOT be silently narrowed to is_favorite unless the user
-        # explicitly asks for saved/favorited houses or their list.
-        qp.scope["type"] = "house_inventory"
-        qp.scope["filter"] = "none"
-        qp.required_tables.append("houses")
-        qp.data_quality_rules.append(
-            "Do not infer houses.is_favorite = TRUE from possessive language such as 'my houses' or 'houses I have'"
-        )
+    # For city-named tract/NRI questions, MSA is a useful semantic geography anchor.
+    if any(c.get("rollup") for c in concepts) and any(e["entity_type"] == "MSA" for e in resolved):
+        tables.update({"census_msa", "cbsa_counties", "nri_tracts"})
 
-    m = re.search(r"\btop\s+(\d+)\b", lower)
-    if m:
-        qp.universe_limit = int(m.group(1))
-        # Ranking language refers to the number of rows returned, not the size
-        # of the universe being ranked. Keep those concepts separate so
-        # "Among the top 50 MSAs, which have the lowest ..." means:
-        #   1) population-rank 50 MSAs, then
-        #   2) risk-rank that 50-MSA universe and return the best few.
-        qp.result_limit = 10
-        qp.limit = qp.result_limit
-        qp.filters.append(f"universe = top {qp.universe_limit} MSAs by population")
+    tables = set(schema.expand_required_tables(tables))
+    qp.required_tables = sorted(tables)
+    qp.required_relationships = [r.render() for r in schema.relationships_for_tables(tables)]
+    qp.entity_filters = [f"{e['table']}.{e['column']} = '{e['value'].replace(chr(39), chr(39)*2)}'" for e in resolved if e['table'] in tables]
 
-    if "msa" in lower or "metro" in lower:
-        qp.entities.append("MSA")
-        qp.required_tables.extend(["census_msa", "cbsa_counties", "nri_tracts"] if "risk" in lower else ["census_msa"])
-        qp.required_relationships.extend([
-            "census_msa.msa_code = cbsa_counties.cbsa_code",
-            "cbsa_counties.state_fips || cbsa_counties.county_fips = nri_tracts.county_fips",
-        ] if "risk" in lower else ["census_msa"])
-        qp.data_quality_rules.append("Filter census_msa.msa_code NOT LIKE 'X%' before joining to cbsa_counties")
-        if qp.universe_limit is not None:
-            qp.ordering = "population DESC inside the MSA universe; requested NRI metric ASC for lowest/best or DESC for highest/worst"
-        elif qp.question_type == "ranking" and "population" in lower:
-            qp.ordering = "census_msa.population DESC"
-        elif qp.question_type == "ranking" and "risk" in lower:
-            if any(x in lower for x in ("highest", "most risk", "worst")):
-                qp.ordering = "requested NRI risk metric DESC at MSA grain"
-            else:
-                qp.ordering = "requested NRI risk metric ASC at MSA grain"
-
-        # Capture explicit named MSAs so the SQL generator does not have to
-        # rediscover the requested entity universe from prose.
-        explicit = []
-        m_named = re.search(r"(?:the|among|between)\s+(.+?)\s+(?:metro areas|metros|msas|metro area)\b", lower)
-        if m_named:
-            raw = m_named.group(1)
-            raw = raw.replace(" and ", ", ")
-            explicit = [x.strip() for x in raw.split(",") if x.strip()]
-        if explicit:
-            qp.scope["named_msa_terms"] = explicit
-            qp.filters.append("MSA name contains one of the requested named metro terms")
-
-    qp.required_tables = sorted(set(qp.required_tables))
-    qp.metrics = sorted(set(qp.metrics))
-    qp.required_relationships = sorted(set(qp.required_relationships))
+    top_n = _top_n(text)
+    if top_n is not None: qp.result_limit = 10
     return qp

@@ -20,6 +20,8 @@ from agents.query_planner import build_query_plan
 import asyncio
 import threading
 
+from observability import trace_span, mark_span_error, set_span_output
+
 
 # ── House-specific tools ─────────────────────────────────────────────────────
 
@@ -197,28 +199,16 @@ _TABLE_REF = re.compile(
 )
 
 
-SYSTEM_PROMPT = """You are the SQL Code Agent for a real-estate analytics application.
+SYSTEM_PROMPT = """You are a SQL Code Agent. Return exactly one read-only DuckDB SELECT statement.
 
-Generate exactly ONE safe DuckDB SELECT statement (WITH ... SELECT allowed).
-The query must directly answer the user's analytical request.
-
-Rules:
-1. Use ONLY physical tables and columns present in the TARGETED LIVE DATA MODEL below.
-2. Do not invent tables, columns, joins, or metrics.
-3. Prefer documented relationship paths and honor their cardinality / fanout warnings.
-4. Respect semantic aliases and canonical columns supplied by the metadata.
-5. For rankings, make the ranking universe explicit before applying the requested LIMIT.
-6. When a request says 'top N MSAs', first determine the MSA universe by population, then aggregate the requested risk metric over those MSAs; do not limit tracts before the MSA population ranking.
-7. For NRI tract-to-MSA analysis, use census_msa -> cbsa_counties -> nri_tracts. Do not invent a direct MSA-to-tract join.
-8. Preserve the requested hazard exactly (e.g. riverine flooding vs coastal flooding vs overall risk).
-9. Keep the output small and useful: return the identity/grouping fields plus the requested metric, with deterministic ORDER BY.
-10. Do not parse geometry/blob columns in SQL.
-11. Output ONLY SQL — no markdown fences or explanation.
-
-TARGETED LIVE DATA MODEL
-========================
+Use only the USER REQUEST and the STRUCTURED QUERY PLAN / TARGETED DATA MODEL provided below.
+The plan comes from the application schema catalog and live entity resolution. It is authoritative.
+Do not reinterpret scope, invent filters, invent joins, or substitute display labels for resolved values.
+Use documented relationship paths only. Apply aggregation/null/default-filter semantics from the metadata.
+Treat the structured plan as the complete semantic scope. Never add filters that are not represented there.
+When metadata marks a default filter as required, apply it unless the structured plan explicitly indicates an override.
+Output SQL only.
 """
-
 
 
 def _extract_content(resp) -> str:
@@ -289,86 +279,279 @@ def get_code_agent() -> ChatOpenAI:
             # context limit.
             max_tokens=settings.code_agent_max_tokens,
             timeout=settings.llm_request_timeout,
-            stop=LLM_STOP_SEQUENCES,
         )
     return _agent
 
 
-def generate_sql(request: str, requirements: str = "", plan: str = "") -> str:
-    """Generate and validate a SELECT using mandatory structured planning + metadata grounding."""
-    query_plan = build_query_plan(request, requirements=requirements, plan=plan)
-    targeted = schema.build_query_context(request, requirements=requirements, plan=plan)
-    prompt_parts = [
-        f"USER REQUEST:\n{request.strip()}",
-        "STRUCTURED QUERY PLAN:\n" + query_plan.render(),
-        f"TARGETED DATA MODEL RETRIEVAL:\n{targeted}",
-    ]
-    if requirements.strip():
-        prompt_parts.append(f"GENERAL CHAT REQUIREMENTS:\n{requirements.strip()}")
-    if plan.strip():
-        prompt_parts.append(f"GENERAL CHAT PLAN:\n{plan.strip()}")
-    prompt_parts.append("Generate the single best SQL query now.")
+def generate_sql(request: str, requirements: str = "", plan: str = "", focused: bool = False) -> str:
+    """Generate one read-only SELECT from the immutable structured plan.
 
-    response = get_code_agent().invoke([
-        SystemMessage(content=SYSTEM_PROMPT),
-        HumanMessage(content="\n\n".join(prompt_parts)),
+    The SQL-generation span deliberately records the model's raw and cleaned
+    SQL *before* validation, so a rejected query is still visible in Phoenix
+    and local evaluation traces.
+    """
+    query_plan = build_query_plan(request)
+    effective_plan = (plan or "").strip() or query_plan.render()
+    targeted = schema.build_query_context(request, plan=effective_plan, focused=focused)
+    prompt = "\n\n".join([
+        f"USER REQUEST:\n{request.strip()}",
+        "STRUCTURED QUERY PLAN (authoritative):\n" + effective_plan,
+        "TARGETED LIVE DATA MODEL (authoritative):\n" + targeted,
+        "Generate exactly one DuckDB SELECT/WITH query. Do not add semantic scope, filters, tables, or joins absent from the plan/model.",
     ])
-    sql = validate_sql(_clean_sql(_extract_content(response)))
-    return sql
+
+    attrs = {
+        "openinference.span.kind": "LLM",
+        "sql.request": request.strip(),
+        "sql.focused_retry": focused,
+    }
+    with trace_span("sql_generation", attributes=attrs) as span:
+        if span is not None:
+            try:
+                span.set_attribute("sql.plan", effective_plan)
+                span.set_attribute("sql.targeted_data_model", targeted)
+            except Exception:
+                pass
+        try:
+            response = get_code_agent().invoke([
+                SystemMessage(content=SYSTEM_PROMPT),
+                HumanMessage(content=prompt),
+            ])
+            raw = _extract_content(response)
+            cleaned = _clean_sql(raw)
+            if span is not None:
+                try:
+                    span.set_attribute("sql.raw_model_output", raw)
+                    span.set_attribute("sql.cleaned", cleaned)
+                    span.set_attribute("sql.output", cleaned)
+                    span.set_attribute("sql.output_empty", not bool(cleaned.strip()))
+                except Exception:
+                    pass
+            try:
+                validated = validate_sql(cleaned)
+            except Exception as exc:
+                if span is not None:
+                    try:
+                        span.set_attribute("sql.validation_status", "rejected")
+                        span.set_attribute("sql.validation_error", str(exc))
+                    except Exception:
+                        pass
+                raise
+            if span is not None:
+                try:
+                    span.set_attribute("sql.validation_status", "accepted")
+                except Exception:
+                    pass
+            return validated
+        except Exception as exc:
+            mark_span_error(span, exc)
+            raise
+
+
+def _validate_sql_against_plan(sql: str, query_plan) -> None:
+    """Validate generated SQL against the declarative catalog plan."""
+    refs = {m.group(1).lower() for m in _TABLE_REF.finditer(sql)}
+    planned = {t.lower() for t in query_plan.required_tables}
+    if not planned:
+        raise ValueError("Query plan selected no tables.")
+    missing = planned - refs
+    extra = refs - planned
+    if missing:
+        raise ValueError(f"Generated SQL omitted planned table(s): {', '.join(sorted(missing))}")
+    if extra:
+        raise ValueError(f"Generated SQL introduced unplanned table(s): {', '.join(sorted(extra))}")
+
+    low = sql.lower()
+    # Every resolved live entity is an exact database fact. The SQL must carry it.
+    for filt in query_plan.entity_filters:
+        for literal in re.findall(r"'([^']+)'", filt):
+            if literal.lower() not in low:
+                raise ValueError(f"Generated SQL omitted resolved entity value: {literal}")
+
+    # Planned semantic filters must survive generation. We compare normalized
+    # field/value atoms, not a brittle full-string representation.
+    for filt in query_plan.filters:
+        atoms = [a for a in re.findall(r"[A-Za-z_][A-Za-z0-9_\.]*|true|false|[0-9]+(?:\.[0-9]+)?", filt.lower())
+                 if a not in {"and", "or", "is", "null", "where", "not"}]
+        if not all(a in low for a in atoms):
+            raise ValueError(f"Generated SQL omitted planned semantic filter: {filt}")
+
+    # Detect scope filters on known semantic columns that the plan did not select.
+    semantic_filter_columns = {}
+    for key, item in schema.SEMANTIC_GLOSSARY.items():
+        for col in item.get("columns", []):
+            semantic_filter_columns.setdefault(col.split(".")[-1].lower(), set()).add(key)
+    selected = set(query_plan.semantic_keys)
+    entity_filter_columns = set()
+    for filt in query_plan.entity_filters:
+        for m in re.finditer(r"\b(?:[A-Za-z_][A-Za-z0-9_]*\.)?([A-Za-z_][A-Za-z0-9_]*)\s*=", filt):
+            entity_filter_columns.add(m.group(1).lower())
+    for col, keys in semantic_filter_columns.items():
+        if re.search(rf"\b{re.escape(col)}\b\s*(?:=|is|in|like|ilike|>|<|>=|<=)", low):
+            if col in entity_filter_columns:
+                continue
+            if not selected.intersection(keys):
+                raise ValueError(f"Generated SQL introduced an unplanned filter on semantic field '{col}'.")
+
+
+def _compile_sql_from_plan(query_plan) -> str:
+    """Compile a minimal read-only SQL query from the declarative plan.
+
+    This is a safety-net only: it runs when the LLM SQL generator returns no SQL.
+    It never changes routing; it uses the tables, relationships, operation,
+    projection, grouping, ordering, filters and live entities already selected
+    by the metadata planner.
+    """
+    tables = set(query_plan.required_tables)
+    if not tables:
+        raise ValueError("Cannot compile SQL: plan selected no tables.")
+
+    rels = schema.relationship_path(tables)
+    if len(tables) > 1 and len(rels) < len(tables) - 1:
+        raise ValueError("Cannot compile SQL: selected tables are not fully connected by catalog relationships.")
+
+    def table_of(expr: str | None) -> str | None:
+        if not expr:
+            return None
+        for table in sorted(tables):
+            if re.search(rf"\b{re.escape(table)}\.", expr):
+                return table
+        return None
+
+    start = None
+    if query_plan.rollup_spec:
+        group_key = str(query_plan.rollup_spec.get("group_key", ""))
+        start = table_of(group_key)
+    if not start and query_plan.grouping:
+        start = table_of(query_plan.grouping[0])
+    if not start:
+        start = table_of(query_plan.select_expression)
+    if not start:
+        start = sorted(tables)[0]
+
+    from_sql = start
+    connected = {start}
+    remaining = set(tables) - connected
+    while remaining:
+        picked = None
+        for rel in rels:
+            left, right = rel.left_table, rel.right_table
+            if left in connected and right in remaining:
+                picked = (rel, right); break
+            if right in connected and left in remaining:
+                picked = (rel, left); break
+        if not picked:
+            raise ValueError("Cannot compile SQL: no catalog join path from current tables.")
+        rel, new_table = picked
+        from_sql += f" JOIN {new_table} ON {rel.left_table}.{rel.left_expr} = {rel.right_table}.{rel.right_expr}"
+        connected.add(new_table)
+        remaining.remove(new_table)
+
+    op = query_plan.operation
+    expr = query_plan.select_expression
+    if not op:
+        raise ValueError("Cannot compile SQL: plan has no operation.")
+
+    select_sql = expr or "*"
+    group_sql = list(query_plan.grouping)
+    if op == "count":
+        select_sql = f"COUNT({expr or '*'})"
+    elif op in {"avg", "sum", "median", "min", "max"}:
+        select_sql = f"{op.upper()}({expr})"
+    elif op == "rank":
+        # rank plans either already contain an explicit grouped projection
+        # (e.g. MSA/NRI) or a scalar projection (e.g. sold-home ranking).
+        select_sql = expr or query_plan.aggregation or "*"
+
+    predicates = []
+    predicates.extend(query_plan.entity_filters)
+    predicates.extend(query_plan.filters)
+    if "exclude NULL" in query_plan.null_policy and expr:
+        for field in re.findall(r"\b[a-zA-Z_][\w]*\.[a-zA-Z_][\w]*\b", expr):
+            predicates.append(f"{field} IS NOT NULL")
+    where_sql = f" WHERE {' AND '.join(predicates)}" if predicates else ""
+
+    group_clause = f" GROUP BY {', '.join(group_sql)}" if group_sql else ""
+    order_clause = f" ORDER BY {query_plan.ordering}" if query_plan.ordering else ""
+
+    return f"SELECT {select_sql} FROM {from_sql}{where_sql}{group_clause}{order_clause}"
 
 
 def run_code_query(request: str, requirements: str = "", plan: str = "") -> tuple[str, str]:
-    """Generate, execute, and (when needed) repair a SQL query.
-
-    The repair remains inside the SQL Code Agent contract: the model receives
-    the actual zero-row/join diagnosis and generates a corrected SELECT.
-    This prevents General Chat from having to hard-code dataset-specific SQL.
-    """
-    last_sql = ""
+    """Generate, validate, execute and generically repair one analytical query."""
+    query_plan = build_query_plan(request)
+    base_plan = query_plan.render()
     repair_note = ""
-
-    for attempt in range(2):
-        effective_plan = plan
+    last_sql = ""
+    for attempt in range(3):
+        effective_plan = base_plan
         if repair_note:
-            effective_plan = (
-                (plan + "\n\n") if plan.strip() else ""
-            ) + "SQL REPAIR CONTEXT FROM THE PREVIOUS EXECUTION:\n" + repair_note
-
-        sql = generate_sql(
-            request,
-            requirements=requirements,
-            plan=effective_plan,
-        )
-        last_sql = sql
-
+            effective_plan += "\n\nREPAIR CONTEXT:\n" + repair_note
         try:
-            df = store.query(sql)
+            sql = generate_sql(request, plan=effective_plan, focused=(attempt > 0))
+            with trace_span("sql_validation", attributes={
+                "sql.attempt": attempt + 1,
+                "sql.statement": sql,
+            }) as validation_span:
+                try:
+                    _validate_sql_against_plan(sql, query_plan)
+                    if validation_span is not None:
+                        validation_span.set_attribute("sql.validation_status", "accepted")
+                except Exception as validation_exc:
+                    if validation_span is not None:
+                        validation_span.set_attribute("sql.validation_status", "rejected")
+                        validation_span.set_attribute("sql.validation_error", str(validation_exc))
+                    raise
+            last_sql = sql
+            if not sql.strip():
+                sql = _compile_sql_from_plan(query_plan)
         except Exception as exc:
-            if attempt == 0:
-                repair_note = (
-                    f"The previous generated SQL failed to execute with this error: {exc}\n"
-                    f"Previous SQL:\n{sql}\n"
-                    "Generate a corrected SELECT using only the live schema and documented joins."
-                )
+            try:
+                # The fallback compiler is intentionally limited to the empty/invalid
+                # SQL case; it never replaces valid LLM-generated SQL.
+                if not last_sql:
+                    sql = _compile_sql_from_plan(query_plan)
+                    _validate_sql_against_plan(sql, query_plan)
+                    last_sql = sql
+                    repair_note = "LLM SQL unavailable; executed catalog-compiled SQL."
+                else:
+                    raise
+            except Exception:
+                repair_note = f"Generation/validation failed: {exc}. Regenerate from the same authoritative plan; do not change user scope."
+                if attempt == 2:
+                    raise
                 continue
-            raise RuntimeError(f"Generated SQL failed: {exc}\nSQL: {sql}") from exc
-
-        if len(df) == 0:
+        try:
+            with trace_span("sql_execution", attributes={
+                "sql.attempt": attempt + 1,
+                "sql.statement": sql,
+            }) as execution_span:
+                try:
+                    df = store.query(sql)
+                    if execution_span is not None:
+                        execution_span.set_attribute("sql.row_count", int(len(df)))
+                        execution_span.set_attribute("sql.result_empty", bool(df.empty))
+                        if not df.empty:
+                            set_span_output(execution_span, df.head(50).to_string(index=False))
+                except Exception as execution_exc:
+                    if execution_span is not None:
+                        execution_span.set_attribute("sql.execution_status", "error")
+                        execution_span.set_attribute("sql.execution_error", str(execution_exc))
+                    raise
+        except Exception as exc:
+            repair_note = f"Execution failed: {exc}. Previous SQL: {sql}. Correct only the SQL error using the same plan."
+            if attempt == 2:
+                raise RuntimeError(f"Generated SQL failed: {exc}\nSQL: {sql}") from exc
+            continue
+        if df.empty:
             diagnosis = schema.diagnose_empty_or_error(sql) or "Query returned 0 rows."
-            if attempt == 0:
-                repair_note = (
-                    f"The previous generated SQL returned no rows.\n"
-                    f"Diagnostic evidence:\n{diagnosis}\n"
-                    f"Previous SQL:\n{sql}\n"
-                    "Generate a corrected SELECT that still answers the original user request."
-                )
-                continue
-            return sql, diagnosis
-
+            repair_note = f"The query returned 0 rows. Diagnostic context: {diagnosis}. Correct join/entity/filter mistakes without changing scope."
+            if attempt == 2:
+                return sql, diagnosis
+            continue
         if len(df) > 50:
             return sql, df.head(50).to_string(index=False) + f"\n... ({len(df)} total rows, showing 50)"
         return sql, df.to_string(index=False)
-
     return last_sql, "Query could not be completed."
 
 # ── General tools ────────────────────────────────────────────────────────────
@@ -422,65 +605,15 @@ def query_database(request: str, requirements: str = "", plan: str = "") -> str:
     Chat can inspect the evidence and continue thinking/planning before it
     answers the user.
     """
-    structured_plan = build_query_plan(request, requirements=requirements, plan=plan)
-    effective_plan = ((plan + "\n\n") if plan.strip() else "") + "STRUCTURED QUERY PLAN:\n" + structured_plan.render()
+    structured_plan = build_query_plan(request)
     try:
-        sql, result = run_code_query(
-            request, requirements=requirements, plan=effective_plan
-        )
+        sql, result = run_code_query(request)
     except Exception as exc:
         sql, result = "", f"Code Agent error: {exc}"
 
-    # LLM-first architecture: only after generation/repair fails do we use the
-    # metadata-defined canonical recovery for the well-known MSA->county->NRI
-    # ranking shape. This does NOT create a view and does NOT bypass planning.
-    recovery_sql = None
-    lower_result = str(result).lower()
-    incorrect_house_scope = (
-        "walk score" in request.lower()
-        and "average" in request.lower()
-        and "is_favorite = true" in sql.lower()
-    )
-    unusable_scalar = any(token in lower_result for token in ("nan", " null", "null\n"))
-    if ("0 rows" in lower_result or "returned no rows" in lower_result or
-            "code agent error" in lower_result or incorrect_house_scope or unusable_scalar):
-        recovery_sql = (
-            schema.canonical_average_house_walk_score_query(request)
-            or schema.canonical_msa_tradeoff_query(request)
-            or schema.canonical_nri_msa_query(request)
-            or schema.canonical_msa_population_query(request)
-            or schema.canonical_unmatched_msa_query(request)
-        )
-    if recovery_sql:
-        try:
-            recovered = store.query(recovery_sql)
-            if len(recovered) > 0:
-                return (
-                    f"[GENERATED SQL]\n{sql or '[LLM query failed/returned no rows]'}\n"
-                    f"[CANONICAL RECOVERY SQL]\n{recovery_sql}\n[RESULT]\n"
-                    f"{recovered.head(50).to_string(index=False)}"
-                    + (f"\n... ({len(recovered)} total rows, showing 50)" if len(recovered) > 50 else "")
-                )
-            result = (str(result) + "\nCanonical recovery query also returned 0 rows.").strip()
-        except Exception as rec_exc:
-            result = (str(result) + f"\nCanonical recovery failed: {rec_exc}").strip()
-
-    # Semantic guard for CBSA-membership questions: a placeholder X-code in
-    # census_msa is intentionally NOT evidence of official CBSA membership.
-    # When the user is asking that specific membership question, replace a
-    # misleading LLM answer with the documented join check.
-    unmatched_guard = schema.canonical_unmatched_msa_query(request)
-    if unmatched_guard is not None:
-        try:
-            guard_df = store.query(unmatched_guard)
-            if len(guard_df) > 0:
-                return (
-                    f"[GENERATED SQL]\n{sql}\n"
-                    f"[CANONICAL RECOVERY SQL]\n{unmatched_guard}\n[RESULT]\n"
-                    f"{guard_df.head(50).to_string(index=False)}"
-                )
-        except Exception:
-            pass
+    # LLM-first architecture: SQL generation and repair are driven entirely by
+    # the live schema plus semantic metadata. There are no question-specific
+    # canonical SQL recipes in the execution layer.
 
     return f"[GENERATED SQL]\n{sql}\n[RESULT]\n{result}"
 

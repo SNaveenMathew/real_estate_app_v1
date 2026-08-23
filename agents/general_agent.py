@@ -84,25 +84,8 @@ def _invoke_approved(name: str, function_obj, args: tuple[Any, ...], kwargs: dic
 
 
 def _get_data_availability_context() -> str:
-    # Keep the routing prompt small. The General Code Agent does not need table
-    # schemas; the SQL Code Agent owns schema/relationship reasoning. It only needs
-    # to know which analytical capabilities are available.
     report, _ = schema.availability_report()
-    compact = "\n".join(
-        line for line in report.splitlines()
-        if line.strip().lower().startswith(("nri_tracts", "census_msa", "cbsa_counties", "houses", "crime_incidents", "bike_routes"))
-    )
-    return (
-        "[SEMANTIC CAPABILITIES]\n"
-        "- General property analytics: houses / walk scores / price / listings\n"
-        "- NRI tract risk: nri_tracts\n"
-        "- NRI MSA analytics: physical tables census_msa + cbsa_counties + nri_tracts\n"
-        "- MSA population universe: census_msa\n"
-        "- MSA-to-NRI path: census_msa -> cbsa_counties -> nri_tracts\n"
-        "- Crime analytics: crime_incidents\n"
-        "- Bike routing: BikePGH network via find_bike_route\n"
-        "[LIVE AVAILABILITY SUMMARY]\n" + compact + "\n[END CAPABILITIES]\n"
-    )
+    return "[LIVE DATA AVAILABILITY]\n" + report + "\n[END LIVE DATA AVAILABILITY]"
 
 
 def _bounded_history(history: list[dict] | None, max_chars: int = 12000) -> list[dict]:
@@ -273,13 +256,11 @@ RULES
 8. For ordinary shortest bike-route requests, set avoid_crime_dense_areas=False.
 9. Do not substitute another routing service.
 10. Keep queries focused and results reasonably small.
-11. For “top N MSAs” + NRI questions, preserve the population universe and the MSA->county->tract relationship described by the structured plan.
-12. For NRI hazard questions, preserve the user's hazard exactly. The SQL Code Agent
-    maps it to the canonical semantic column.
-13. IMPORTANT HOUSE-SCOPE RULE: phrases such as "my houses", "houses I have",
-    "my Austin houses", or "houses in Austin" refer to the full house inventory.
-    Do NOT add is_favorite = TRUE unless the user explicitly says "my list",
-    "saved houses", "favorites", or "favorited houses".
+11. The structured query plan and retrieved metadata are authoritative for scope.
+    Do not invent filters, tables, relationships, or geography grains that are not
+    represented there. Pronouns such as "my" describe the application's relevant
+    dataset; they do not create a saved/favorite filter unless the metadata plan
+    explicitly contains that semantic scope.
 14. When a request needs multiple independent evidence sources, you may make
     multiple approved calls and assign each result to a variable.
 14. Set `final_result` to the most useful result for the final-response model.
@@ -419,6 +400,36 @@ def _extract_bike_visualization(payloads: list[dict]):
     return None
 
 
+def _program_semantic_consistency_errors(source: str, user_message: str, query_plan) -> list[str]:
+    """Reject LLM plans that contradict the metadata-derived query plan."""
+    errors: list[str] = []
+    text = source.lower()
+    matched = schema.semantic_matches(user_message)
+    matched_keys = {m.get("key") for m in matched}
+    planned_tables = set(query_plan.required_tables)
+
+    # Any semantic filter that exists in the catalog is allowed only when the
+    # corresponding concept actually matched the request. This is generic and
+    # prevents the LLM from inventing saved/status/other scope filters.
+    for key, item in schema.SEMANTIC_GLOSSARY.items():
+        filt = " | ".join(str(x) for x in item.get("filters", []) if x)
+        if not filt or key in matched_keys:
+            continue
+        canonical_columns = [c.lower() for c in item.get("columns", [])]
+        if any(c and c in text for c in canonical_columns):
+            errors.append(f"Generated program introduced semantic filter '{key}' not supported by the user request.")
+
+    # The program can mention tables in requirements/plan strings; ensure those
+    # tables are part of the metadata-derived plan.
+    for table in schema.list_table_names(agent_visible_only=True):
+        if table in text and table not in planned_tables:
+            errors.append(f"Generated program introduced table '{table}' outside the metadata-derived plan.")
+
+    # If the plan names an explicit geography grain, the generated requirements
+    # must not substitute an unrelated source geography.
+    return errors
+
+
 def _generate_program(user_message: str, history: list[dict] | None, prior_evidence: str = "", data_model_context: str = "") -> str:
     query_plan = build_query_plan(user_message)
     prompt = [
@@ -439,6 +450,9 @@ def _generate_program(user_message: str, history: list[dict] | None, prior_evide
     if code:
         try:
             _validate_program(code)
+            semantic_errors = _program_semantic_consistency_errors(code, user_message, query_plan)
+            if semantic_errors:
+                raise CodeAgentProgramError("; ".join(semantic_errors))
             return code
         except Exception as first_exc:
             first_error = str(first_exc)
@@ -457,8 +471,8 @@ def _generate_program(user_message: str, history: list[dict] | None, prior_evide
         "calling an approved function. For this user request, the usual analytical "
         "choice is query_database(...). No explanation, no markdown, no blank response.\n"
         f"USER REQUEST: {user_message}\n"
-        "If it is an MSA/NRI risk question, call query_database with the request verbatim "
-        "and mention the documented census_msa -> cbsa_counties -> nri_tracts relationship in requirements."
+        "Preserve the metadata-derived structured plan and retrieved data-model context. "
+        "Do not invent filters, tables, relationships, or geography grains."
     )
     retry = _get_code_agent().invoke([
         SystemMessage(content=retry_prompt + f"\nFIRST GENERATION ERROR: {first_error}"),
@@ -468,6 +482,9 @@ def _generate_program(user_message: str, history: list[dict] | None, prior_evide
     if retry_code:
         try:
             _validate_program(retry_code)
+            semantic_errors = _program_semantic_consistency_errors(retry_code, user_message, query_plan)
+            if semantic_errors:
+                raise CodeAgentProgramError("; ".join(semantic_errors))
             return retry_code
         except Exception:
             pass
