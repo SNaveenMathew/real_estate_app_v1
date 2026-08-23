@@ -89,6 +89,13 @@ def _find_string(text: str, target: str) -> int | None:
     idx = text.lower().find(str(target).lower())
     return idx if idx >= 0 else None
 
+def _find_last(text: str, target, value_type: str, tolerance: float) -> int | None:
+    if value_type == "string":
+        idx = text.lower().rfind(str(target).lower())
+        return idx if idx >= 0 else None
+    matches = [pos for value, pos in _extract_numbers(text) if abs(value - float(target)) <= (abs(float(target)) * tolerance if tolerance else 0)]
+    return matches[-1] if matches else None
+
 
 def _find(text: str, target, value_type: str, tolerance: float) -> int | None:
     if value_type == "string":
@@ -113,8 +120,9 @@ def score_structured(example: GoldenExample, reply: str) -> ScoreResult:
                                 extra={"distractor": d})
 
     positions = []
+    finder = _find_last if example.order_matters else _find
     for val in example.expected:
-        pos = _find(reply, val, example.value_type, example.tolerance)
+        pos = finder(reply, val, example.value_type, example.tolerance)
         if pos is None:
             return ScoreResult(example.id, "FAIL", "assert_equal",
                                 f"expected value not found in reply: {val!r}", reply,

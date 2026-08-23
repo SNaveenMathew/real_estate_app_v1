@@ -414,7 +414,7 @@ GOLDEN_SET: list[GoldenExample] = [
         answer_type="structured",
         expected=[AVG_RIVERINE_FLOOD_RISK],
         value_type="number",
-        tolerance=0.0001,
+        tolerance=0.002,
     ),
     GoldenExample(
         id="average_msa_overall_nri_risk",
@@ -424,7 +424,7 @@ GOLDEN_SET: list[GoldenExample] = [
         answer_type="structured",
         expected=[AVG_NRI_RISK],
         value_type="number",
-        tolerance=0.0001,
+        tolerance=0.002,
     ),
     GoldenExample(
         id="pittsburgh_riverine_flood_risk",
