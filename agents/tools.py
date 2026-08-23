@@ -197,6 +197,7 @@ _TABLE_REF = re.compile(
     r"\b(?:FROM|JOIN|UPDATE|INTO|TABLE)\s+(?:[A-Za-z_][A-Za-z0-9_]*\.)?([A-Za-z_][A-Za-z0-9_]*)",
     re.I,
 )
+_AGGREGATE_CALL_RE = re.compile(r"\b(?:AVG|SUM|COUNT|MEDIAN|MIN|MAX)\s*\(", re.I)
 
 
 SYSTEM_PROMPT = """You are a SQL Code Agent. Return exactly one read-only DuckDB SELECT statement.
@@ -348,6 +349,25 @@ def generate_sql(request: str, requirements: str = "", plan: str = "", focused: 
             raise
 
 
+def _where_clause_text(low_sql: str) -> str:
+    """Return only the WHERE-clause portion(s) of a lowercased SQL string.
+
+    Used to scope the "unplanned filter" scan in _validate_sql_against_plan
+    to actual row-filtering predicates. A JOIN ... ON predicate — e.g. the
+    required relationship census_msa.msa_code = cbsa_counties.cbsa_code —
+    structurally connects tables per the catalog's relationship graph; it
+    is not a semantic filter narrowing which rows qualify, and must not be
+    mistaken for one just because its column name is followed by '=' in
+    the FROM clause. Handles multiple WHERE clauses (e.g. inside CTEs) by
+    capturing each occurrence up to the next clause boundary.
+    """
+    segments = re.findall(
+        r"\bwhere\b(.*?)(?=\bgroup\s+by\b|\border\s+by\b|\blimit\b|\bwhere\b|$)",
+        low_sql, re.S,
+    )
+    return " ".join(segments)
+
+
 def _validate_sql_against_plan(sql: str, query_plan) -> None:
     """Validate generated SQL against the declarative catalog plan."""
     refs = {m.group(1).lower() for m in _TABLE_REF.finditer(sql)}
@@ -376,7 +396,11 @@ def _validate_sql_against_plan(sql: str, query_plan) -> None:
         if not all(a in low for a in atoms):
             raise ValueError(f"Generated SQL omitted planned semantic filter: {filt}")
 
-    # Detect scope filters on known semantic columns that the plan did not select.
+    # Detect scope filters on known semantic columns that the plan did not
+    # select. Scoped to the WHERE clause only (see _where_clause_text) so a
+    # required JOIN ... ON bridge from query_plan.required_relationships is
+    # never mistaken for an invented row filter.
+    where_low = _where_clause_text(low)
     semantic_filter_columns = {}
     for key, item in schema.SEMANTIC_GLOSSARY.items():
         for col in item.get("columns", []):
@@ -387,11 +411,74 @@ def _validate_sql_against_plan(sql: str, query_plan) -> None:
         for m in re.finditer(r"\b(?:[A-Za-z_][A-Za-z0-9_]*\.)?([A-Za-z_][A-Za-z0-9_]*)\s*=", filt):
             entity_filter_columns.add(m.group(1).lower())
     for col, keys in semantic_filter_columns.items():
-        if re.search(rf"\b{re.escape(col)}\b\s*(?:=|is|in|like|ilike|>|<|>=|<=)", low):
+        if re.search(rf"\b{re.escape(col)}\b\s*(?:=|is|in|like|ilike|>|<|>=|<=)", where_low):
             if col in entity_filter_columns:
                 continue
             if not selected.intersection(keys):
                 raise ValueError(f"Generated SQL introduced an unplanned filter on semantic field '{col}'.")
+
+
+def _qualify_join_expr(table: str, expr: str) -> str:
+    """Table-qualify every bare column reference in a relationship-key expr.
+
+    Most catalog relationships key on a single bare column, where a plain
+    f"{table}.{expr}" prefix is correct. A few key on a compound expression
+    instead — e.g. "state_fips || county_fips" (concatenation) or
+    "LEFT(tract_fips, 5)" (a function call) — and naively prefixing the
+    whole string only qualifies the first token. That leaves later bare
+    columns ambiguous once another joined table happens to share the same
+    column name (e.g. both cbsa_counties and nri_tracts have county_fips),
+    and turns a function call into invalid syntax ("table.LEFT(...)" is not
+    "LEFT(table.col, ...)"). Qualify each bare identifier individually
+    instead, leaving SQL function names (identifier immediately followed by
+    '(') and already-qualified references untouched.
+    """
+    def _replace(match: re.Match) -> str:
+        token = match.group(0)
+        if expr[match.end():match.end() + 1] == "(":
+            return token  # function name, e.g. LEFT( — not a column
+        return f"{table}.{token}"
+
+    return re.sub(r"(?<!\.)\b[A-Za-z_][A-Za-z0-9_]*\b", _replace, expr)
+
+
+def _group_equality_predicates(filters: list[str]) -> list[str]:
+    """Combine same-column resolved-entity equalities into one IN (...).
+
+    query_plan.entity_filters holds one "table.col = 'value'" predicate per
+    resolved named entity — e.g. four separate MSA-name equalities for "the
+    Pittsburgh, Denver, Miami, and Austin metro areas". AND-joining
+    different-valued equalities on the same column is a contradiction (a
+    column cannot equal two different literals in the same row) and would
+    make the query always return zero rows; they need to be OR-combined —
+    via IN (...) — instead. Filters that already target different columns
+    are unaffected and still get AND-ed together as before. Anything not
+    matching the simple "col = 'value'" shape is passed through unchanged.
+    """
+    pattern = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*'(.*)'$", re.S)
+    grouped: dict[str, list[str]] = {}
+    order: list[str] = []
+    passthrough: list[str] = []
+    for filt in filters:
+        m = pattern.match(filt.strip())
+        if not m:
+            passthrough.append(filt)
+            continue
+        col, val = m.group(1), m.group(2)
+        if col not in grouped:
+            grouped[col] = []
+            order.append(col)
+        grouped[col].append(val)
+    out = []
+    for col in order:
+        values = grouped[col]
+        if len(values) == 1:
+            out.append(f"{col} = '{values[0]}'")
+        else:
+            value_list = ", ".join(f"'{v}'" for v in values)
+            out.append(f"{col} IN ({value_list})")
+    out.extend(passthrough)
+    return out
 
 
 def _compile_sql_from_plan(query_plan) -> str:
@@ -443,7 +530,9 @@ def _compile_sql_from_plan(query_plan) -> str:
         if not picked:
             raise ValueError("Cannot compile SQL: no catalog join path from current tables.")
         rel, new_table = picked
-        from_sql += f" JOIN {new_table} ON {rel.left_table}.{rel.left_expr} = {rel.right_table}.{rel.right_expr}"
+        left_qualified = _qualify_join_expr(rel.left_table, rel.left_expr)
+        right_qualified = _qualify_join_expr(rel.right_table, rel.right_expr)
+        from_sql += f" JOIN {new_table} ON {left_qualified} = {right_qualified}"
         connected.add(new_table)
         remaining.remove(new_table)
 
@@ -460,11 +549,24 @@ def _compile_sql_from_plan(query_plan) -> str:
         select_sql = f"{op.upper()}({expr})"
     elif op == "rank":
         # rank plans either already contain an explicit grouped projection
-        # (e.g. MSA/NRI) or a scalar projection (e.g. sold-home ranking).
+        # (e.g. MSA/NRI: "name, AVG(x)") or a scalar per-row projection
+        # (e.g. sold-home ranking: "city, sold_price") — the group_by on
+        # the catalog operation is a display/context grouping, not
+        # necessarily a real aggregation.
         select_sql = expr or query_plan.aggregation or "*"
 
+    # GROUP BY is only valid SQL — and only what's actually intended — when
+    # every non-grouped projected column is wrapped in an aggregate call.
+    # Some catalog rank operations pair a grouping key with a bare column
+    # rather than an aggregate (see comment above); emitting GROUP BY for
+    # those produces an invalid DuckDB query ("column must appear in the
+    # GROUP BY clause or be part of an aggregate function"), so only keep
+    # the clause when the projection actually aggregates something.
+    if group_sql and not _AGGREGATE_CALL_RE.search(select_sql):
+        group_sql = []
+
     predicates = []
-    predicates.extend(query_plan.entity_filters)
+    predicates.extend(_group_equality_predicates(query_plan.entity_filters))
     predicates.extend(query_plan.filters)
     if "exclude NULL" in query_plan.null_policy and expr:
         for field in re.findall(r"\b[a-zA-Z_][\w]*\.[a-zA-Z_][\w]*\b", expr):
@@ -544,10 +646,20 @@ def run_code_query(request: str, requirements: str = "", plan: str = "") -> tupl
                 raise RuntimeError(f"Generated SQL failed: {exc}\nSQL: {sql}") from exc
             continue
         if df.empty:
-            diagnosis = schema.diagnose_empty_or_error(sql) or "Query returned 0 rows."
-            repair_note = f"The query returned 0 rows. Diagnostic context: {diagnosis}. Correct join/entity/filter mistakes without changing scope."
+            diagnosis = schema.diagnose_empty_or_error(sql) or "No relationship diagnostics available."
             if attempt == 2:
-                return sql, diagnosis
+                # Every repair attempt is exhausted, and the last SQL was a
+                # validated query that executed without error — it just
+                # matched no rows. That is very often the correct, factual
+                # answer (e.g. "no CBSA match for this MSA"), not a broken
+                # query, so say so plainly instead of returning the raw
+                # repair-hint diagnostics (written for the next
+                # SQL-generation attempt) as if they were the answer.
+                return sql, (
+                    "The query executed successfully against the documented schema and "
+                    f"returned 0 rows — no matching records were found. {diagnosis}"
+                )
+            repair_note = f"The query returned 0 rows. Diagnostic context: {diagnosis}. Correct join/entity/filter mistakes without changing scope."
             continue
         if len(df) > 50:
             return sql, df.head(50).to_string(index=False) + f"\n... ({len(df)} total rows, showing 50)"
