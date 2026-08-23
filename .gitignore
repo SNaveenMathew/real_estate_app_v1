@@ -6,6 +6,8 @@
 # DuckDB artifacts
 *.duckdb
 *.duckdb-wal
+*.bak
+*.wal
 
 # Chroma / sqlite artifacts that may live in data/
 data/**/chroma.sqlite3
