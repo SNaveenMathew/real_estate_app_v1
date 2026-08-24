@@ -2,55 +2,83 @@
 
 A local, AI-powered map app for analyzing houses with FEMA National Risk Index data, Census demographics, Redfin listings, severity-weighted crime data, and an LLM chat interface — all running on your machine.
 
-## Data-model planning / RAG
+## General Chat: Agent Architecture & Design Philosophy
 
-The SQL agent intentionally queries **physical tables only**. Semantic SQL views
-such as `house_rankings` and `nri_msa_risk` are not part of this architecture.
-Instead, `db/schema_catalog.py` defines table and column meaning, aliases, grain,
-nullability, relationship cardinality and confidence, bridge tables, and reusable
-planning patterns. `agents/query_planner.py` creates a deterministic structured
-plan for analytical requests before SQL generation.
+**The LLM writes text; deterministic code decides what's true and what's allowed.**
 
-`db/vector_store.py` indexes the small metadata documents in a dedicated Chroma
-collection named `data_model_metadata`. General Chat performs targeted
-data-model retrieval before code generation and records it as the
-`general_chat.data_model_rag` span. The SQL Code Agent receives targeted live
-schema and relationship context rather than the entire database schema, and the
-planner is recorded separately in the `general_chat.query_planner` Phoenix span.
+For every analytical question, *what's relevant* — which tables, which join
+path, which entities, which operation — is decided entirely by deterministic
+code reading `db/schema_catalog.py`, before any SQL exists. The LLM's job is
+narrower and comes later: turn an already-decided, already-validated plan into
+one SQL statement, or turn executed results into prose. Every LLM output along
+the way is checked by code against that same plan — never by another LLM call
+grading the first one.
 
-The metadata vector store is a **retrieval accelerator**, not the authoritative
-schema: live DuckDB `DESCRIBE` output and row counts remain the source of truth
-for actual availability. If the Ollama embedding service is unavailable, metadata
-retrieval falls back to lexical matching. Chroma metadata documents are updated
-with `upsert`, keeping the collection synchronized with curated relationship and
-planning metadata. On startup, `_ensure_schema()` removes legacy
-`house_rankings` and `nri_msa_risk` views left by older builds.
+```
+request text
+  -> build_query_plan()                              [deterministic]
+       concept + operation match, entity resolution, relationship-path search
+  -> QueryPlan (tables, joins, filters, operation) — now authoritative
+  -> generate_sql()                                   [LLM]
+       writes one SELECT statement from the plan text
+  -> validate_sql() + _validate_sql_against_plan()     [deterministic]
+       security/shape check, then plan-conformance check
+       - valid -> execute against DuckDB
+       - invalid/empty after 3 attempts -> _compile_sql_from_plan()  [deterministic]
+             same QueryPlan, template compiler, no LLM -> execute against DuckDB
+  -> final answer                                      [LLM]
+       writes prose from the executed evidence only
+  -> response_validator.py                             [deterministic]
+       flags a reply that contradicts its own evidence
+```
 
-The structured plan keeps `universe_limit` separate from `result_limit`. For
-example, “top 50 MSAs with the lowest risk” first selects the 50 largest MSAs,
-then ranks those 50 by the requested NRI metric and returns the best results.
-The MSA/NRI planning recipe uses the canonical relational path
-`census_msa -> cbsa_counties -> nri_tracts` and aggregates the risk metric at
-MSA grain.
+| Stage | Deterministic or LLM |
+|---|---|
+| Routing — tables, joins, entities, operation | Deterministic |
+| SQL text generation | LLM |
+| SQL validation — security + plan-conformance | Deterministic |
+| Fallback SQL compilation | Deterministic |
+| Final answer | LLM |
+| Reply-vs-evidence check | Deterministic |
 
-The SQL Code Agent generates the first query and receives a repair attempt if
-execution fails or returns no rows. If recovery is still needed, the system can
-use a metadata-defined canonical MSA/NRI query path. This recovery path is not
-the primary execution path, and malformed recovery programs are treated as
-non-fatal so prior evidence is preserved for another generation step.
+The split holds because every LLM call on this path — SQL generation,
+orchestration, and the final answer — runs through the same local, quantized
+model at `temperature=0.0` (see **LLM: run `llama-server`** above). Two things
+follow from that: retrying that model with an unchanged prompt returns the same
+result, so a safety net that just asks it again isn't a safety net; and the
+same weights writing an answer can't be trusted to independently grade that
+answer, so every "is this correct/safe" check is code, never a second model
+call. **See [`AGENT_ARCHITECTURE.md`](AGENT_ARCHITECTURE.md) for the full
+pipeline mechanics, every validation rule, and the reasoning behind where each
+line is drawn.**
 
-The data-model retriever searches using both the user's question and the
-structured query plan. Common semantic mappings include walk score, saved or
-favorite houses, overall NRI risk, riverine and coastal flood risk, and MSA
-population. The resulting flow is:
+### Data-model retrieval
 
-`question -> structured plan -> targeted live schema and relationship retrieval -> metadata retrieval -> SQL Code Agent -> execute -> repair -> canonical recovery -> final response`
+Two separate retrieval steps feed the pipeline above. `general_chat.data_model_rag`
+(`db/vector_store.py`) runs once per turn, before the orchestrator decides what
+to do — it searches a dedicated Chroma collection (`data_model_metadata`) using
+both the question and the structured plan, so the orchestrator has context
+before choosing tool calls. This is a **retrieval accelerator, not the
+authoritative schema**: live DuckDB `DESCRIBE` output and row counts remain the
+source of truth, and if the embedding service is unavailable, retrieval falls
+back to lexical matching rather than failing the turn. Separately,
+`schema.build_query_context()`, called inside `generate_sql()`, pulls targeted
+live schema and relationship text for just the tables the plan already
+selected — a direct catalog read, not a search.
 
-The metadata recovery query keeps the population universe separate from NRI
-aggregation and applies the final result limit only after the MSA-level metric is
-computed. The physical database remains normalized; no MSA-risk or house-ranking
-views are introduced.
+`db/schema_catalog.py` is the single source of truth either way: live
+introspection (so column names/types can't drift) plus curated notes for what
+introspection can't tell you — which columns are reliably populated, which
+joins need a non-obvious expression, which tables need a default filter to be
+meaningful.
 
+The planner keeps `universe_limit` separate from `result_limit`: "top 50 MSAs
+with the lowest risk" first selects the 50 largest MSAs, then ranks those 50 by
+the requested NRI metric. The canonical MSA/NRI join path is
+`census_msa -> cbsa_counties -> nri_tracts`, aggregated at MSA grain. On
+startup, `_ensure_schema()` removes any `house_rankings`/`nri_msa_risk` views
+left by older builds — semantic SQL views are intentionally not part of this
+architecture; the SQL agent queries physical tables only.
 
 ---
 
@@ -616,10 +644,13 @@ capabilities currently covered by the deterministic evaluation fixture.
 - The distinction between full inventory and favorites is implemented, but the
   current fixture marks every house `is_favorite = TRUE`, so it cannot detect a
   mistaken favorite filter. Add a non-favorite fixture house to test this rule.
-- Arbitrary multi-table questions and unusual MSA/NRI ranking variants depend on
-  LLM-generated SQL. The application provides a two-attempt generation/repair
-  loop and a limited set of canonical recovery queries, not a universal query
-  planner for every possible join.
+- Arbitrary multi-table questions and unusual ranking variants still depend on
+  LLM-generated SQL being written correctly at least once. The application
+  provides a three-attempt generation/repair loop and a deterministic fallback
+  that compiles SQL directly from the structured plan when generation fails
+  (see **General Chat: Agent Architecture & Design Philosophy** above, and
+  `AGENT_ARCHITECTURE.md`) — but that fallback can only build joins/operations
+  the catalog already declares; it does not invent new relationship paths.
 - Sold-home tract questions require geocoded rows; pending rows have NULL
   geography and must not be treated as tract-local.
 - Historical house questions require populated `house_snapshots`; the current
