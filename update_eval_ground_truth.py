@@ -9,11 +9,11 @@ Run this BEFORE run_eval.py from the project root:
 To keep CLI workflows consistent with run_eval.py, the updater also accepts:
 
     python .\update_eval_ground_truth.py --skip-house-agent
+    python .\update_eval_ground_truth.py --house-agent-only
 
-The flag does not change SQL ground truth generation: it only documents that the
-subsequent evaluation run may omit house-agent examples. The updater must still
-keep house-agent examples in the golden file so they remain available when the
-flag is not used.
+`--skip-house-agent` is accepted for CLI consistency and leaves the golden file
+unchanged apart from the normal ground-truth refresh. `--house-agent-only`
+updates only expected values belonging to house-agent examples.
 
 This script intentionally derives the structured expected values and the
 numeric facts embedded in the free-text rubrics from SQL executed against the
@@ -335,7 +335,7 @@ def replace_assignment(text: str, variable: str, value) -> str:
     return new_text
 
 
-def patch_golden(text: str, truth: dict) -> str:
+def patch_golden(text: str, truth: dict, house_agent_only: bool = False) -> str:
     """
     Update only fixture-derived values embedded in the golden set.
 
@@ -360,6 +360,7 @@ def patch_golden(text: str, truth: dict) -> str:
         return offsets[lineno - 1] + col
 
     examples: dict[str, ast.Call] = {}
+    example_agents: dict[str, str] = {}
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -373,6 +374,9 @@ def patch_golden(text: str, truth: dict) -> str:
                 break
         if example_id:
             examples[example_id] = node
+            agent = next((kw.value for kw in node.keywords if kw.arg == "agent"), None)
+            if isinstance(agent, ast.Constant) and isinstance(agent.value, str):
+                example_agents[example_id] = agent.value
 
     def replace_keyword_value(source: str, example_id: str, keyword: str, value_text: str) -> str:
         node = examples.get(example_id)
@@ -397,6 +401,8 @@ def patch_golden(text: str, truth: dict) -> str:
         ("miami_house_walk_score", "expected", repr([truth["miami_house_walk_score"]])),
         ("pittsburgh_house_nri_score", "expected", repr([truth["pittsburgh_house_nri_score"]])),
     ]
+    if house_agent_only:
+        replacements = [item for item in replacements if example_agents.get(item[0]) == "house"]
 
     # Apply replacements from right to left so the original AST offsets stay valid.
     edits: list[tuple[int, int, str]] = []
@@ -429,6 +435,8 @@ def patch_golden(text: str, truth: dict) -> str:
             "affiliation that is not present in the data.",
         ),
     ]:
+        if house_agent_only:
+            continue
         node = examples.get(example_id)
         if node is None:
             raise RuntimeError(f"Example {example_id} not found")
@@ -456,6 +464,13 @@ def main() -> None:
         action="store_true",
         help="accepted for CLI consistency with run_eval.py; does not remove house-agent examples from the golden set",
     )
+    parser.add_argument(
+        "--house-agent-only",
+        "--only-house-agent",
+        dest="house_agent_only",
+        action="store_true",
+        help="update only expected values for examples assigned to the house agent",
+    )
     args = parser.parse_args()
 
     if not args.db.exists():
@@ -479,7 +494,7 @@ def main() -> None:
         print("House-agent examples are retained in golden_set.py; --skip-house-agent only affects run_eval.py.")
 
     source = args.golden.read_text(encoding="utf-8")
-    updated = patch_golden(source, truth)
+    updated = patch_golden(source, truth, house_agent_only=args.house_agent_only)
 
     # Syntax-check the generated Python before touching the golden file.
     ast.parse(updated, filename=str(args.golden))

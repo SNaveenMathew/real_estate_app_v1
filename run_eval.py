@@ -18,6 +18,7 @@ Usage:
     python run_eval.py --skip-fixture-build             # reuse existing fixture DB
     python run_eval.py --list                           # list examples, run nothing
     python run_eval.py --skip-house-agent                # evaluate General Chat examples only
+    python run_eval.py --house-agent-only               # evaluate House Agent examples only
     python run_eval.py --mock                           # smoke-test the harness only —
                                                           # no model server needed, NOT a
                                                           # real evaluation (see eval/judge.py)
@@ -105,6 +106,8 @@ def _filter_examples(args) -> list[GoldenExample]:
         examples = [e for e in examples if wanted_tags & set(e.tags)]
     if args.skip_house_agent:
         examples = [e for e in examples if e.agent != "house"]
+    if args.house_agent_only:
+        examples = [e for e in examples if e.agent == "house"]
     return examples
 
 
@@ -117,6 +120,9 @@ def main():
     parser.add_argument("--list", action="store_true", help="list matching examples and exit")
     parser.add_argument("--skip-house-agent", action="store_true",
                         help="skip examples assigned to the house agent; evaluate General Chat only")
+    parser.add_argument("--house-agent-only", "--only-house-agent", dest="house_agent_only",
+                        action="store_true",
+                        help="run only examples assigned to the house agent")
     parser.add_argument("--mock", action="store_true",
                          help="smoke-test the harness with a scripted stub reply and a "
                               "keyword-based judge — no model server required. "
