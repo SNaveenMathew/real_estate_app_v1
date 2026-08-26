@@ -146,6 +146,13 @@ def _validate_program(source: str) -> ast.Module:
     if len(source) > CODE_AGENT_MAX_CHARS:
         raise CodeAgentProgramError("Generated code exceeded the maximum size.")
 
+    from services.guardrails import CodeAgentGuardrail
+    guard_res = CodeAgentGuardrail.validate_code_program(
+        source, set(APPROVED_FUNCTIONS.keys()), max_chars=CODE_AGENT_MAX_CHARS
+    )
+    if not guard_res.passed:
+        raise CodeAgentProgramError("; ".join(guard_res.reasons))
+
     try:
         tree = ast.parse(source, mode="exec")
     except SyntaxError as exc:
@@ -588,6 +595,32 @@ def run_general_chat(
 
     started_at = perf_counter()
     _, root_span, trace_id, trace_url = start_general_chat(message, session_id, len(history or []))
+
+    from services.guardrails import GuardrailManager
+    input_guard = GuardrailManager.inspect_turn_input(message)
+    if not input_guard.passed:
+        blocked_reply = (
+            "I'm sorry, but I cannot process this request because it violates "
+            "safety guidelines or attempts to override system instructions."
+        )
+        updated_history = list(history or []) + [
+            {"role": "user", "content": message},
+            {"role": "assistant", "content": blocked_reply},
+        ]
+        end_general_chat(
+            root_span,
+            trace_id=trace_id,
+            reply=blocked_reply,
+            started_at=started_at,
+            tool_call_count=0,
+        )
+        if include_metadata:
+            return blocked_reply, updated_history, None, {
+                "trace_id": trace_id,
+                "trace_url": trace_url,
+                "guardrail": input_guard.to_dict(),
+            }
+        return blocked_reply, updated_history
 
     all_tool_messages: list[ToolMessage] = []
     all_calls: list[tuple[str, Any]] = []

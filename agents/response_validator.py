@@ -245,6 +245,11 @@ def validate_response(
             failure_type = "missing_data"
 
     if not hallucinated:
+        from services.guardrails import OutputGroundingGuardrail
+        score_res = OutputGroundingGuardrail.validate_scores_in_text(reply)
+        if not score_res.passed:
+            # Append guardrail notification if invalid scores are detected
+            return reply + f"\n\n*(Guardrail note: {'; '.join(score_res.reasons)})*"
         return reply
 
     # ── Return the right replacement message ──────────────────────────────

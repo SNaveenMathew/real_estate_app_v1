@@ -369,7 +369,12 @@ def _where_clause_text(low_sql: str) -> str:
 
 
 def _validate_sql_against_plan(sql: str, query_plan) -> None:
-    """Validate generated SQL against the declarative catalog plan."""
+    """Validate generated SQL against the declarative catalog plan and SQL safety guardrail."""
+    from services.guardrails import CodeAgentGuardrail
+    guard_res = CodeAgentGuardrail.validate_sql(sql)
+    if not guard_res.passed:
+        raise ValueError(f"SQL Guardrail violation: {'; '.join(guard_res.reasons)}")
+
     refs = {m.group(1).lower() for m in _TABLE_REF.finditer(sql)}
     planned = {t.lower() for t in query_plan.required_tables}
     if not planned:

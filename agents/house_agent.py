@@ -122,6 +122,20 @@ def run_house_chat(house_id: str, message: str,
     Returns (response_text, updated_history).
     history is a list of {"role": "user"|"assistant", "content": "..."}.
     """
+    from services.guardrails import GuardrailManager, OutputGroundingGuardrail
+
+    # 1. Input Guardrail
+    input_guard = GuardrailManager.inspect_turn_input(message)
+    if not input_guard.passed:
+        blocked_reply = (
+            "I'm sorry, but I cannot process this request because it violates "
+            "safety guidelines or attempts to override system instructions."
+        )
+        return blocked_reply, (history or []) + [
+            {"role": "user", "content": message},
+            {"role": "assistant", "content": blocked_reply},
+        ]
+
     agent = build_house_agent(house_id)
 
     # Build LangChain message history
@@ -139,22 +153,18 @@ def run_house_chat(house_id: str, message: str,
     ai_messages = [m for m in result["messages"] if isinstance(m, AIMessage)]
     reply = ai_messages[-1].content if ai_messages else "I couldn't generate a response."
 
-    # Deterministic grounding guard for the most important missing-score case:
-    # if the database has no Walk Score, never let the LLM manufacture one.
-    # This only overrides the response for an explicit walkability question and
-    # leaves other house questions on the normal LLM path.
+    # 2. Deterministic grounding & missing-score guard
     try:
         import db.duckdb_store as store
         house = store.get_house(house_id) or {}
-        if (
-            any(term in message.lower() for term in ("walkability", "walk score", "walkable"))
-            and house.get("walk_score") is None
-        ):
-            reply = (
-                "The Walk Score for this house is not available in the data, "
-                "so I can't provide a numeric walkability score. I won't infer "
-                "or invent one from other information."
-            )
+        walk_score = house.get("walk_score")
+        reply, _ = OutputGroundingGuardrail.enforce_missing_score_guard(
+            message, reply, walk_score, score_name="Walk Score"
+        )
+        # Validate score bounds
+        score_res = OutputGroundingGuardrail.validate_scores_in_text(reply)
+        if not score_res.passed:
+            reply += f"\n\n*(Note: {'; '.join(score_res.reasons)})*"
     except Exception:
         # Never turn a grounding guard into a new failure path.
         pass
