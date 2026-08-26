@@ -20,7 +20,17 @@ query-planning/SQL pipeline described here.
 1. [Design principle](#1-design-principle)
 2. [Which agent handles a request](#2-which-agent-handles-a-request)
 3. [General Chat: the full pipeline](#3-general-chat-the-full-pipeline)
-4. [Complete deterministic-vs-LLM inventory](#4-complete-deterministic-vs-llm-inventory)
+   - 3.0 [Input guardrails — deterministic](#30-input-guardrails--deterministic)
+   - 3.1 [Orchestration loop](#31-orchestration-loop)
+   - 3.2 [Query planning (routing) — deterministic](#32-query-planning-routing--deterministic)
+   - 3.3 [Data-model retrieval — deterministic](#33-data-model-retrieval--deterministic-two-distinct-steps)
+   - 3.4 [SQL generation — LLM](#34-sql-generation--llm)
+   - 3.5 [SQL validation — deterministic, three layers](#35-sql-validation--deterministic-three-layers)
+   - 3.6 [Deterministic fallback compilation](#36-deterministic-fallback-compilation)
+   - 3.7 [Execution](#37-execution)
+   - 3.8 [Final answer + response validation](#38-final-answer--response-validation)
+   - 3.9 [Guardrails & Security Framework](#39-guardrails--security-framework)
+4. [Complete deterministic-vs-LLM inventory](#44-complete-deterministic-vs-llm-inventory)
 5. [Why the boundary is where it is](#5-why-the-boundary-is-where-it-is)
 6. [Known boundaries and sharp edges](#6-known-boundaries-and-sharp-edges)
 7. [Extending the agent](#7-extending-the-agent)
@@ -70,6 +80,20 @@ resolved before either agent is ever invoked.
 
 ## 3. General Chat: the full pipeline
 
+### 3.0 Input guardrails — deterministic
+
+Every chat turn (`run_general_chat` and `run_house_chat`) passes through
+`services.guardrails::InputGuardrail` before any LLM call or retrieval step:
+
+- **Prompt Injection & Jailbreak Defense**: Detects adversarial injection patterns
+  ("ignore all previous instructions", "DAN mode", system prompt extraction,
+  unauthorized execution commands).
+- **Sanitization & Length Bounds**: Strips null bytes and caps max input characters
+  (`MAX_INPUT_CHARS = 25000`).
+- **Short-Circuit Protection**: If flagged as an injection attempt, the turn
+  immediately returns a safe canned response without executing LLM spans or
+  triggering tool calls. Average latency: $\sim 22\ \mu\text{s}$.
+
 ### 3.1 Orchestration loop
 
 `run_general_chat` drives a bounded loop over `CODE_AGENT_MAX_STEPS = 3`
@@ -95,9 +119,8 @@ Each step:
    — from step 1 onward — the previous step's executed evidence. The model
    returns a small program: one or more `variable = approved_function(kw=...)`
    lines.
-2. **`_validate_program(source)`** parses it with `ast.parse` and walks the
-   tree with a hard allow-list — this is the same category of guarantee as
-   the SQL validator in §3.5, just AST-based instead of regex-based:
+2. **`_validate_program(source)`** runs `CodeAgentGuardrail.validate_code_program`
+   and walks the AST with a hard allow-list:
    - Only `Assign` and bare-call `Expr` statements are allowed at all.
    - Every call must target a name in `APPROVED_FUNCTIONS` — currently
      `check_data_availability`, `get_database_schema`, `query_database`,
@@ -110,7 +133,7 @@ Each step:
      execution time (`_invoke_approved` remaps them to the callable's real
      parameter order) — a harmless local-model formatting slip shouldn't
      fail the whole turn when the call itself is already allow-listed safe.
-   - `CODE_AGENT_MAX_CHARS = 16000` caps program size.
+   - `CODE_AGENT_MAX_CHARS = 16000` caps program size. Average latency: $\sim 15\ \mu\text{s}$.
 3. **`_execute_program(...)`** actually calls the approved functions and
    collects `(name, result)` pairs. For `query_database(request=..., ...)`
    specifically, `request` is whatever string the orchestrating call chose
@@ -436,11 +459,40 @@ neither requiring another model call to detect:
   the tool output text.
 - Tools returned real, successful data, but the reply doesn't reflect it.
 
-Either mismatch can substitute a safer, evidence-grounded message for the
-model's own reply. This check, and the orchestration-level `step_failed`
-check in §3.1, both pattern-match on the exact wording other parts of the
-system produce — see §6 for why that coupling matters when changing evidence
-text elsewhere.
+### 3.9 Guardrails & Security Framework (Outlines + Pydantic)
+
+The application incorporates a centralized open-source guardrail layer
+(`services/guardrails.py`) powered by Outlines (`outlines==1.3.3`, `outlines_core==0.2.14`)
+and Pydantic:
+
+1. **Input Guardrail (`InputGuardrail`)**:
+   - Screened at the entrypoint of `run_general_chat` and `run_house_chat`.
+   - Regular expression and heuristic checks for prompt injection attacks,
+     jailbreak prompts (e.g. DAN mode, developer mode), null bytes, and
+     unauthorized system overrides.
+   - Microsecond latency ($\sim 22\ \mu\text{s}$).
+
+2. **Code Agent Guardrail (`CodeAgentGuardrail`)**:
+   - Outlines schema / AST parser enforcing approved-function call constraints.
+   - Prevents code generation containing `import`, control loops, or attribute
+     access.
+   - Microsecond latency ($\sim 15\ \mu\text{s}$).
+
+3. **SQL Guardrail (`CodeAgentGuardrail::validate_sql`)**:
+   - Restricts all generated SQL queries to read-only `SELECT` or `WITH` queries.
+   - Blocks destructive or modifying operations (`DROP`, `DELETE`, `UPDATE`,
+     `INSERT`, `ATTACH`, `LOAD`, etc.).
+   - Microsecond latency ($\sim 17\ \mu\text{s}$).
+
+4. **Output Grounding Guardrail (`OutputGroundingGuardrail`)**:
+   - Enforces valid real estate metric boundaries (Walk Score, Bike Score,
+     Transit Score in $[0, 100]$).
+   - Replaces fabricated missing score claims with explicit "unavailable in data"
+     disclaimers.
+   - Microsecond latency ($\sim 9\ \mu\text{s}$).
+
+Total combined guardrail overhead per user turn is $\sim 0.065\ \text{ms}$
+($< 0.005\%$ of total request latency), introducing zero perceptible degradation.
 
 ---
 
@@ -448,24 +500,25 @@ text elsewhere.
 
 | Stage | Location | Deterministic or LLM |
 |---|---|---|
+| Input sanitization & prompt injection guard | `services/guardrails.py::InputGuardrail` | Deterministic (Outlines / regex) |
 | House vs. General routing | `main.py` (endpoint selection) | Neither — fixed by which UI panel called it |
 | Concept / operation matching | `db/schema_catalog.py::semantic_matches`, `agents/query_planner.py::_select_operation` | Deterministic |
 | Entity resolution | `db/schema_catalog.py::resolve_request_entities` | Deterministic, grounded in live DB values |
 | Join-path selection | `db/schema_catalog.py::relationship_path` | Deterministic (Dijkstra over declared graph) |
 | Orchestration program generation | `agents/general_agent.py::_generate_program` | LLM |
-| Orchestration program sandboxing | `agents/general_agent.py::_validate_program` | Deterministic (AST allow-list) |
+| Orchestration program sandboxing | `services/guardrails.py::CodeAgentGuardrail`, `agents/general_agent.py::_validate_program` | Deterministic (AST allow-list) |
 | Orchestration continue/stop decision | `agents/general_agent.py` (`step_failed` check) | Deterministic (substring match) |
 | Data-model retrieval (RAG) | `db/vector_store.py` | Deterministic retrieval, with lexical fallback |
 | Data-model retrieval (targeted) | `db/schema_catalog.py::build_query_context` | Deterministic |
 | SQL text generation | `agents/tools.py::generate_sql` | LLM |
 | SQL output cleanup | `agents/tools.py::_clean_sql` | Deterministic |
-| SQL security/shape check | `agents/tools.py::validate_sql` | Deterministic (hard allow-list) |
+| SQL security/shape check | `services/guardrails.py::CodeAgentGuardrail`, `agents/tools.py::validate_sql` | Deterministic (hard allow-list) |
 | SQL plan-conformance check | `agents/tools.py::_validate_sql_against_plan` | Deterministic |
 | SQL fallback compilation | `agents/tools.py::_compile_sql_from_plan` | Deterministic |
 | SQL execution | `db/duckdb_store.py::query` | Deterministic (direct DB call) |
 | Zero-rows / error messaging | `agents/tools.py::run_code_query` | Deterministic |
 | Final answer prose | `agents/general_agent.py::_write_final_answer` | LLM |
-| Reply-vs-evidence check | `agents/response_validator.py::validate_response` | Deterministic |
+| Reply-vs-evidence check & score bounds | `services/guardrails.py::OutputGroundingGuardrail`, `agents/response_validator.py` | Deterministic |
 
 The only two LLM-driven steps in the entire pipeline are **SQL text
 generation** and **final-answer prose**. Both are genuinely open-ended

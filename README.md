@@ -16,30 +16,34 @@ grading the first one.
 
 ```
 request text
+  -> InputGuardrail                                  [deterministic, Outlines/regex]
+       prompt injection screening, jailbreak detection, length/null-byte sanitization
   -> build_query_plan()                              [deterministic]
        concept + operation match, entity resolution, relationship-path search
   -> QueryPlan (tables, joins, filters, operation) — now authoritative
-  -> generate_sql()                                   [LLM]
-       writes one SELECT statement from the plan text
-  -> validate_sql() + _validate_sql_against_plan()     [deterministic]
-       security/shape check, then plan-conformance check
+  -> generate_program() / generate_sql()             [LLM]
+       writes Python code agent step or SELECT statement from the plan text
+  -> CodeAgentGuardrail (AST) + SQL validation        [deterministic, AST/Outlines]
+       AST sandboxing, read-only SQL check (SELECT/WITH only), plan-conformance check
        - valid -> execute against DuckDB
        - invalid/empty after 3 attempts -> _compile_sql_from_plan()  [deterministic]
              same QueryPlan, template compiler, no LLM -> execute against DuckDB
   -> final answer                                      [LLM]
        writes prose from the executed evidence only
-  -> response_validator.py                             [deterministic]
-       flags a reply that contradicts its own evidence
+  -> response_validator.py + OutputGroundingGuardrail  [deterministic]
+       flags ungrounded claims, enforces metric bounds (Walk/Bike scores in [0, 100])
 ```
 
 | Stage | Deterministic or LLM |
 |---|---|
-| Routing — tables, joins, entities, operation | Deterministic |
-| SQL text generation | LLM |
-| SQL validation — security + plan-conformance | Deterministic |
-| Fallback SQL compilation | Deterministic |
-| Final answer | LLM |
-| Reply-vs-evidence check | Deterministic |
+| Input sanitization & prompt injection guard | Deterministic (`InputGuardrail`) |
+| Routing — tables, joins, entities, operation | Deterministic (`build_query_plan`) |
+| Code program / SQL generation | LLM |
+| Code AST sandboxing & SQL safety checks | Deterministic (`CodeAgentGuardrail`) |
+| SQL plan-conformance check | Deterministic (`_validate_sql_against_plan`) |
+| Fallback SQL compilation | Deterministic (`_compile_sql_from_plan`) |
+| Final answer prose | LLM |
+| Reply-vs-evidence check & score bounding | Deterministic (`OutputGroundingGuardrail`) |
 
 The split holds because every LLM call on this path — SQL generation,
 orchestration, and the final answer — runs through the same local, quantized
@@ -750,15 +754,17 @@ If the locally ingested network does not contain a continuous path between the s
 
 ---
 
-## Developer scripts
+## Developer scripts & tests
 
-These utility scripts are intended for debugging, data validation, and evaluation. Run them from the repository root.
+These utility scripts and tests are intended for debugging, data validation, evaluation, and regression testing. Run them from the repository root:
 
+- `tests/test_guardrails.py`: Full test suite for multi-layer guardrails (Input prompt injection defense, Code AST sandboxing, read-only SQL validation, output grounding) plus microsecond latency benchmark. Usage: `python tests/test_guardrails.py`
+- `tests/test_bikepg_h_visualization.py`: Regression checks verifying BikePGH visualization specs and styling matches ground truth. Usage: `python tests/test_bikepg_h_visualization.py`
+- `run_eval.py`: Agent evaluation pipeline. Runs the golden set examples against real agents or mock fixture DB, scores them, and writes timestamped reports to `eval/reports/`. Usage: `python run_eval.py [--mock]`
 - `debug_bike_route.py`: Lightweight checks for BikePGH city-key normalization and routing helpers. Usage: `python debug_bike_route.py`
 - `debug_flood_query.py`: Step-by-step SQL debugger for the flood-risk query; runs CTEs, prints table counts, join diagnostics, and sample rows to pinpoint where the chain breaks. Usage: `python debug_flood_query.py`
-- `debug_nri_columns.py`: Inspect the NRI shapefile's DBF column names and show NULL counts for hazard columns in `nri_tracts`. Attempts to read the shapefile with GeoPandas when available. Usage: `python debug_nri_columns.py`
+- `debug_nri_columns.py`: Inspect the NRI shapefile's DBF column names and show NULL counts for hazard columns in `nri_tracts`. Usage: `python debug_nri_columns.py`
 - `diagnose_msa.py`: Finds `X`-coded MSA rows that don't match `cbsa_counties`, suggests best CBSA candidates using a fuzzy normalizer, and can apply fixes with `--apply`. Usage: `python diagnose_msa.py [--apply]`
-- `run_eval.py`: Agent evaluation pipeline (already described above). Runs the golden set examples, scores them, and writes timestamped reports to `eval/reports/`
 
 
 
