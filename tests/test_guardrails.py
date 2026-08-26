@@ -26,7 +26,12 @@ from services.guardrails import (
     OUTLINES_AVAILABLE,
 )
 from agents.general_agent import APPROVED_FUNCTIONS, run_general_chat
-from agents.house_agent import run_house_chat
+from agents.house_agent import (
+    HouseCodeAgentProgramError,
+    _execute_house_program,
+    _validate_house_program,
+    run_house_chat,
+)
 
 
 def test_outlines_presence():
@@ -91,6 +96,34 @@ def test_code_agent_guardrail():
     assert not res.passed, "Control flow in code agent must be blocked"
 
     print("  ✓ CodeAgentGuardrail enforced AST boundaries and approved-function sandboxing.")
+
+
+def test_house_code_agent_program():
+    print("Testing House Code Agent program validation and execution...")
+    approved = {"get_house_details", "query_database"}
+    valid_prog = (
+        "details = get_house_details()\n"
+        "final_result = query_database(request='custom house analysis')"
+    )
+    _validate_house_program(valid_prog, approved)
+
+    result, calls = _execute_house_program(
+        valid_prog,
+        {
+            "get_house_details": lambda: "details",
+            "query_database": lambda request: request,
+        },
+    )
+    assert result == "custom house analysis"
+    assert [name for name, _ in calls] == ["get_house_details", "query_database"]
+
+    try:
+        _validate_house_program("final_result = open('secret.txt')", approved)
+    except HouseCodeAgentProgramError:
+        pass
+    else:
+        raise AssertionError("House code agent must reject unapproved calls")
+    print("  ✓ House Code Agent validated and executed only approved calls.")
 
 
 def test_sql_guardrail():
@@ -222,6 +255,7 @@ def main():
     test_outlines_presence()
     test_input_guardrail()
     test_code_agent_guardrail()
+    test_house_code_agent_program()
     test_sql_guardrail()
     test_output_grounding_guardrail()
     test_end_to_end_general_chat_guardrail()

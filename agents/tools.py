@@ -189,6 +189,31 @@ def make_house_tools(house_id: str):
             estimate_price_with_code, get_nearby_sold_homes]
 
 
+def get_house_details(house_id: str) -> str:
+    """Get structured details for a house without creating a tool binding."""
+    return make_house_tools(house_id)[0].invoke({"_": ""})
+
+
+def get_nri_risk_data(house_id: str) -> str:
+    """Get FEMA National Risk Index data for a house without a tool binding."""
+    return make_house_tools(house_id)[1].invoke({"_": ""})
+
+
+def search_house_documents(house_id: str, query: str) -> str:
+    """Search documents for a house without creating a tool binding."""
+    return make_house_tools(house_id)[2].invoke({"query": query})
+
+
+def estimate_price_with_code(house_id: str) -> str:
+    """Estimate a house price without creating a tool binding."""
+    return make_house_tools(house_id)[3].invoke({"_": ""})
+
+
+def get_nearby_sold_homes(house_id: str) -> str:
+    """Get sold comparables without creating a tool binding."""
+    return make_house_tools(house_id)[4].invoke({"_": ""})
+
+
 _FORBIDDEN = re.compile(
     r"\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE|COPY|EXPORT|ATTACH|DETACH|INSTALL|LOAD|CALL|PRAGMA)\b",
     re.I,

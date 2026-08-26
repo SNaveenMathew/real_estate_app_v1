@@ -65,6 +65,37 @@ GENERAL_CHAT_REPLY_CHARS = Histogram(
     buckets=(100, 250, 500, 1000, 2000, 4000, 8000, 16000),
 )
 
+HOUSE_CHAT_REQUESTS = Counter(
+    "house_chat_requests_total",
+    "Total House Chat requests.",
+)
+HOUSE_CHAT_ERRORS = Counter(
+    "house_chat_errors_total",
+    "Total House Chat requests that failed.",
+)
+HOUSE_CHAT_LATENCY = Histogram(
+    "house_chat_request_duration_seconds",
+    "House Chat end-to-end request latency in seconds.",
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300),
+)
+HOUSE_CHAT_LLM_CALLS = Counter(
+    "house_chat_llm_calls_total",
+    "LLM invocations performed by House Chat.",
+)
+HOUSE_CHAT_TOOL_CALLS = Counter(
+    "house_chat_tool_calls_total",
+    "Tool calls performed by House Chat.",
+)
+HOUSE_CHAT_VALIDATION_BLOCKS = Counter(
+    "house_chat_validation_blocks_total",
+    "House Chat responses changed by the response validator.",
+)
+HOUSE_CHAT_REPLY_CHARS = Histogram(
+    "house_chat_reply_characters",
+    "Characters in final House Chat responses.",
+    buckets=(100, 250, 500, 1000, 2000, 4000, 8000, 16000),
+)
+
 
 class EvaluationTraceExporter:
     """In-process OTEL exporter used to persist complete eval traces locally."""
@@ -500,6 +531,82 @@ def record_general_chat_error(latency_seconds: float) -> None:
     GENERAL_CHAT_REQUESTS.inc()
     GENERAL_CHAT_ERRORS.inc()
     GENERAL_CHAT_LATENCY.observe(latency_seconds)
+
+
+def start_house_chat(message: str, house_id: str, history_length: int):
+    """Start the root House Chat span and return its context + trace ID."""
+    attrs = {
+        "openinference.span.kind": "CHAIN",
+        "house_chat.message_length": len(message),
+        "house_chat.history_length": history_length,
+        "house_chat.house_id": house_id,
+    }
+    context = trace_span("house_chat", attributes=attrs)
+    span = context.__enter__()
+    set_span_input(
+        span,
+        {"message": message, "house_id": house_id, "history_length": history_length},
+        mime_type="application/json",
+    )
+    return context, span, get_trace_id(span), get_trace_url(get_trace_id(span))
+
+
+def end_house_chat(
+    root_span,
+    *,
+    trace_id: str | None = None,
+    reply: str | None = None,
+    started_at: float | None = None,
+    tool_call_count: int = 0,
+    error: BaseException | None = None,
+) -> None:
+    """Finalize a House Chat trace."""
+    if root_span is not None:
+        try:
+            root_span.set_attribute("house_chat.tool_call_count", tool_call_count)
+            if trace_id:
+                root_span.set_attribute("house_chat.trace_id", trace_id)
+            if started_at is not None:
+                root_span.set_attribute("house_chat.latency_seconds", elapsed(started_at))
+            if reply is not None:
+                root_span.set_attribute("house_chat.reply_length", len(reply))
+                set_span_output(root_span, reply)
+            if error is not None:
+                mark_span_error(root_span, error)
+        except Exception:
+            logger.debug("Unable to finalize Phoenix House Chat span", exc_info=True)
+    if started_at is not None:
+        if error is None:
+            HOUSE_CHAT_REQUESTS.inc()
+            HOUSE_CHAT_LATENCY.observe(elapsed(started_at))
+            HOUSE_CHAT_TOOL_CALLS.inc(tool_call_count)
+        else:
+            HOUSE_CHAT_REQUESTS.inc()
+            HOUSE_CHAT_ERRORS.inc()
+            HOUSE_CHAT_LATENCY.observe(elapsed(started_at))
+
+
+def record_house_chat_success(
+    *,
+    latency_seconds: float,
+    llm_calls: int,
+    tool_calls: int,
+    reply_chars: int,
+    validation_changed: bool,
+) -> None:
+    HOUSE_CHAT_REQUESTS.inc()
+    HOUSE_CHAT_LATENCY.observe(latency_seconds)
+    HOUSE_CHAT_LLM_CALLS.inc(llm_calls)
+    HOUSE_CHAT_TOOL_CALLS.inc(tool_calls)
+    HOUSE_CHAT_REPLY_CHARS.observe(reply_chars)
+    if validation_changed:
+        HOUSE_CHAT_VALIDATION_BLOCKS.inc()
+
+
+def record_house_chat_error(latency_seconds: float) -> None:
+    HOUSE_CHAT_REQUESTS.inc()
+    HOUSE_CHAT_ERRORS.inc()
+    HOUSE_CHAT_LATENCY.observe(latency_seconds)
 
 
 def elapsed(started_at: float) -> float:
