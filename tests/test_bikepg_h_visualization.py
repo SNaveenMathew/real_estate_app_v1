@@ -4,8 +4,11 @@
 Run from the app root after installing the usual requirements:
     python tests/test_bikepg_h_visualization.py
 """
+import sys
 from pathlib import Path
 import importlib.util
+
+sys.path.insert(0, str(Path(__file__).parents[1]))
 
 EXPECTED = {
     "bike_lanes": ("Bike Lanes", "steelblue"),
