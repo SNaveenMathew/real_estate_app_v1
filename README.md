@@ -207,6 +207,11 @@ llama-server -hf DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M \
   -ngl 999 -c 28672 -fa on --cache-type-k q8_0 --cache-type-v q8_0
 ```
 
+```
+llama-server -hf unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL -c 24576 \
+  --cache-type-k q8_0 --cache-type-v q8_0 -ngl -1 -fa on --port 8080
+```
+
 If you prefer Ollama, it remains supported as an alternative. Update the relevant
 settings in `.env` / `config.py` and run:
 

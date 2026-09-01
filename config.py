@@ -11,7 +11,7 @@ class Settings(BaseSettings):
 
     # ── llama-server ──────────────────────────────────────────────────────────────
     llama_server_base_url: str = "http://127.0.0.1:8080/v1"
-    llama_server_model: str = "DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M"          # swap for llama3.2, mistral, etc.
+    llama_server_model: str = "DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M"          # options: DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M, unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL, llama3.2, mistral, etc.
 
     # ── LLM generation limits ───────────────────────────────────────────────
     # Defensive bounds applied to every local LLM call (general agent, house
