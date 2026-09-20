@@ -34,6 +34,7 @@ query-planning/SQL pipeline described here.
 5. [Why the boundary is where it is](#5-why-the-boundary-is-where-it-is)
 6. [Known boundaries and sharp edges](#6-known-boundaries-and-sharp-edges)
 7. [Extending the agent](#7-extending-the-agent)
+8. [The catalog is a store, and how it changes](#8-the-catalog-is-a-store-and-how-it-changes)
 
 ---
 
@@ -635,21 +636,23 @@ Honest limitations of the current design, not open bugs:
 
 ## 7. Extending the agent
 
-For adding a new *data set* end-to-end (loader, table, catalog entry), see
-**Adding New Data Sets** in `README.md` — that process is unchanged by
-anything in this document.
+For adding a new *data set*, see **Adding New Data Sets** in `README.md`: from
+the browser (the Data page) or, for built-in sources loaded by script, a loader
+plus an entry in `db/catalog_seed.py`. Since the catalog became a store (§8),
+`db/schema_catalog.py` is a view over it and is not edited to add a source.
 
 For extending the *agent's* behavior specifically:
 
 - **A new aggregate/rank operation** — add it to the relevant concept's
-  `operations=(...)` tuple in `db/schema_catalog.py` using the existing
+  `operations=(...)` tuple in `db/catalog_seed.py` (built-in) using the existing
   `AVG`/`SUM`/`RANK_DESC`/etc. helpers. If it's a `RANK_DESC` with
   `group_by=`, decide up front whether the projection is a real aggregate
   (`"AVG(x)"`) or a bare per-row column (`"x"`) — §3.6 explains why that
   distinction determines whether `_compile_sql_from_plan` emits a `GROUP BY`
   correctly. Both shapes are already supported; you don't need new compiler
   code, just a catalog entry that matches one of the two existing patterns.
-- **A new relationship** — add a `Relationship(...)` entry. If its key is a
+- **A new relationship** — add a `Relationship(...)` entry to `db/catalog_seed.py`,
+  or approve one on the Data page. If its key is a
   single bare column on each side, no further consideration is needed. If
   either side is a compound expression (concatenation, a function call),
   `_qualify_join_expr` already handles per-identifier qualification
@@ -667,3 +670,67 @@ For extending the *agent's* behavior specifically:
   belongs in `_validate_sql_against_plan` or `_validate_program` — both
   already-existing, already-tested deterministic gates — not a new prompt
   asking the model to review its own output. §5 covers why.
+
+---
+
+## 8. The catalog is a store, and how it changes
+
+### 8.1 One layer, in a data store
+
+There is one catalog. Built-in sources and datasets added later are the same kind of object: rows in the
+`catalog_*` tables of the application's DuckDB file (`catalog_store.py`). `origin` is provenance, not a
+separate layer. `db/catalog_seed.py` only seeds the built-in rows; a seed refresh never overwrites a row
+that was edited. `db/schema_catalog.py` keeps every public name the rest of the system uses and becomes a
+thin in-memory view: `TABLES`, `RELATIONSHIPS`, `SEMANTIC_GLOSSARY` and `ENTITY_DOMAINS` are live
+containers (module `__getattr__`) that load lazily, refresh in place, and reload when the connection is
+replaced. The planner, SQL generator, both validators and the availability report are unchanged code
+reading that view. A comparison of the store-backed module against the previous static module (order,
+planner output, generated prompts, join paths, and a query built from every built-in alias) showed no
+differences.
+
+### 8.2 How a change reaches the agents
+
+An approved change is written inside one `catalog_transaction()`: the physical DDL, the catalog rows and a
+version bump commit together (or not at all), then the registry reloads once. Each agent turn already
+reads the catalog fresh, so:
+
+- **General Chat** sees new tables through the planner (`semantic_matches`, `relationship_path`), the
+  SQL allow-list (`schema.list_table_names`), the availability report and a `USER-ADDED DATASETS` block.
+- **House Chat** has a fixed, AST-validated function set, so it gets a dynamic prompt section and one
+  approved function, `get_linked_dataset_records`, built from the live relationship graph
+  (`schema.house_link_plan`).
+- **Metadata retrieval** re-synchronizes the vector index when the catalog version changes and embeds only
+  changed documents; with Ollama down it falls back to lexical search over the live catalog.
+
+Two catalog facts exist so that new concepts cannot disturb old ones: `scope_guard: false` (measure columns
+of generated concepts are legitimately filterable, so `_validate_sql_against_plan` does not treat them as
+"unplanned filters") and `overrides` (a concept whose phrase extends another's declares precedence; the
+planner honors it only when every phrase the overridden concept matched lies inside the overriding phrase).
+
+### 8.3 Updating the catalog: deterministic-vs-model inventory
+
+| Step | Who decides |
+|---|---|
+| Read a file, infer types, sanitize identifiers | deterministic |
+| Detect key kinds (tract/county/ZIP FIPS, city, address, lat/lon) and guess roles | deterministic |
+| Which columns of which tables might join, and after what normalization | deterministic (fixed set of transforms) |
+| Whether they do join: match rate both ways, fan-out, cardinality, confidence | measured with SQL |
+| Tract from coordinates, geocoding, derived key columns | deterministic (`geo_utils`, `geocoder`, SQL) |
+| Column descriptions, units, synonyms, dataset title (**optional**) | model drafts; validators check; a person edits |
+| Annotate a candidate with a plausibility note (**optional, off**) | model; annotation only |
+| Approve a table or a link; change cardinality/preferred | a person |
+
+This is the §5 boundary applied to onboarding: the model gets only what language is good for, its output is
+constrained and validated, and it is never a gate.
+
+### 8.4 Orchestration and model routing
+
+The pipeline is a fixed sequence (read -> profile -> describe -> enrich -> analyze -> review -> publish), so
+it is orchestrated as a deterministic workflow (`dataset_onboarding.py`), not an LLM planner or a
+multi-agent supervisor: an LLM router would add a failure mode to a decision that is already known
+statically. The only routing is by capability: `catalog_llm.ModelRouter` maps a tier (`draft`, `judge`) to an
+ordered endpoint chain with health checks and fallback, serializes calls per endpoint, and returns
+`ok=False` (never raises) when nothing works, in which case the workflow continues with rule-based defaults.
+Because a person reviews every proposal, the cost of a poor draft is bounded by a correction, which is what
+makes a small local model sufficient for this role; `python -m services.catalog_llm --selftest` measures
+whether a given model is.

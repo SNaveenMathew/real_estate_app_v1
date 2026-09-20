@@ -437,26 +437,192 @@ The vector database (ChromaDB) grows automatically as you paste descriptions in 
 
 ## Adding New Data Sets
 
-The architecture is designed to grow. To add a new data set:
+There are two ways in, and both end in the same place: rows in the **unified catalog**
+(the `catalog_*` tables of `data/real_estate.duckdb`).
+
+**From the browser, no code: the Data page** (`/data`, or *Data model* in the top bar). Upload a
+file, describe it, review the links the system proposes, approve. Use this for CSV / Excel / JSON /
+Parquet / GeoJSON / shapefile data. See [The Data page](#the-data-page).
+
+**As a built-in source, in code**: for data you load with `setup_data.py`:
 
 1. Add a new `load_xyz()` function in `services/data_loader.py`
-2. Add a new table in `db/duckdb_store.py` → `_ensure_schema()`
-3. Add ONE `TableMeta` entry (description + notes on any non-obvious columns)
-   in `db/schema_catalog.py`. If it joins to an existing table, add one
-   `Relationship` entry alongside it. You do NOT need to write a new agent
-   tool or teach the LLM a new SQL pattern — `query_database` plus the schema
-   catalog is enough for the agent to work out how to query it, including
-   joins to other tables.
-4. Call `setup_data.py` to load it
+2. Add a new table in `db/duckdb_store.py` -> `_ensure_schema()`
+3. Add ONE `TableMeta` entry (description + notes on any non-obvious columns) to
+   **`db/catalog_seed.py`**, plus one `Relationship` if it joins to an existing table. You do NOT
+   need to write a new agent tool or teach the LLM a new SQL pattern: `query_database` plus the
+   catalog is enough for the agent to work out how to query it, including joins.
+4. Call `setup_data.py` to load it. The seed is copied into the catalog store on the next start
+   (see [The catalog is a store](#the-catalog-is-a-store)).
 
-`db/schema_catalog.py` is the single source of truth for what the agent knows
-about the data: it combines live introspection of the running database
-(so column names/types can't go stale) with curated notes for things no
-amount of introspection can tell you — which columns are reliably populated,
-which joins need a non-obvious expression, which tables need a default filter
-to be meaningful. `check_data_availability`, `get_database_schema`,
-`setup_data.py`'s summary, and the response validator's fallback message all
-read from it, so there's nothing else to keep in sync when you add a table.
+`db/schema_catalog.py` is the single, unified view of what the agent knows about the data: live
+introspection of the running database (so column names/types can't go stale) plus curated notes for
+things no introspection can tell you: which columns are reliably populated, which joins need a
+non-obvious expression, which tables need a default filter. `check_data_availability`,
+`get_database_schema`, `setup_data.py`'s summary and the response validator's fallback message all
+read from it, so there is nothing else to keep in sync when you add a table.
+
+---
+
+## The Data page
+
+`http://localhost:8000/data` has two halves.
+
+**The catalog map** (left) draws every table the agent can query as a card, grouped by area, with the
+join relationships between them: grey = built in, blue = added by you, amber dashed = awaiting your
+review; crow's foot = "many", bar = "one". Click a table or a link for its details; a link you approved
+keeps the evidence it was approved on. Lanes are ordered to keep linked tables close together.
+
+**The workbench** (right) is where data is added:
+
+1. **Upload**: CSV/TSV, Excel (`.xlsx`/`.xls`, header row detected), JSON/JSON-lines, Parquet,
+   GeoJSON, GeoPackage or a zipped shapefile (reprojected to EPSG:4326, geometry kept as GeoJSON like
+   `bike_routes`). Files are read as text first so FIPS/ZIP/parcel IDs keep their leading zeros, and
+   column names become safe identifiers (the SQL guards reject words like `update` or `load`; the
+   original header is kept). Nothing enters the catalog yet: the data is staged as `stg_<id>`.
+2. **Describe**: name, table name, what it holds, grain ("one row per census tract"), area, and per
+   column a role, description, unit and *synonyms*, the way you would ask about it in chat
+   ("walkability index"). Optional: **Draft with the local model** (see
+   [Catalog model](#catalog-model-optional)) and **enrichments**: *Add census tract from
+   coordinates* (point-in-polygon via `services/geo_utils.py`) or *Geocode addresses* (US Census
+   geocoder via `services/geocoder.py`; cached in `geocode_cache`; capped per run).
+3. **Find links**: deterministic, no LLM. Every column is tested against every agent-visible table in
+   the catalog (including datasets you added earlier) after a small fixed set of value normalizations:
+   zero-pad, first/last N characters, trim/upper/lower, and a case-insensitive comparison that
+   normalizes both sides. Street addresses are also linked to `houses` with the same normalization
+   tiers as sold-home matching.
+4. **Review**: each proposal shows what a person needs to verify it: *your value -> after the rule ->
+   the rows it lands on*, both match rates (your values found in the target; target rows covered by
+   your data), fan-out, cardinality, the values that did **not** match, and warnings. Links that share
+   a normalization are grouped. You can adjust cardinality, "preferred", and the note before approving.
+5. **Approve**: the table first, then each link. Approval is ONE atomic catalog transaction: it creates
+   the data table, registers the table, columns, concepts and entity domains, materializes any derived
+   key column the link needs, registers the relationship together with its evidence, and reloads the
+   in-memory catalog on commit. **General Chat and House Chat read the catalog on every turn, so the
+   change is live immediately, with no restart.** A link can be **revoked** and a dataset **retired**
+   at any time (the data table is kept, hidden from the assistant).
+
+### What the two chats gain
+
+- **General Chat**: the planner, both SQL validators, the availability report and the metadata
+  retrieval read the live catalog, so the new table is queryable, its measures are found through the
+  synonyms you gave, and a `USER-ADDED DATASETS` block joins the data-availability context.
+- **House Chat**: a dynamic prompt section lists the datasets linked to houses, and a new approved
+  function `get_linked_dataset_records(dataset="")` returns the rows linked to the open house by
+  following the approved relationship graph (directly, or through `nri_tracts` / `census_tracts`).
+
+### Safety properties
+
+- Nothing reaches the agents before approval, and a link cannot be approved before its table.
+- A derived key column is added only on approval, with exactly the SQL rule the examples showed.
+- `geocode_dataframe` runs `UPDATE sold_homes ... WHERE sale_id = ?` whenever the frame has a `sale_id`
+  column; the Data page always passes a non-existent `sale_id_col`, so uploaded data can never alter
+  real sales.
+- Uploaded values are data, not markup or instructions: the page renders with `textContent`, model
+  prompts label the profile as data, and model output is schema-constrained, validated and reviewed.
+- Component codes (county `001`, tract code `040100`) are not offered as join keys: they repeat across
+  states.
+- **Alias precedence**: if a new phrase extends an existing concept's phrase ("walkability index" over
+  "walkability"), the new concept declares `overrides: [house_walk_score]`, so questions using the new
+  phrase don't also pull in the old concept's tables and null-policy filter. It is disclosed at review.
+  Existing concepts are untouched: a sweep of a query built from every built-in alias gives identical
+  results before and after.
+
+### Limits
+
+- Single-user, local. Work runs on the event-loop thread like the rest of the app (one shared DuckDB
+  connection), so a very large upload or a geocoding run blocks other requests while it works. Caps:
+  `ONBOARDING_MAX_UPLOAD_MB`, `ONBOARDING_GEOCODE_ROW_CAP`, `ONBOARDING_API_ROW_CAP`.
+- Links are equality joins on normalized keys. Polygon layers are not modeled as spatial joins; for
+  point data use *Add census tract from coordinates*. Text keys are matched exactly (after
+  trim/case), not fuzzily.
+- A published dataset is read-only in the UI; retire it and upload again to change it.
+
+---
+
+## The catalog is a store
+
+Built-in sources and datasets added on the Data page are the same kind of object. The catalog lives
+in the application's own DuckDB file:
+
+| Table | Holds |
+|---|---|
+| `catalog_tables`, `catalog_columns` | tables, grain, hints, per-column notes (role, unit, original header) |
+| `catalog_relationships` | the join graph, with the evidence each link was approved on |
+| `catalog_concepts` | semantic concepts: aliases, operations, filters, `overrides` |
+| `catalog_entity_domains` | values recognized inside questions |
+| `catalog_meta`, `catalog_audit` | a version counter that changes on every change; who changed what |
+| `catalog_datasets`, `catalog_proposals` | the *workflow*: what was uploaded and what awaits review |
+
+`origin` (`builtin` / `upload`) is provenance, not a separate layer. `db/catalog_seed.py` seeds the
+built-in rows on first run; on upgrade an unmodified built-in row is refreshed when its seed definition
+changes, and a row you edited (`user_modified`) is never overwritten. Adding a source therefore no longer
+means editing `db/schema_catalog.py`.
+
+`db/schema_catalog.py` keeps its public API (`TABLES`, `RELATIONSHIPS`, `SEMANTIC_GLOSSARY`,
+`ENTITY_DOMAINS`, and every planner helper). Those four names are live containers that load lazily,
+refresh **in place** when the catalog changes, and reload automatically when the DuckDB connection is
+replaced (the evaluation harness closes it and points at a fixture DB; the fixture reseeds itself).
+Changes made through `schema.register_*` are transactional and reload once, on commit.
+
+The metadata vector index syncs incrementally: it re-embeds only documents whose text changed, only when
+the catalog version changes, and if Ollama is down the retrieval falls back to a lexical search over the
+live catalog. Inspect the store any time:
+
+```sql
+SELECT origin, name, status FROM catalog_tables ORDER BY ord;
+SELECT rel_key, origin, approved_at FROM catalog_relationships WHERE origin <> 'builtin';
+SELECT ts, action, object_key FROM catalog_audit ORDER BY id DESC LIMIT 20;
+```
+
+---
+
+## Catalog model (optional)
+
+The Data page can ask a local model to **draft wording** for an upload: titles, column descriptions,
+roles, units, synonyms. It never decides what joins, sets a cardinality or confidence, writes SQL, or
+touches the catalog: those come from measured evidence and a person's approval. Without a model the page
+works the same, with rule-based defaults.
+
+**Design** (`services/catalog_llm.py`): the catalog pipeline is a fixed sequence, so it is a
+deterministic workflow, not an agent. A *capability router* maps a task tier to an ordered chain of
+endpoints, with cached health checks and automatic fallback:
+
+| Tier | Task | Chain |
+|---|---|---|
+| `draft` | describe a dataset | `CATALOG_DRAFT_*` -> the chat llama-server |
+| `judge` (off by default) | annotate link candidates with a plausibility note | `CATALOG_JUDGE_*` -> draft -> chat |
+
+Every call is schema-constrained (`response_format: json_schema` -> grammar-constrained decoding, with a
+plain-JSON fallback), validated (pydantic, then deterministic checks: invented column names dropped,
+synonyms sanitized, full coverage required), bounded (temperature 0, `max_tokens`, your stop sequences,
+one repair pass) and serialized (one call in flight per endpoint, so a draft cannot flood a shared chat
+server). If nothing is reachable or the output stays invalid, the page carries on without it.
+
+```bash
+python -m services.catalog_llm --status                       # resolved endpoint chain + health
+python -m services.catalog_llm --selftest                     # score the draft tier on 4 sample datasets
+python -m services.catalog_llm --selftest --base-url http://127.0.0.1:8081/v1 --model <name>   # try a candidate
+```
+
+The self-test reports valid-JSON rate, first-try rate, column coverage, agreement of the model's roles
+with a reference, synonym rate and latency, and returns PASS/FAIL against fixed thresholds. Judge a model
+by that, not by its name.
+
+**Fitting models into 16 GB.** Approximate weights at Q4_K_M are 0.6 GB per billion parameters (Q5_K_M
+0.7, Q8_0 1.1); add the KV cache (an 8B-class GQA model at 8k context is about 1.2 GB in fp16, half that
+with `-ctk q8_0 -ctv q8_0 -fa`) and roughly 0.4 GB per process. A ~26B model at Q3 already uses most of
+16 GB, so a second GPU-resident model needs room made for it:
+
+| Setup | VRAM cost | Notes |
+|---|---|---|
+| **A. Share the chat server** (default) | none | drafts queue behind chat requests; fine for occasional use |
+| **B. Catalog model on CPU** (`llama-server -ngl 0 --port 8081`) | none | a 4-8B instruct model at Q4/Q5; tens of seconds per dataset, which is fine for an offline, human-paced step |
+| **C. Two GPU-resident models** | ~4 GB (4B) to ~6.5 GB (8B) | only if the chat model shrinks, e.g. keep a MoE chat model's experts on CPU (`--n-cpu-moe` / `-ot`, if your build supports it) |
+| **D. Time-slice** with a swapping proxy such as `llama-swap` | none, but a load pause | full VRAM for whichever model is needed |
+
+Point `CATALOG_DRAFT_BASE_URL` at the second server. Prefer a non-thinking instruct variant at Q4 or
+higher for structured output; `CATALOG_LLM_DISABLE_THINKING=true` (default) asks for that.
 
 ---
 
@@ -469,6 +635,9 @@ setup_data.py         One-time data loader script
 run_eval.py            Agent evaluation pipeline entry point
 update_eval_ground_truth.py  Regenerate golden expectations from fixture SQL
 
+api/
+  onboarding.py       Data page HTTP API (/api/onboarding/*)
+
 agents/
   tools.py            LangChain tools (SQL, vector search, price estimation)
   query_planner.py    Deterministic analytical query planning and semantic mappings
@@ -478,7 +647,10 @@ agents/
 
 db/
   duckdb_store.py     All SQL queries and schema management
-  schema_catalog.py   Metadata layer — table/column notes + join graph for the agent
+  schema_catalog.py   Unified catalog: live registry + planner support (reads the store)
+  catalog_store.py    Catalog persistence in DuckDB (catalog_* tables), seed sync, workflow state
+  catalog_seed.py     Built-in table/relationship/concept definitions (seed only)
+  catalog_model.py    Catalog dataclasses + concept DSL
   vector_store.py     ChromaDB — embed, store, search text documents
 
 services/
@@ -487,6 +659,11 @@ services/
   crime_taxonomy.py   Standardized crime categories + severity weights
   layers.py           Viewport-scoped queries behind the Crime/NRI map layers
   geo_utils.py         Census tract FIPS assignment (shapefile or API)
+  dataset_readers.py  Generic readers for uploads (csv/excel/json/parquet/geo) + type inference
+  relationship_discovery.py  Deterministic link discovery with evidence and examples
+  dataset_onboarding.py      Data page workflow (stage, enrich, propose, approve, publish, revoke)
+  catalog_llm.py      Optional model router for drafting wording, plus --selftest
+  house_links.py      Rows of user-added datasets linked to one house (House Chat)
 
 eval/
   fixtures.py         Builds a small deterministic DB with hand-verifiable answers
@@ -501,6 +678,7 @@ static/
   index.html          Leaflet map + sidebar + chat UI
   style.css            App styles, BikePGH route visuals, route planner UI
   app.js              Frontend logic, layer toggles, bike route rendering
+  data.html/.css/.js  The Data page: catalog map + dataset workbench
 
 observability.py      Phoenix tracing + Prometheus metrics helper
 
@@ -554,6 +732,24 @@ The browser uses these main endpoints:
 
 The API also supports house document and photo operations; the interactive UI
 is the recommended way to use those endpoints.
+
+---
+
+### Data page endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/data` | The Data page |
+| GET | `/api/onboarding/catalog[?dataset_id=]` | The unified catalog (plus a draft overlay for a dataset under review) |
+| GET / POST | `/api/onboarding/datasets` | List datasets / upload a file (multipart) |
+| GET / PUT | `/api/onboarding/datasets/{id}` | Read a dataset / save its description |
+| POST | `/api/onboarding/datasets/{id}/draft` | Draft wording with the catalog model (optional) |
+| POST | `/api/onboarding/datasets/{id}/enrich` | `{"kind": "spatial_tract" \| "geocode"}` |
+| POST | `/api/onboarding/datasets/{id}/analyze` | Propose the table and its links, with evidence |
+| POST | `/api/onboarding/proposals/{id}/decision` | `{"decision": "approve" \| "reject", "edits": {...}}` |
+| POST | `/api/onboarding/relationships/revoke` | `{"rel_key": "..."}` |
+| POST | `/api/onboarding/datasets/{id}/retire` | Retire a published dataset / discard a draft |
+| GET / POST | `/api/onboarding/llm/status`, `/llm/selftest` | The catalog model router |
 
 ---
 
@@ -772,6 +968,16 @@ These utility scripts and tests are intended for debugging, data validation, eva
 - `diagnose_msa.py`: Finds `X`-coded MSA rows that don't match `cbsa_counties`, suggests best CBSA candidates using a fuzzy normalizer, and can apply fixes with `--apply`. Usage: `python diagnose_msa.py [--apply]`
 
 
+
+### Data page tests
+
+`tests/` runs against throw-away DuckDB files (no `data/` needed): `test_catalog_unified.py` (seeding,
+persistence, transactions, hot reload), `test_dataset_readers.py`, `test_onboarding_flow.py` (upload ->
+approve -> live, address/spatial/geocode paths), `test_onboarding_api.py` (through `main.app`),
+`test_agent_integration.py` (real General/House Chat code paths, vector index sync) and
+`test_catalog_llm.py` (router, repair, fallback, self-test scoring against a mock OpenAI-compatible server).
+
+---
 
 ## Crime-aware bike routing
 Crime-aware bike route requests are now executed deterministically in `agents/general_agent.py` when the user asks for a bike route that avoids crime/high-crime/dangerous areas. This prevents a local LLM from omitting the `find_bike_route` tool call. The resulting `find_bike_route` tool span is visible in observability, and its intermediate filtered BikePGH/crime visualization remains attached to the response.
