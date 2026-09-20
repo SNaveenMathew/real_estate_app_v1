@@ -1,4 +1,4 @@
-﻿/* ── App state ───────────────────────────────────────────────────────── */
+/* ── App state ───────────────────────────────────────────────────────── */
 const state = {
   selectedHouseId: null,
   houseChatHistory: {},   // {house_id: [{role, content}]}
@@ -703,17 +703,17 @@ document.getElementById('btn-upload-photo').addEventListener('click', async () =
 });
 
 /* ── General chat ────────────────────────────────────────────────────── */
-document.getElementById('btn-general-chat').addEventListener('click', () => {
-  document.getElementById('general-modal').classList.add('open');
-  document.getElementById('general-chat-input').focus();
-});
-document.getElementById('btn-close-general').addEventListener('click', () => {
-  document.getElementById('general-modal').classList.remove('open');
-});
-// Close on backdrop click
-document.getElementById('general-modal').addEventListener('click', e => {
-  if (e.target === e.currentTarget) e.currentTarget.classList.remove('open');
-});
+function openGeneralChat() {
+  openSidebar();
+  // Update sidebar title when no house is selected
+  const titleEl = document.getElementById('house-title');
+  if (titleEl && !state.selectedHouseId) titleEl.textContent = 'General Chat';
+  switchTab('general-chat');
+  const input = document.getElementById('general-chat-input');
+  if (input) setTimeout(() => input.focus(), 320);
+}
+
+document.getElementById('btn-general-chat').addEventListener('click', openGeneralChat);
 
 
 function bikeRouteBearing(a, b) {
@@ -1397,7 +1397,7 @@ loadHouses();
 map.addControl(new LayerControl());
 map.addControl(new BikeRouteControl());
 
-// Deep link from the Data page: /#general-chat opens the General Chat panel.
+// Deep link from the Data page: /#general-chat opens the General Chat sidebar tab.
 if (location.hash === '#general-chat') {
-  window.addEventListener('load', () => { const b = document.getElementById('btn-general-chat'); if (b) setTimeout(() => b.click(), 300); });
+  window.addEventListener('load', () => { setTimeout(openGeneralChat, 300); });
 }

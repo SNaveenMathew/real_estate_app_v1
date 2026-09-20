@@ -20,7 +20,7 @@
   <!-- Marked (markdown rendering) -->
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 
-  <link rel="stylesheet" href="/static/style.css?v=3" />
+  <link rel="stylesheet" href="/static/style.css?v=4" />
 </head>
 <body>
 
@@ -32,7 +32,7 @@
   </div>
   <div class="topbar-right">
     <a class="btn-data" href="/data" title="Add your own data and link it to the catalog">🗂️ Data model</a>
-    <button class="btn-general" id="btn-general-chat">💬 General Chat</button>
+    <button class="btn-general" id="btn-general-chat" title="Open General Chat in the sidebar">💬 General Chat</button>
     <button class="btn-sidebar-toggle" id="btn-toggle-sidebar" title="Toggle House Details Sidebar" aria-expanded="false">📋 House Details</button>
   </div>
 </header>
@@ -58,11 +58,12 @@
     </div>
 
     <!-- Tabs -->
-    <div class="tabs">
+    <div class="tabs" id="sidebar-tabs">
       <button class="tab active" data-tab="details">Details</button>
       <button class="tab" data-tab="risk">Risk</button>
       <button class="tab" data-tab="chat">Chat</button>
       <button class="tab" data-tab="docs">Docs</button>
+      <button class="tab" data-tab="general-chat" id="tab-general-chat-btn">💬 General</button>
     </div>
 
     <!-- Details tab -->
@@ -133,32 +134,28 @@
       </div>
     </div>
 
+    <!-- General Chat tab -->
+    <div class="tab-pane chat-pane" id="tab-general-chat">
+      <div class="chat-messages" id="general-chat-messages">
+        <div class="msg assistant">
+          <div class="bubble">Hi! I can help with broad questions like:<br>
+          • <em>Among the top 50 MSAs, which have the lowest flood risk?</em><br>
+          • <em>Which houses in my list have the best walk score?</em><br>
+          • <em>What's the average price per sqft in Austin?</em>
+          </div>
+        </div>
+      </div>
+      <div class="chat-input-area">
+        <textarea id="general-chat-input" placeholder="Ask a general question..." rows="2"></textarea>
+        <button class="btn-send" id="general-chat-send">Send</button>
+      </div>
+    </div>
+
   </div><!-- /sidebar -->
 </div><!-- /layout -->
 
-<!-- ── General Chat Modal ────────────────────────────────────────────── -->
-<div class="modal-overlay" id="general-modal">
-  <div class="modal">
-    <div class="modal-header">
-      <span>💬 General Chat</span>
-      <button class="btn-close" id="btn-close-general">✕</button>
-    </div>
-    <div class="chat-messages" id="general-chat-messages">
-      <div class="msg assistant">
-        <div class="bubble">Hi! I can help with broad questions like:<br>
-        • <em>Among the top 50 MSAs, which have the lowest flood risk?</em><br>
-        • <em>Which houses in my list have the best walk score?</em><br>
-        • <em>What's the average price per sqft in Austin?</em>
-        </div>
-      </div>
-    </div>
-    <div class="chat-input-area">
-      <textarea id="general-chat-input" placeholder="Ask a general question..." rows="2"></textarea>
-      <button class="btn-send" id="general-chat-send">Send</button>
-    </div>
-  </div>
-</div>
 
-<script src="/static/app.js?v=3"></script>
+
+<script src="/static/app.js?v=4"></script>
 </body>
 </html>

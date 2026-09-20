@@ -951,7 +951,7 @@ function resultTab(ds) {
         rels.length ? rels.map(p => h('li', {}, h('span', { class: 'mono' }, `${p.payload.left_table}.${p.payload.left_expr} = ${p.payload.right_table}.${p.payload.right_expr}`), ` (${p.payload.cardinality})`)) : h('li', {}, 'No links yet, so it can be queried on its own but not joined to houses or tracts.'),
         houseLinked ? h('li', {}, 'House Chat can read the records linked to the house you have open.') : null)),
     suggestions.length ? h('div', { class: 'card' }, h('h3', {}, 'Try asking'), h('div', { style: { marginTop: '6px' } }, suggestions.map(q => h('span', { class: 'chip ask' }, q))),
-      h('div', { class: 'actions' }, h('a', { class: 'btn primary', href: '/#general-chat' }, 'Open General Chat'))) : null,
+      h('div', { class: 'actions' }, h('a', { class: 'btn primary', href: '/#general-chat' }, 'Ask in Chat on Map page'))) : null,
     h('div', { class: 'card' }, h('h3', {}, 'Manage'),
       h('div', { class: 'actions' },
         h('button', { class: 'btn', type: 'button', disabled: !!S.busy, onclick: analyzeFlow }, 'Search for links again'),
