@@ -433,6 +433,10 @@ def _validate_sql_against_plan(sql: str, query_plan) -> None:
     where_low = _where_clause_text(low)
     semantic_filter_columns = {}
     for key, item in schema.SEMANTIC_GLOSSARY.items():
+        if item.get("scope_guard") is False:
+            # Concepts generated for user-added datasets: their measure columns are legitimately
+            # filterable (e.g. "walkability index above 15"), so they do not feed this guard.
+            continue
         for col in item.get("columns", []):
             semantic_filter_columns.setdefault(col.split(".")[-1].lower(), set()).add(key)
     selected = set(query_plan.semantic_keys)
@@ -463,13 +467,7 @@ def _qualify_join_expr(table: str, expr: str) -> str:
     instead, leaving SQL function names (identifier immediately followed by
     '(') and already-qualified references untouched.
     """
-    def _replace(match: re.Match) -> str:
-        token = match.group(0)
-        if expr[match.end():match.end() + 1] == "(":
-            return token  # function name, e.g. LEFT( — not a column
-        return f"{table}.{token}"
-
-    return re.sub(r"(?<!\.)\b[A-Za-z_][A-Za-z0-9_]*\b", _replace, expr)
+    return schema.qualify_join_expr(table, expr)   # single shared implementation (db/schema_catalog.py)
 
 
 def _group_equality_predicates(filters: list[str]) -> list[str]:
