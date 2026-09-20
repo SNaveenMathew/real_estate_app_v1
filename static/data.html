@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Data model · Real Estate Intelligence</title>
+  <link rel="stylesheet" href="/static/data.css?v=1">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <a class="brand" href="/">🏠 Real Estate Intelligence</a>
+      <span class="crumb">Data model</span>
+    </div>
+    <nav class="topbar-right" aria-label="Site">
+      <a class="nav-link" href="/">Map and chat</a>
+      <a class="nav-link" href="/#general-chat">General Chat</a>
+    </nav>
+  </header>
+
+  <main class="dm">
+    <section class="dm-map" aria-labelledby="map-title">
+      <div class="dm-map-head">
+        <div class="dm-map-title">
+          <h1 id="map-title">What the assistant can query</h1>
+          <p class="muted" id="map-summary">Loading the catalog…</p>
+        </div>
+        <div class="dm-tools">
+          <input type="search" id="map-search" placeholder="Find a table or column" aria-label="Find a table or column">
+          <label class="check"><input type="checkbox" id="opt-allcols"> All columns</label>
+          <label class="check"><input type="checkbox" id="opt-system"> System tables</label>
+        </div>
+      </div>
+      <div class="dm-filters" id="domain-filters" role="group" aria-label="Show data areas"></div>
+      <div class="dm-canvas" id="canvas" tabindex="-1"><p class="muted pad">Loading…</p></div>
+      <div class="dm-legend" id="legend" aria-label="Legend"></div>
+      <div class="dm-inspector" id="inspector" hidden></div>
+    </section>
+
+    <aside class="dm-panel" id="panel" aria-label="Add a dataset"></aside>
+  </main>
+
+  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+  <script src="/static/data.js?v=1"></script>
+</body>
+</html>
