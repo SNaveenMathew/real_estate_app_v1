@@ -1,4 +1,4 @@
-﻿"""
+"""
 End-to-end integration tests against a LIVE running server.
 
 Usage:
@@ -216,7 +216,9 @@ for pid in rel_pids:
         approved_rels += 1
         matching = next((p for p in rel_proposals if p["proposal_id"] == pid), None)
         if matching:
-            rk = matching.get("payload", {}).get("rel_key", "")
+            # Proposal payload uses 'key' or 'rel_key' depending on the version
+            payload = matching.get("payload", {})
+            rk = payload.get("key") or payload.get("rel_key") or ""
             if rk:
                 approved_rel_keys.append(rk)
 check("at least one relationship approved",
@@ -259,12 +261,15 @@ check("new table has agent_visible=True",
 # ─── 14. Revoke a relationship ───────────────────────────────────────────────
 section("14. Revoke a relationship")
 
-# Prefer rel_key captured at approval time; fall back to scanning the live catalog
+# Prefer rel_key captured at approval time; fall back to a fresh catalog scan.
+# The catalog uses 'key' as the field name; the revoke endpoint calls it 'rel_key' — same value.
 target_rel_key = approved_rel_keys[0] if approved_rel_keys else None
 if not target_rel_key:
-    for rel in rels_after:
+    # Re-fetch the catalog to get the current relationships with origin info
+    _fresh_rels = requests.get(f"{BASE}/api/onboarding/catalog").json().get("relationships", [])
+    for rel in _fresh_rels:
         if rel.get("origin") != "builtin":
-            target_rel_key = rel.get("rel_key")
+            target_rel_key = rel.get("key") or rel.get("rel_key")
             break
 
 if target_rel_key:
@@ -276,7 +281,7 @@ if target_rel_key:
     r2 = requests.get(f"{BASE}/api/onboarding/catalog")
     rels_post_revoke = r2.json().get("relationships", [])
     check("revoked relationship gone from catalog",
-          not any(rel.get("rel_key") == target_rel_key for rel in rels_post_revoke),
+          not any((rel.get("key") or rel.get("rel_key")) == target_rel_key for rel in rels_post_revoke),
           f"rel_key={target_rel_key}")
 else:
     check("non-builtin relationship available to revoke", False,
@@ -338,19 +343,13 @@ r = requests.get(f"{BASE}/api/houses")
 check("GET /api/houses returns 200", r.status_code == 200,
       f"got {r.status_code}: {r.text[:60]}" if r.status_code != 200 else "")
 
-r = requests.get(f"{BASE}/api/layers/nri?min_lat=40.0&max_lat=41.0&min_lon=-80.5&max_lon=-79.5")
-nri_ok = r.status_code == 200
-if not nri_ok:
-    r = requests.get(f"{BASE}/api/nri-layer?min_lat=40.0&max_lat=41.0&min_lon=-80.5&max_lon=-79.5")
-    nri_ok = r.status_code == 200
-check("NRI layer returns 200", nri_ok, f"got {r.status_code}")
+# Layer endpoints use west/south/east/north bbox params
+_bbox = {"west": -80.5, "south": 40.0, "east": -79.5, "north": 41.0}
+r = requests.get(f"{BASE}/api/layers/nri", params=_bbox)
+check("NRI layer returns 200", r.status_code == 200, f"got {r.status_code}")
 
-r = requests.get(f"{BASE}/api/layers/crime?min_lat=40.0&max_lat=41.0&min_lon=-80.5&max_lon=-79.5")
-crime_ok = r.status_code == 200
-if not crime_ok:
-    r = requests.get(f"{BASE}/api/crime-layer?min_lat=40.0&max_lat=41.0&min_lon=-80.5&max_lon=-79.5")
-    crime_ok = r.status_code == 200
-check("Crime layer returns 200", crime_ok, f"got {r.status_code}")
+r = requests.get(f"{BASE}/api/layers/crime", params=_bbox)
+check("Crime layer returns 200", r.status_code == 200, f"got {r.status_code}")
 
 r = requests.get(f"{BASE}/metrics")
 check("GET /metrics (Prometheus) returns 200", r.status_code == 200)
