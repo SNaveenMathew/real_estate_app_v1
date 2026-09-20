@@ -77,6 +77,26 @@ class Settings(BaseSettings):
     shapefile_dir: Path = BASE_DIR / "data" / "shapefiles"
     uploads_dir: Path = BASE_DIR / "uploads"
 
+    # ── Data onboarding (uploaded datasets; see services/dataset_onboarding.py) ──
+    onboarding_max_upload_mb: int = 250
+    onboarding_sample_rows: int = 8
+    onboarding_geocode_row_cap: int = 2000   # rows sent to the Census geocoder per run
+    onboarding_api_row_cap: int = 500        # rows allowed through the per-point Census API when no tract geometry is loaded
+
+    # ── Catalog LLM router (optional; drafts descriptions/synonyms only; see services/catalog_llm.py) ──
+    # Tier "draft" -> CATALOG_DRAFT_*, tier "judge" -> CATALOG_JUDGE_*; empty values fall back to the chat
+    # llama-server above. Nothing here is required: without a model the Data page uses rule-based defaults.
+    catalog_llm_enabled: bool = True
+    catalog_llm_judge_enabled: bool = False
+    catalog_draft_base_url: str = ""         # e.g. http://127.0.0.1:8081/v1 (a separate small llama-server)
+    catalog_draft_model: str = ""
+    catalog_judge_base_url: str = ""
+    catalog_judge_model: str = ""
+    catalog_llm_timeout: float = 90.0
+    catalog_llm_max_tokens: int = 1600
+    catalog_llm_max_repairs: int = 1
+    catalog_llm_disable_thinking: bool = True
+
     # ── DuckDB ───────────────────────────────────────────────────────────────
     duckdb_path: Path = BASE_DIR / "data" / "real_estate.duckdb"
 
