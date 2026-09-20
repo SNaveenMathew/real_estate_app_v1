@@ -29,6 +29,7 @@ from services import layers as layer_service
 from services import bike_routing
 from agents.house_agent import run_house_chat
 from agents.general_agent import run_general_chat
+from api.onboarding import router as onboarding_router
 from observability import initialize_observability, ensure_phoenix_server, stop_phoenix_server, phoenix_enabled
 
 
@@ -69,6 +70,7 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
+app.include_router(onboarding_router)   # Data page API: /api/onboarding/*
 settings.uploads_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/metrics", make_asgi_app(), name="metrics")
 
@@ -105,6 +107,17 @@ _STATIC_VER = _static_version()
 
 
 # ── HTML entry point ─────────────────────────────────────────────────────────
+
+@app.get("/data", response_class=HTMLResponse)
+async def data_page():
+    """The Data page: schema map, dataset upload, and review of proposed catalog changes."""
+    import re as _re
+    root = Path("static")
+    html = (root / "data.html").read_text(encoding="utf-8")
+    ver = _hashlib.sha1(b"".join((root / n).read_bytes() for n in ("data.js", "data.css"))).hexdigest()[:10]
+    html = _re.sub(r'(/static/[\w./-]+\.(?:js|css))(\?v=\w+)?', lambda m: f"{m.group(1)}?v={ver}", html)
+    return HTMLResponse(content=html, headers={"Cache-Control": "no-cache"})
+
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
