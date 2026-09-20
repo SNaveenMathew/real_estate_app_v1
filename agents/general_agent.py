@@ -85,6 +85,11 @@ def _invoke_approved(name: str, function_obj, args: tuple[Any, ...], kwargs: dic
 
 def _get_data_availability_context() -> str:
     report, _ = schema.availability_report()
+    # Datasets added on the Data page live in the same catalog; describe them here so the model knows
+    # they exist and how they join (empty string when nothing has been added).
+    added = schema.added_datasets_briefing()
+    if added:
+        report = report + "\n\n" + added
     return "[LIVE DATA AVAILABILITY]\n" + report + "\n[END LIVE DATA AVAILABILITY]"
 
 
