@@ -53,3 +53,7 @@ opentelemetry-proto==1.44.0
 # Phoenix (open-source) tracing / OpenTelemetry
 arize-phoenix==19.6.0
 arize-phoenix-otel==0.16.1
+
+# Testing
+pytest==9.1.1
+pytest-asyncio==1.0.0
