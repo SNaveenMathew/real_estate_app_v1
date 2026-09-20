@@ -14,13 +14,31 @@ from config import settings
 _conn: Optional[duckdb.DuckDBPyConnection] = None
 
 
+_generation: int = 0   # bumped every time a new connection is opened (see connection_generation)
+
+
 def get_conn() -> duckdb.DuckDBPyConnection:
-    global _conn
+    global _conn, _generation
     if _conn is None:
         settings.duckdb_path.parent.mkdir(parents=True, exist_ok=True)
         _conn = duckdb.connect(str(settings.duckdb_path))
         _ensure_schema(_conn)
+        _generation += 1
     return _conn
+
+
+def is_connected() -> bool:
+    """True while a connection is open (close() makes the next access open a fresh one)."""
+    return _conn is not None
+
+
+def connection_generation() -> int:
+    """Increments whenever a new DuckDB connection is opened.
+
+    db.schema_catalog compares this to know when its in-memory registry must be reloaded
+    (e.g. the evaluation harness closes the connection and points at a fixture database).
+    """
+    return _generation
 
 
 def _ensure_schema(conn: duckdb.DuckDBPyConnection):
@@ -275,6 +293,12 @@ def _ensure_schema(conn: duckdb.DuckDBPyConnection):
             geocoded_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # Unified data-model catalog (tables, relationships, concepts, entity domains) plus the
+    # workflow tables behind the Data page. Built-in rows are seeded here; see db/catalog_store.py.
+    from db import catalog_store
+    catalog_store.ensure_tables(conn)
+    catalog_store.sync_seed(conn)
 
 
 def query(sql: str, params=None) -> pd.DataFrame:
