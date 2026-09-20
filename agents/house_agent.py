@@ -179,6 +179,11 @@ def make_house_approved_functions(house_id: str) -> dict:
             "requirements": f"Keep the result scoped to house_id={house_id!r}.",
         })
 
+    def get_linked_dataset_records(dataset: str = "") -> str:
+        """Records from user-added datasets that link to this house through approved catalog relationships."""
+        from services.house_links import linked_records
+        return linked_records(house_id, dataset)
+
     return {
         "get_house_details": get_house_details,
         "get_nri_risk_data": get_nri_risk_data,
@@ -186,6 +191,7 @@ def make_house_approved_functions(house_id: str) -> dict:
         "get_nearby_sold_homes": get_nearby_sold_homes,
         "search_house_documents": search_house_documents,
         "query_database": query_database,
+        "get_linked_dataset_records": get_linked_dataset_records,
     }
 
 
@@ -498,6 +504,39 @@ def _get_stored_description(house_id: str) -> str | None:
 
 # -- Program generation with recovery ----------------------------------------
 
+def _linked_datasets_prompt() -> str:
+    """Prompt section for user-added datasets that link to houses (empty when there are none).
+
+    Built from the unified catalog on every request, so a dataset approved on the Data page is
+    available to the very next House Chat turn: no restart and no prompt edit.
+    """
+    import db.schema_catalog as schema
+    try:
+        linked = schema.house_linked_datasets()
+    except Exception:
+        return ""
+    if not linked:
+        return ""
+    clean = lambda t: " ".join(str(t or "").split())
+    lines = [
+        "ADDITIONAL LINKED DATASETS (added by the user on the Data page; joined to houses by approved relationships)",
+        "=" * 78,
+        '7. get_linked_dataset_records(dataset: str = "")',
+        '   -> Rows from the datasets below that link to THIS house. Pass dataset="<name>" to narrow to one; omit it for all.',
+        "   Datasets:",
+    ]
+    for d in linked:
+        measures = f" Measures: {', '.join(d['measures'])}." if d["measures"] else ""
+        lines.append(f"   - {d['name']}: {clean(d['description'])} Grain: {clean(d['grain']) or 'unspecified'}.{measures} Join: {d['join']}")
+    first = linked[0]["name"]
+    lines += [
+        "   For comparisons across houses, or aggregates over these datasets, use query_database(request=...).",
+        f"   Example: User: What does {first} say about this house?",
+        f'   Code: final_result = get_linked_dataset_records(dataset="{first}")',
+    ]
+    return "\n".join(lines)
+
+
 def _generate_house_program(
     user_message: str,
     house_id: str,
@@ -514,6 +553,7 @@ def _generate_house_program(
     conversation = _messages_to_text(history, user_message)
     prompt_parts = [
         _HOUSE_CODE_AGENT_PROMPT,
+        _linked_datasets_prompt(),
         f"HOUSE ID: {house_id}",
         desc_section,
         f"CONVERSATION CONTEXT:\n{conversation}",
