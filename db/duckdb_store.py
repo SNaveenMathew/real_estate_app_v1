@@ -17,11 +17,39 @@ _conn: Optional[duckdb.DuckDBPyConnection] = None
 _generation: int = 0   # bumped every time a new connection is opened (see connection_generation)
 
 
+def _safe_connect(db_path: Path) -> duckdb.DuckDBPyConnection:
+    """Connect to DuckDB, automatically recovering if a corrupt or un-repayable WAL file is present."""
+    wal_path = Path(str(db_path) + ".wal")
+    try:
+        return duckdb.connect(str(db_path))
+    except (duckdb.InternalException, duckdb.IOException, duckdb.Error, Exception) as exc:
+        err_msg = str(exc)
+        if wal_path.exists() and any(sig in err_msg for sig in ("replaying WAL file", "DatabaseManager", "WAL", "wal")):
+            import time, logging
+            logger = logging.getLogger(__name__)
+            bad_wal = Path(str(db_path) + f".wal.bad.{int(time.time())}")
+            logger.warning(
+                "Corrupt or un-repayable DuckDB WAL file detected (%s). Moving %s -> %s and recovering from checkpoint.",
+                err_msg, wal_path, bad_wal,
+            )
+            try:
+                wal_path.rename(bad_wal)
+            except Exception:
+                pass
+            conn = duckdb.connect(str(db_path))
+            try:
+                conn.execute("CHECKPOINT")
+            except Exception:
+                pass
+            return conn
+        raise
+
+
 def get_conn() -> duckdb.DuckDBPyConnection:
     global _conn, _generation
     if _conn is None:
         settings.duckdb_path.parent.mkdir(parents=True, exist_ok=True)
-        _conn = duckdb.connect(str(settings.duckdb_path))
+        _conn = _safe_connect(settings.duckdb_path)
         _ensure_schema(_conn)
         _generation += 1
     return _conn
@@ -887,5 +915,17 @@ def get_top_msas_by_population(n: int = 50) -> list[dict]:
 def close():
     global _conn
     if _conn:
-        _conn.close()
+        try:
+            _conn.execute("CHECKPOINT")
+        except Exception:
+            pass
+        try:
+            _conn.close()
+        except Exception:
+            pass
         _conn = None
+
+
+import atexit
+atexit.register(close)
+

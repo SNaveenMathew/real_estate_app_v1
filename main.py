@@ -56,6 +56,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        store.close()
         stop_phoenix_server()
 
 

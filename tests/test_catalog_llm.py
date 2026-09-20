@@ -51,6 +51,7 @@ class _Server:
 def llm(monkeypatch):
     srv = _Server()
     monkeypatch.setattr(settings, "catalog_draft_base_url", srv.url)
+    monkeypatch.setattr(settings, "llama_server_base_url", srv.url)
     monkeypatch.setattr(settings, "catalog_llm_enabled", True)
     monkeypatch.setattr(settings, "catalog_llm_timeout", 5.0)
     cl.reset_router()

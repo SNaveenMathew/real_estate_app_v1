@@ -137,6 +137,10 @@ def transaction(conn) -> Iterator[None]:
     try:
         yield
         conn.execute("COMMIT")
+        try:
+            conn.execute("CHECKPOINT")
+        except Exception:
+            pass
     except BaseException:
         try:
             conn.execute("ROLLBACK")
