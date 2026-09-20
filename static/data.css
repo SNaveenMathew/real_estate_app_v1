@@ -89,6 +89,60 @@ button, input, select, textarea { font: inherit; color: inherit; }
   background: var(--line); color: var(--ink);
 }
 
+/* zoom toolbar */
+.zoom-toolbar {
+  display: inline-flex;
+  align-items: center;
+  background: #fff;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+.btn-zoom, .btn-zoom-level, .btn-zoom-fit {
+  background: #fff;
+  border: none;
+  border-right: 1px solid var(--line-2);
+  padding: 0 8px;
+  height: 28px;
+  font-size: 13px;
+  color: var(--ink-2);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 500;
+  transition: background 0.15s, color 0.15s;
+  user-select: none;
+  line-height: 1;
+}
+.btn-zoom {
+  font-size: 16px;
+  font-weight: 700;
+  width: 28px;
+  padding: 0;
+}
+.btn-zoom-level {
+  font-size: 12px;
+  font-family: var(--mono);
+  font-weight: 600;
+  min-width: 48px;
+  padding: 0 6px;
+}
+.btn-zoom-fit {
+  border-right: none;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 0 8px;
+}
+.btn-zoom:hover, .btn-zoom-level:hover, .btn-zoom-fit:hover {
+  background: var(--accent-bg);
+  color: var(--accent-2);
+}
+.btn-zoom:active, .btn-zoom-level:active, .btn-zoom-fit:active {
+  background: #d8e5fc;
+}
+
 /* map header */
 .dm-map-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 14px 18px 8px; flex-wrap: wrap; }
 .dm-map-title p { font-size: 13px; margin-top: 2px; }
@@ -101,7 +155,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .dm-filters .dot { width: 9px; height: 9px; border-radius: 50%; }
 
 .dm-canvas { flex: 1; min-height: 0; overflow: auto; border-top: 1px solid var(--line); background-color: #fbfcfe;
-             background-image: radial-gradient(#dde3ee 1px, transparent 1px); background-size: 22px 22px; }
+             background-image: radial-gradient(#dde3ee 1px, transparent 1px); background-size: 22px 22px; cursor: grab; }
+.dm-canvas.grabbing { cursor: grabbing !important; }
 .dm-canvas svg { display: block; }
 .dm-legend { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; padding: 8px 18px; border-top: 1px solid var(--line); background: #fff; font-size: 12px; color: var(--ink-2); }
 .dm-legend span { display: inline-flex; align-items: center; gap: 6px; }

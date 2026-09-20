@@ -32,6 +32,12 @@
           <input type="search" id="map-search" placeholder="Find a table or column" aria-label="Find a table or column">
           <label class="check"><input type="checkbox" id="opt-allcols"> All columns</label>
           <label class="check"><input type="checkbox" id="opt-system"> System tables</label>
+          <div class="zoom-toolbar" role="toolbar" aria-label="Zoom controls">
+            <button class="btn-zoom" id="btn-zoom-out" type="button" title="Zoom out (−)" aria-label="Zoom out">−</button>
+            <button class="btn-zoom-level" id="btn-zoom-reset" type="button" title="Reset zoom to 100%"><span id="zoom-level">100%</span></button>
+            <button class="btn-zoom" id="btn-zoom-in" type="button" title="Zoom in (+)" aria-label="Zoom in">+</button>
+            <button class="btn-zoom-fit" id="btn-zoom-fit" type="button" title="Fit graph to width">Fit</button>
+          </div>
         </div>
       </div>
       <div class="dm-filters" id="domain-filters" role="group" aria-label="Show data areas"></div>

@@ -64,6 +64,7 @@ const S = {
   ds: null, form: null, tab: 'describe', busy: null, sel: null, llm: null, selftest: null,
   colRole: 'all', colQuery: '', justAdded: new Set(), edits: {}, lastEnrich: null,
   filter: { q: '', hidden: new Set(), allCols: false, system: false }, upload: { sheet: '', skiprows: '' },
+  zoom: 1.0,
 };
 
 function toast(msg, kind = '') {
@@ -268,7 +269,16 @@ function renderMap() {
   renderDomainFilters(cat);
   const { tables, rels } = graphModel();
   const L = layout(tables, rels);
-  const svg = s('svg', { width: L.width, height: L.height, viewBox: `0 0 ${L.width} ${L.height}`, role: 'group', 'aria-label': 'Data model map' });
+  const zoom = S.zoom || 1.0;
+  const svg = s('svg', {
+    width: Math.round(L.width * zoom),
+    height: Math.round(L.height * zoom),
+    viewBox: `0 0 ${L.width} ${L.height}`,
+    role: 'group',
+    'aria-label': 'Data model map',
+    'data-base-width': L.width,
+    'data-base-height': L.height
+  });
   L.lanes.forEach((lane, li) => {
     const label = (cat.domains.find(d => d.key === lane) || { label: lane }).label;
     svg.append(s('text', { class: 'lane-title', x: LEFT + li * (NW + LANE_GAP), y: 30, 'font-size': 12, 'font-weight': 600, fill: '#7b8598' }, label));
@@ -288,6 +298,124 @@ function renderMap() {
   $('#canvas').replaceChildren(L.nodes.size ? svg : h('p', { class: 'muted pad' }, 'Nothing to show with the current filters.'));
   applyEmphasis();
   renderInspector();
+  updateZoomUI();
+}
+
+/* ---------------------------------------------------------------- zoom & pan */
+function updateZoomUI() {
+  const lbl = $('#zoom-level');
+  if (lbl) lbl.textContent = `${Math.round((S.zoom || 1.0) * 100)}%`;
+}
+
+function setZoom(newZoom, anchorX = null, anchorY = null) {
+  const canvas = $('#canvas');
+  if (!canvas) return;
+  const svg = canvas.querySelector('svg');
+  if (!svg) return;
+  const clamped = Math.max(0.35, Math.min(2.5, Math.round(newZoom * 100) / 100));
+  const oldZoom = S.zoom || 1.0;
+  if (Math.abs(clamped - oldZoom) < 0.005) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const ax = anchorX !== null ? anchorX - rect.left : canvas.clientWidth / 2;
+  const ay = anchorY !== null ? anchorY - rect.top : canvas.clientHeight / 2;
+
+  const contentX = (canvas.scrollLeft + ax) / oldZoom;
+  const contentY = (canvas.scrollTop + ay) / oldZoom;
+
+  S.zoom = clamped;
+
+  const baseW = Number(svg.dataset.baseWidth || svg.getAttribute('viewBox').split(' ')[2]);
+  const baseH = Number(svg.dataset.baseHeight || svg.getAttribute('viewBox').split(' ')[3]);
+  svg.dataset.baseWidth = baseW;
+  svg.dataset.baseHeight = baseH;
+
+  svg.setAttribute('width', Math.round(baseW * S.zoom));
+  svg.setAttribute('height', Math.round(baseH * S.zoom));
+
+  canvas.scrollLeft = contentX * S.zoom - ax;
+  canvas.scrollTop = contentY * S.zoom - ay;
+
+  updateZoomUI();
+}
+
+function zoomIn() {
+  setZoom((S.zoom || 1.0) + 0.15);
+}
+
+function zoomOut() {
+  setZoom((S.zoom || 1.0) - 0.15);
+}
+
+function zoomReset() {
+  setZoom(1.0);
+}
+
+function fitZoom() {
+  const canvas = $('#canvas');
+  if (!canvas) return;
+  const svg = canvas.querySelector('svg');
+  if (!svg) return;
+  const baseW = Number(svg.dataset.baseWidth || svg.getAttribute('viewBox').split(' ')[2]);
+  if (!baseW) return;
+  const availW = canvas.clientWidth - 48;
+  const target = Math.max(0.35, Math.min(1.5, availW / baseW));
+  setZoom(target);
+  canvas.scrollLeft = 0;
+  canvas.scrollTop = 0;
+}
+
+function bindCanvasInteractions() {
+  const canvas = $('#canvas');
+  if (!canvas) return;
+
+  // Zoom on Ctrl + Wheel or Trackpad Pinch
+  canvas.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const step = e.deltaY < 0 ? 0.1 : -0.1;
+      setZoom((S.zoom || 1.0) + step, e.clientX, e.clientY);
+    }
+  }, { passive: false });
+
+  // Keyboard zoom shortcuts when canvas is active/hovered
+  canvas.addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+    if (e.key === '+' || e.key === '=') { e.preventDefault(); zoomIn(); }
+    else if (e.key === '-' || e.key === '_') { e.preventDefault(); zoomOut(); }
+    else if (e.key === '0') { e.preventDefault(); zoomReset(); }
+  });
+
+  // Drag to pan canvas
+  let isPanning = false;
+  let startX = 0, startY = 0;
+  let scrollStartLeft = 0, scrollStartTop = 0;
+
+  canvas.addEventListener('mousedown', e => {
+    if (e.button !== 0) return;
+    if (e.target.closest('.node, .edge, button, input, a, select, textarea, .dm-inspector')) return;
+    isPanning = true;
+    startX = e.clientX;
+    startY = e.clientY;
+    scrollStartLeft = canvas.scrollLeft;
+    scrollStartTop = canvas.scrollTop;
+    canvas.classList.add('grabbing');
+    canvas.style.userSelect = 'none';
+  });
+
+  window.addEventListener('mousemove', e => {
+    if (!isPanning) return;
+    canvas.scrollLeft = scrollStartLeft - (e.clientX - startX);
+    canvas.scrollTop = scrollStartTop - (e.clientY - startY);
+  });
+
+  window.addEventListener('mouseup', () => {
+    if (isPanning) {
+      isPanning = false;
+      canvas.classList.remove('grabbing');
+      canvas.style.userSelect = '';
+    }
+  });
 }
 
 function applyEmphasis() {
@@ -842,6 +970,17 @@ function bindToolbar() {
   $('#map-search').addEventListener('input', e => { clearTimeout(timer); timer = setTimeout(() => { S.filter.q = e.target.value; renderMap(); }, 150); });
   $('#opt-allcols').addEventListener('change', e => { S.filter.allCols = e.target.checked; renderMap(); });
   $('#opt-system').addEventListener('change', e => { S.filter.system = e.target.checked; renderMap(); });
+
+  const btnIn = $('#btn-zoom-in');
+  if (btnIn) btnIn.addEventListener('click', zoomIn);
+  const btnOut = $('#btn-zoom-out');
+  if (btnOut) btnOut.addEventListener('click', zoomOut);
+  const btnReset = $('#btn-zoom-reset');
+  if (btnReset) btnReset.addEventListener('click', zoomReset);
+  const btnFit = $('#btn-zoom-fit');
+  if (btnFit) btnFit.addEventListener('click', fitZoom);
+
+  bindCanvasInteractions();
 }
 
 async function init() {
@@ -862,5 +1001,5 @@ async function init() {
   }
   api('/llm/status').then(x => { S.llm = x; if (!S.ds) renderPanel(); }).catch(() => { S.llm = { tiers: { draft: [] }, notes: [] }; if (!S.ds) renderPanel(); });
 }
-window.__dm = { S, uploadFile, openDataset, renderMap, renderPanel, saveForm, analyzeFlow, decide, adopt, openPanel, closePanel, togglePanel };
+window.__dm = { S, uploadFile, openDataset, renderMap, renderPanel, saveForm, analyzeFlow, decide, adopt, openPanel, closePanel, togglePanel, setZoom, zoomIn, zoomOut, zoomReset, fitZoom };
 document.addEventListener('DOMContentLoaded', init);
