@@ -1335,3 +1335,8 @@ const LayerControl = L.Control.extend({
 loadHouses();
 map.addControl(new LayerControl());
 map.addControl(new BikeRouteControl());
+
+// Deep link from the Data page: /#general-chat opens the General Chat panel.
+if (location.hash === '#general-chat') {
+  window.addEventListener('load', () => { const b = document.getElementById('btn-general-chat'); if (b) setTimeout(() => b.click(), 300); });
+}
