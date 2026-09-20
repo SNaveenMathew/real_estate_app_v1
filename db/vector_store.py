@@ -203,42 +203,55 @@ def _schema_documents():
     return docs
 
 
-def ensure_schema_metadata_index() -> int:
-    """Synchronize the small metadata corpus into Chroma.
+_SYNCED_CATALOG_VERSION = None
 
-    The application must remain usable when Ollama is not running. In that
-    case the deterministic lexical path in ``search_data_model`` remains the
-    source of truth and vector indexing is simply skipped.
+
+def ensure_schema_metadata_index(force: bool = False) -> int:
+    """Synchronize the small metadata corpus into Chroma - incrementally.
+
+    The corpus is built from the live, unified catalog (built-in and user-added sources alike).
+    It is re-synchronized only when the catalog version changes (or ``force``), and only the
+    documents whose text changed are re-embedded. Approving a dataset on the Data page therefore
+    reaches the next chat turn without re-embedding the whole corpus on every question.
+
+    The application must remain usable when Ollama is not running: in that case vector indexing is
+    skipped and ``search_data_model`` falls back to the deterministic lexical path.
     """
-    col = _schema_collection()
+    global _SYNCED_CATALOG_VERSION
+    from db import schema_catalog as schema
     docs = _schema_documents()
+    version = schema.catalog_version()
+    if not force and _SYNCED_CATALOG_VERSION == version:
+        return len(docs)
+    col = _schema_collection()
     try:
         emb = _get_embeddings()
     except Exception:
         return len(docs)
-    # Upsert rather than add-only: curated metadata changes (especially relationship
-    # definitions and planning recipes) must invalidate the vector representation.
-    if docs:
-        desired_ids = {i for i, _ in docs}
-        existing = col.get(include=["metadatas"])
-        stale = [i for i in existing.get("ids", []) if i not in desired_ids]
-        if stale:
-            col.delete(ids=stale)
-        vectors = emb.embed_documents([t for _, t in docs])
+    desired = dict(docs)
+    existing = col.get(include=["documents"])
+    have = dict(zip(existing.get("ids", []), existing.get("documents", [])))
+    stale = [i for i in have if i not in desired]
+    if stale:
+        col.delete(ids=stale)
+    changed = [(i, t) for i, t in docs if have.get(i) != t]
+    if changed:
+        vectors = emb.embed_documents([t for _, t in changed])
         col.upsert(
-            ids=[i for i, _ in docs],
+            ids=[i for i, _ in changed],
             embeddings=vectors,
-            documents=[t for _, t in docs],
-            metadatas=[{"kind": i.split(":", 1)[0]} for i, _ in docs],
+            documents=[t for _, t in changed],
+            metadatas=[{"kind": i.split(":", 1)[0]} for i, _ in changed],
         )
+    _SYNCED_CATALOG_VERSION = version
     return len(docs)
 
 
 def search_data_model(query: str, n_results: int = 10) -> list[dict]:
-    """Retrieve relevant data-model metadata with vector search and lexical fallback."""
-    ensure_schema_metadata_index()
-    col = _schema_collection()
+    """Retrieve relevant data-model metadata: vector search, then a lexical fallback over the LIVE catalog."""
     try:
+        ensure_schema_metadata_index()
+        col = _schema_collection()
         emb = _get_embeddings()
         vector = emb.embed_query(query)
         results = col.query(
@@ -253,16 +266,16 @@ def search_data_model(query: str, n_results: int = 10) -> list[dict]:
         # Metadata retrieval is a grounding aid, not a reason to fail the whole chat.
         pass
 
-    # Deterministic fallback: rank the small metadata corpus by token overlap.
-    rows = col.get(include=["documents", "metadatas"])
+    # Deterministic fallback: rank the metadata corpus by token overlap. The corpus comes from the same
+    # unified catalog the planner reads, so it is current even if Chroma/Ollama are down or the vector
+    # index has not been refreshed since the last approval.
     import re
     q_tokens = set(re.findall(r"[a-z0-9_]+", (query or "").lower()))
     scored = []
-    for doc_id, doc, meta in zip(rows.get("ids", []), rows.get("documents", []), rows.get("metadatas", [])):
+    for doc_id, doc in _schema_documents():
         d_tokens = set(re.findall(r"[a-z0-9_]+", (doc or "").lower()))
-        overlap = len(q_tokens & d_tokens)
-        score = overlap
+        score = len(q_tokens & d_tokens)
         if score:
-            scored.append({"id": doc_id, "text": doc, "metadata": meta or {}, "score": score})
+            scored.append({"id": doc_id, "text": doc, "metadata": {"kind": doc_id.split(":", 1)[0]}, "score": score})
     scored.sort(key=lambda x: (-x["score"], x["id"]))
     return scored[:n_results]
