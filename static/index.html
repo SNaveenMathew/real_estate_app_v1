@@ -33,6 +33,7 @@
   <div class="topbar-right">
     <a class="btn-data" href="/data" title="Add your own data and link it to the catalog">🗂️ Data model</a>
     <button class="btn-general" id="btn-general-chat">💬 General Chat</button>
+    <button class="btn-sidebar-toggle" id="btn-toggle-sidebar" title="Toggle House Details Sidebar" aria-expanded="false">📋 House Details</button>
   </div>
 </header>
 
@@ -41,6 +42,12 @@
 
   <!-- Map -->
   <div id="map"></div>
+
+  <!-- Sidebar edge toggle tab -->
+  <button class="sidebar-edge-toggle" id="sidebar-edge-toggle" title="Toggle sidebar" aria-label="Toggle sidebar">
+    <span class="edge-arrow">◀</span>
+    <span class="edge-label">House Details</span>
+  </button>
 
   <!-- House sidebar -->
   <div class="sidebar" id="sidebar">

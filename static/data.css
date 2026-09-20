@@ -35,14 +35,58 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .nav-link:hover { background: rgba(255,255,255,.1); color: #fff; }
 
 /* layout */
-.dm { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 480px; }
-.dm-map { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--card); border-right: 1px solid var(--line); }
-.dm-panel { min-height: 0; overflow: auto; padding: 18px 18px 48px; }
+.dm { flex: 1; min-height: 0; display: flex; position: relative; overflow: hidden; }
+.dm-map { position: relative; display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; background: var(--card); border-right: 1px solid var(--line); transition: width .3s cubic-bezier(0.4, 0, 0.2, 1); }
+.dm-panel {
+  width: 480px; min-width: 480px; max-width: 480px; flex-shrink: 0; min-height: 0;
+  overflow-y: auto; padding: 18px 18px 48px; background: var(--bg); border-left: 1px solid var(--line);
+  margin-right: -480px; transition: margin-right .3s cubic-bezier(0.4, 0, 0.2, 1); z-index: 30;
+  box-shadow: -4px 0 16px rgba(26,26,46,.08);
+}
+.dm-panel.open { margin-right: 0; }
 @media (max-width: 1100px) {
   body { height: auto; }
-  .dm { grid-template-columns: 1fr; }
+  .dm { flex-direction: column; }
   .dm-map { height: 70vh; border-right: 0; border-bottom: 1px solid var(--line); }
-  .dm-panel { overflow: visible; }
+  .dm-panel { width: 100%; min-width: 100%; max-width: 100%; margin-right: 0; overflow: visible; display: none; }
+  .dm-panel.open { display: block; }
+}
+
+/* toggle buttons */
+.btn-panel-toggle {
+  display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px;
+  border-radius: 8px; border: 1px solid rgba(255,255,255,.28); background: rgba(255,255,255,.08);
+  color: #dfe6f5; font-size: 13px; font-weight: 600; cursor: pointer; transition: all .2s;
+}
+.btn-panel-toggle:hover {
+  background: rgba(255,255,255,.18); border-color: rgba(255,255,255,.5); color: #fff;
+}
+.btn-panel-toggle.active {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
+
+.dm-edge-toggle {
+  position: absolute; top: 70px; right: 0; z-index: 25;
+  display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px;
+  border-radius: 8px 0 0 8px; border: 1px solid var(--line-2); border-right: none;
+  background: #fff; color: var(--ink); font-size: 12.5px; font-weight: 600; cursor: pointer;
+  box-shadow: -2px 3px 10px rgba(0,0,0,0.1);
+  transition: right .3s cubic-bezier(0.4, 0, 0.2, 1), background .2s, color .2s;
+  user-select: none;
+}
+.dm-edge-toggle:hover {
+  background: var(--accent-bg); color: var(--accent-2); border-color: #b9d0fa;
+}
+.dm-edge-toggle.panel-open {
+  right: 480px;
+}
+
+.btn-close-panel {
+  background: none; border: none; font-size: 18px; color: var(--ink-3);
+  cursor: pointer; padding: 2px 8px; border-radius: 6px; line-height: 1;
+}
+.btn-close-panel:hover {
+  background: var(--line); color: var(--ink);
 }
 
 /* map header */

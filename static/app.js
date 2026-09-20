@@ -1,4 +1,4 @@
-﻿﻿/* ── App state ───────────────────────────────────────────────────────── */
+﻿/* ── App state ───────────────────────────────────────────────────────── */
 const state = {
   selectedHouseId: null,
   houseChatHistory: {},   // {house_id: [{role, content}]}
@@ -523,9 +523,70 @@ document.getElementById('btn-favorite').addEventListener('click', async () => {
 });
 
 /* ── Sidebar ─────────────────────────────────────────────────────────── */
-function openSidebar()  { document.getElementById('sidebar').classList.add('open'); }
-function closeSidebar() { document.getElementById('sidebar').classList.remove('open'); }
-document.getElementById('btn-close-sidebar').addEventListener('click', closeSidebar);
+function openSidebar() {
+  const sb = document.getElementById('sidebar');
+  if (!sb) return;
+  sb.classList.add('open');
+  const edgeBtn = document.getElementById('sidebar-edge-toggle');
+  if (edgeBtn) {
+    edgeBtn.classList.add('sidebar-open');
+    edgeBtn.setAttribute('title', 'Collapse sidebar');
+    const arrow = edgeBtn.querySelector('.edge-arrow');
+    if (arrow) arrow.textContent = '▶';
+    const label = edgeBtn.querySelector('.edge-label');
+    if (label) label.textContent = 'Close';
+  }
+  const topBtn = document.getElementById('btn-toggle-sidebar');
+  if (topBtn) {
+    topBtn.classList.add('active');
+    topBtn.setAttribute('aria-expanded', 'true');
+  }
+  setTimeout(() => { if (window.map) map.invalidateSize(); }, 320);
+}
+
+function closeSidebar() {
+  const sb = document.getElementById('sidebar');
+  if (!sb) return;
+  sb.classList.remove('open');
+  const edgeBtn = document.getElementById('sidebar-edge-toggle');
+  if (edgeBtn) {
+    edgeBtn.classList.remove('sidebar-open');
+    edgeBtn.setAttribute('title', 'Expand House Details sidebar');
+    const arrow = edgeBtn.querySelector('.edge-arrow');
+    if (arrow) arrow.textContent = '◀';
+    const label = edgeBtn.querySelector('.edge-label');
+    if (label) label.textContent = 'House Details';
+  }
+  const topBtn = document.getElementById('btn-toggle-sidebar');
+  if (topBtn) {
+    topBtn.classList.remove('active');
+    topBtn.setAttribute('aria-expanded', 'false');
+  }
+  setTimeout(() => { if (window.map) map.invalidateSize(); }, 320);
+}
+
+function toggleSidebar() {
+  const sb = document.getElementById('sidebar');
+  if (sb && sb.classList.contains('open')) {
+    closeSidebar();
+  } else {
+    openSidebar();
+  }
+}
+
+const btnCloseSidebar = document.getElementById('btn-close-sidebar');
+if (btnCloseSidebar) btnCloseSidebar.addEventListener('click', closeSidebar);
+const btnEdgeToggle = document.getElementById('sidebar-edge-toggle');
+if (btnEdgeToggle) btnEdgeToggle.addEventListener('click', toggleSidebar);
+const btnTopbarToggle = document.getElementById('btn-toggle-sidebar');
+if (btnTopbarToggle) btnTopbarToggle.addEventListener('click', toggleSidebar);
+
+const sidebarEl = document.getElementById('sidebar');
+if (sidebarEl) {
+  sidebarEl.addEventListener('transitionend', () => {
+    if (window.map) map.invalidateSize();
+  });
+}
 
 /* ── House chat ──────────────────────────────────────────────────────── */
 function renderHouseChat(history) {

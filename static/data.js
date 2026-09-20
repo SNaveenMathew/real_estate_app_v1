@@ -350,7 +350,7 @@ function renderInspector() {
         h('dt', {}, 'Concepts'), h('dd', {}, concepts.length ? concepts.slice(0, 12).map(c => h('span', { class: 'chip alias' }, c.aliases[0] || c.key)) : 'None'),
         h('dt', {}, 'Links'), h('dd', {}, rels.length ? rels.map(r => h('div', {}, h('button', { class: 'link-btn mono', type: 'button', onclick: () => select({ type: 'rel', key: r.key, rel: r }) },
           `${r.left_table}.${r.left_expr} = ${r.right_table}.${r.right_expr}`), r.pending ? h('span', { class: 'pill warn', style: { marginLeft: '6px' } }, 'review') : null)) : 'None')),
-      t.dataset_id ? h('div', { class: 'row', style: { marginTop: '8px' } }, h('button', { class: 'btn small', type: 'button', onclick: () => openDataset(t.dataset_id) }, 'Open this dataset')) : null,
+      t.dataset_id ? h('div', { class: 'row', style: { marginTop: '8px' } }, h('button', { class: 'btn small', type: 'button', onclick: () => { openDataset(t.dataset_id); openPanel(); } }, 'Open this dataset')) : null,
       h('ul', { class: 'col-list' }, t.columns.map(c => h('li', {}, h('span', { class: 'mono' }, c.name), h('span', { class: 'muted' }, shortType(c.type)), h('span', { class: 'muted' }, clip(c.note || '', 110))))));
   } else {
     const r = sel.rel, ev = r.evidence && r.evidence.examples ? r.evidence : null;
@@ -363,7 +363,7 @@ function renderInspector() {
         r.preferred === false ? h('span', { class: 'pill' }, 'not preferred') : null, r.bridge ? h('span', { class: 'pill' }, 'bridge') : null),
       h('dl', { class: 'kv' }, r.note ? [h('dt', {}, 'Why'), h('dd', {}, r.note)] : null, r.grain_effect ? [h('dt', {}, 'Row effect'), h('dd', {}, r.grain_effect)] : null,
         r.approved_at ? [h('dt', {}, 'Approved'), h('dd', {}, String(r.approved_at).slice(0, 16).replace('T', ' '))] : null),
-      r.pending ? h('div', { class: 'actions' }, h('button', { class: 'btn primary small', type: 'button', onclick: () => { S.tab = 'review'; renderPanel(); } }, 'Review in the panel')) : null,
+      r.pending ? h('div', { class: 'actions' }, h('button', { class: 'btn primary small', type: 'button', onclick: () => { S.tab = 'review'; renderPanel(); openPanel(); } }, 'Review in the panel')) : null,
       ev ? h('div', { style: { marginTop: '10px' } }, h('h4', {}, 'How it maps when it was approved'), mappingTable(ev, `${r.right_table}`)) : null,
       r.origin !== 'builtin' && !r.pending ? h('div', { class: 'actions' }, h('button', { class: 'btn danger small', type: 'button', onclick: () => revoke(r.key) }, 'Revoke this link')) : null);
   }
@@ -373,6 +373,56 @@ function renderInspector() {
 const confPill = c => h('span', { class: 'pill ' + (c === 'high' ? 'ok' : c === 'medium' ? 'warn' : 'bad') }, `${c} confidence`);
 const statePill = p => ({ approved: h('span', { class: 'pill ok' }, 'Approved'), rejected: h('span', { class: 'pill' }, 'Rejected'),
   revoked: h('span', { class: 'pill' }, 'Revoked'), pending: h('span', { class: 'pill warn' }, 'Needs your review') }[p.status] || h('span', { class: 'pill' }, p.status));
+
+/* ---------------------------------------------------------------- panel open / close */
+function openPanel() {
+  const panel = $('#panel');
+  if (!panel) return;
+  panel.classList.add('open');
+  const topBtn = $('#btn-toggle-panel');
+  if (topBtn) {
+    topBtn.classList.add('active');
+    topBtn.setAttribute('aria-expanded', 'true');
+  }
+  const edgeBtn = $('#dm-edge-toggle');
+  if (edgeBtn) {
+    edgeBtn.classList.add('panel-open');
+    edgeBtn.setAttribute('title', 'Collapse sidebar');
+    const arrow = edgeBtn.querySelector('.edge-arrow');
+    if (arrow) arrow.textContent = '▶';
+    const text = edgeBtn.querySelector('.edge-text');
+    if (text) text.textContent = 'Close';
+  }
+}
+
+function closePanel() {
+  const panel = $('#panel');
+  if (!panel) return;
+  panel.classList.remove('open');
+  const topBtn = $('#btn-toggle-panel');
+  if (topBtn) {
+    topBtn.classList.remove('active');
+    topBtn.setAttribute('aria-expanded', 'false');
+  }
+  const edgeBtn = $('#dm-edge-toggle');
+  if (edgeBtn) {
+    edgeBtn.classList.remove('panel-open');
+    edgeBtn.setAttribute('title', "Expand 'Add a dataset' sidebar");
+    const arrow = edgeBtn.querySelector('.edge-arrow');
+    if (arrow) arrow.textContent = '◀';
+    const text = edgeBtn.querySelector('.edge-text');
+    if (text) text.textContent = 'Add a dataset';
+  }
+}
+
+function togglePanel() {
+  const panel = $('#panel');
+  if (panel && panel.classList.contains('open')) {
+    closePanel();
+  } else {
+    openPanel();
+  }
+}
 
 function renderPanel() {
   const panel = $('#panel'), top = panel.scrollTop;
@@ -385,8 +435,15 @@ function renderPanel() {
 /* ---------------------------------------------------------------- home */
 function homeView() {
   return [
-    h('div', { class: 'panel-head' }, h('h2', {}, 'Add a dataset'),
-      h('p', { class: 'muted' }, 'Upload a file, describe it, then review the links the system proposes. The assistant only uses it after you approve.')),
+    h('div', { class: 'panel-head' },
+      h('div', { class: 'row between', style: { alignItems: 'flex-start' } },
+        h('div', {},
+          h('h2', {}, 'Add a dataset'),
+          h('p', { class: 'muted' }, 'Upload a file, describe it, then review the links the system proposes. The assistant only uses it after you approve.')
+        ),
+        h('button', { class: 'btn-close-panel', type: 'button', title: 'Close sidebar', 'aria-label': 'Close sidebar', onclick: closePanel }, '✕')
+      )
+    ),
     uploadCard(), datasetsCard(), modelCard(),
   ];
 }
@@ -458,6 +515,7 @@ async function adopt(ds, tab) {
   S.ds = ds; S.form = formFrom(ds); S.tab = tab || pickTab(ds); S.lastEnrich = null;
   await loadDatasets();
   await loadCatalog();
+  openPanel();
 }
 function pickTab(ds) {
   const pending = ds.proposals.some(p => p.status === 'pending');
@@ -491,7 +549,13 @@ function datasetView() {
   const ds = S.ds, pending = ds.proposals.filter(p => p.status === 'pending').length;
   const tab = (id, label, disabled) => h('button', { type: 'button', role: 'tab', 'aria-selected': String(S.tab === id), disabled, onclick: () => { S.tab = id; renderPanel(); } }, label);
   return [
-    h('div', { class: 'row between' }, h('button', { class: 'link-btn', type: 'button', onclick: closeDataset }, '‹ All datasets'), statusPill(ds)),
+    h('div', { class: 'row between' },
+      h('button', { class: 'link-btn', type: 'button', onclick: closeDataset }, '‹ All datasets'),
+      h('div', { class: 'row', style: { gap: '8px', alignItems: 'center' } },
+        statusPill(ds),
+        h('button', { class: 'btn-close-panel', type: 'button', title: 'Close sidebar', 'aria-label': 'Close sidebar', onclick: closePanel }, '✕')
+      )
+    ),
     h('div', { class: 'panel-head' }, h('h2', {}, ds.title || ds.table_name),
       h('p', { class: 'muted' }, h('span', { class: 'mono' }, ds.table_name), ' · ', plural(ds.row_count, 'row'), ' · from ', ds.source_filename)),
     (ds.notes || []).length ? h('div', { class: 'note info', style: { marginBottom: '10px' } }, ds.notes.join(' ')) : null,
@@ -782,13 +846,21 @@ function bindToolbar() {
 
 async function init() {
   bindToolbar(); renderLegend();
+  const topBtn = $('#btn-toggle-panel');
+  if (topBtn) topBtn.addEventListener('click', togglePanel);
+  const edgeBtn = $('#dm-edge-toggle');
+  if (edgeBtn) edgeBtn.addEventListener('click', togglePanel);
+
   try { await Promise.all([loadDatasets(), loadCatalog()]); }
   catch (e) {
     $('#canvas').replaceChildren(h('div', { class: 'pad' }, h('div', { class: 'note bad' }, 'Could not load the catalog: ' + e.message),
       h('button', { class: 'btn', type: 'button', style: { marginTop: '8px' }, onclick: init }, 'Try again')));
   }
   renderPanel();
+  if (location.hash === '#add' || new URLSearchParams(location.search).has('dataset_id')) {
+    openPanel();
+  }
   api('/llm/status').then(x => { S.llm = x; if (!S.ds) renderPanel(); }).catch(() => { S.llm = { tiers: { draft: [] }, notes: [] }; if (!S.ds) renderPanel(); });
 }
-window.__dm = { S, uploadFile, openDataset, renderMap, renderPanel, saveForm, analyzeFlow, decide, adopt };
+window.__dm = { S, uploadFile, openDataset, renderMap, renderPanel, saveForm, analyzeFlow, decide, adopt, openPanel, closePanel, togglePanel };
 document.addEventListener('DOMContentLoaded', init);

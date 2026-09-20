@@ -13,6 +13,9 @@
       <span class="crumb">Data model</span>
     </div>
     <nav class="topbar-right" aria-label="Site">
+      <button class="btn-panel-toggle" id="btn-toggle-panel" type="button" aria-expanded="false" title="Toggle 'Add a dataset' sidebar">
+        ➕ Add a dataset
+      </button>
       <a class="nav-link" href="/">Map and chat</a>
       <a class="nav-link" href="/#general-chat">General Chat</a>
     </nav>
@@ -35,6 +38,10 @@
       <div class="dm-canvas" id="canvas" tabindex="-1"><p class="muted pad">Loading…</p></div>
       <div class="dm-legend" id="legend" aria-label="Legend"></div>
       <div class="dm-inspector" id="inspector" hidden></div>
+      <button class="dm-edge-toggle" id="dm-edge-toggle" type="button" title="Toggle 'Add a dataset' sidebar" aria-label="Toggle 'Add a dataset' sidebar">
+        <span class="edge-arrow">◀</span>
+        <span class="edge-text">Add a dataset</span>
+      </button>
     </section>
 
     <aside class="dm-panel" id="panel" aria-label="Add a dataset"></aside>
