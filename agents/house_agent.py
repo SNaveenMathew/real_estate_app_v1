@@ -179,6 +179,11 @@ def make_house_approved_functions(house_id: str) -> dict:
             "requirements": f"Keep the result scoped to house_id={house_id!r}.",
         })
 
+    def get_commute_info() -> str:
+        """Estimated commute from this house to the user's saved work location (free-flow; no traffic)."""
+        from services import commute
+        return commute.describe_for_chat(house_id)
+
     def get_linked_dataset_records(dataset: str = "") -> str:
         """Records from user-added datasets that link to this house through approved catalog relationships."""
         from services.house_links import linked_records
@@ -192,6 +197,7 @@ def make_house_approved_functions(house_id: str) -> dict:
         "search_house_documents": search_house_documents,
         "query_database": query_database,
         "get_linked_dataset_records": get_linked_dataset_records,
+        "get_commute_info": get_commute_info,
     }
 
 
@@ -334,6 +340,12 @@ APPROVED FUNCTIONS
     -> Run a read-only analytical query scoped to this house when the other
         functions do not provide the requested computation.
 
+7. get_commute_info()
+   -> Estimated commute from this house to the user\'s saved work location:
+      drive, bike and walk minutes and miles (free-flow, no traffic) and
+      transit minutes when available, plus the work location and how fresh
+      the estimate is.
+
 RULES
 =====
 1. Output ONLY executable Python code. No markdown fences and no explanation.
@@ -347,14 +359,19 @@ RULES
 8. For comp/sold home: call get_nearby_sold_homes().
 9. For stored descriptions/documents: call search_house_documents(query=...).
 10. For custom house-specific analysis: call query_database(request=...).
-11. You may call multiple functions when the question needs multiple sources.
-12. Set `final_result` to the most relevant result for the response model.
+11. For commute, travel time or distance to work: call get_commute_info().
+12. You may call multiple functions when the question needs multiple sources.
+13. Set `final_result` to the most relevant result for the response model.
 
 EXAMPLES
 ========
 User: What is this house's Walk Score?
 Code:
 final_result = get_house_details()
+
+User: How long is the commute to work?
+Code:
+final_result = get_commute_info()
 
 User: What are the top flood and wildfire risks?
 Code:
@@ -521,7 +538,7 @@ def _linked_datasets_prompt() -> str:
     lines = [
         "ADDITIONAL LINKED DATASETS (added by the user on the Data page; joined to houses by approved relationships)",
         "=" * 78,
-        '7. get_linked_dataset_records(dataset: str = "")',
+        '8. get_linked_dataset_records(dataset: str = "")',
         '   -> Rows from the datasets below that link to THIS house. Pass dataset="<name>" to narrow to one; omit it for all.',
         "   Datasets:",
     ]

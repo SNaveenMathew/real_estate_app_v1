@@ -205,3 +205,91 @@ SEED_DOMAINS = {
     "bike_routes": "mobility",
     "geocode_cache": "system",
 }
+
+
+# ---------------------------------------------------------------------------
+# Commute: a built-in source populated from the sidebar's Commute tab (see services/commute.py).
+# One row per house for the CURRENT work location. Free-flow OpenStreetMap routing, no traffic.
+# ---------------------------------------------------------------------------
+
+TABLES["house_commute"] = TableMeta(
+    "house_commute",
+    "Estimated travel time and distance from each house to the user's saved work location. Drive, bike and walk are "
+    "free-flow OpenStreetMap routing estimates (no traffic); transit is present only when OpenTripPlanner is configured. "
+    "One row per house for the CURRENT work location; the table is empty until a work location is set.",
+    setup_hint="Set your work location in the sidebar's Commute tab (or WORK_ADDRESS in .env), then choose Compute.",
+    column_notes=(
+        ColumnNote("drive_min", "Free-flow drive time in minutes, house to work. NULL when not computed or out of range."),
+        ColumnNote("drive_miles", "Driving distance in miles along the routed path."),
+        ColumnNote("bike_min", "Cycling time in minutes (OpenStreetMap bike routing). NULL beyond ~30 straight-line miles."),
+        ColumnNote("bike_miles", "Cycling distance in miles."),
+        ColumnNote("walk_min", "Walking time in minutes. NULL beyond ~6 straight-line miles (not a realistic walk)."),
+        ColumnNote("walk_miles", "Walking distance in miles."),
+        ColumnNote("transit_min", "Public-transit minutes for a weekday morning. NULL unless OpenTripPlanner is configured."),
+        ColumnNote("transit_transfers", "Number of transfers on the transit itinerary."),
+        ColumnNote("straight_line_miles", "Straight-line (as-the-crow-flies) miles from the house to work."),
+        ColumnNote("status", "ok | partial | failed | out_of_range - how completely the modes were estimated."),
+    ),
+    hidden_columns=("work_key",),
+    grain="one row per house",
+)
+RELATIONSHIPS.append(Relationship(
+    "house_commute", "house_id", "houses", "house_id",
+    "Commute estimates are keyed by house.", "one-to-one",
+    confidence="high", preferred=True, grain_effect="house_commute row -> one house"))
+
+
+def _commute_ops(col):
+    expr = f"house_commute.{col}"
+    return (
+        AVG(expr), MEDIAN(expr),
+        _op("rank", ["shortest", "quickest", "fastest", "closest", "nearest", "lowest", "least", "smallest", "best"],
+            expr, direction="ASC", group_by="houses.address"),
+        _op("rank", ["longest", "slowest", "farthest", "furthest", "highest", "worst", "largest"],
+            expr, direction="DESC", group_by="houses.address"),
+        _op("min", ["minimum", "min"], expr),
+        _op("max", ["maximum", "max"], expr),
+    )
+
+
+def _commute_concept(key, aliases, description, col):
+    """A commute concept; ``overrides`` is computed from alias overlap so a phrase like "bike commute" does not also
+    pull in the drive concept (whose alias "commute" sits inside it) or an existing score concept."""
+    c = _concept(key, ["houses", "house_commute"], aliases, description, columns=(f"house_commute.{col}",),
+                 operations=_commute_ops(col), null_policy="exclude NULL", orderings=(f"house_commute.{col} ASC",),
+                 grain="house", default_operation="rank")
+    mine = [a.lower() for a in aliases]
+    over = sorted(k for k, item in SEMANTIC_GLOSSARY.items() if k != key and any(
+        e.lower() != a and f" {e.lower()} " in f" {a} " for e in item.get("aliases", []) for a in mine))
+    if over:
+        c["overrides"] = over
+    return c
+
+
+SEMANTIC_GLOSSARY["house_commute_drive"] = _commute_concept(
+    "house_commute_drive",
+    ["commute", "commuting", "commute time", "commute times", "commute length", "drive to work", "driving to work",
+     "drive time to work", "driving time to work", "drive time", "driving time", "time to work", "travel time to work",
+     "get to work", "how long to get to work"],
+    "Estimated free-flow drive time in minutes from the house to the user's work location.", "drive_min")
+SEMANTIC_GLOSSARY["house_commute_bike"] = _commute_concept(
+    "house_commute_bike",
+    ["bike commute", "biking commute", "cycling commute", "bike to work", "bicycle to work", "cycle to work",
+     "bike time to work", "biking time to work", "cycling time to work", "bike ride to work"],
+    "Estimated cycling time in minutes from the house to the user's work location.", "bike_min")
+SEMANTIC_GLOSSARY["house_commute_walk"] = _commute_concept(
+    "house_commute_walk",
+    ["walk commute", "walking commute", "walk to work", "walking to work", "walk time to work", "walking time to work"],
+    "Estimated walking time in minutes from the house to the user's work location.", "walk_min")
+SEMANTIC_GLOSSARY["house_commute_transit"] = _commute_concept(
+    "house_commute_transit",
+    ["transit commute", "transit to work", "transit time to work", "public transit to work", "public transportation to work",
+     "bus to work", "take transit to work"],
+    "Estimated public-transit time in minutes from the house to the user's work location (needs OpenTripPlanner).",
+    "transit_min")
+SEMANTIC_GLOSSARY["house_commute_distance"] = _commute_concept(
+    "house_commute_distance",
+    ["commute distance", "distance to work", "miles to work", "how far from work", "how far is work", "how far to work"],
+    "Driving distance in miles from the house to the user's work location.", "drive_miles")
+
+SEED_DOMAINS["house_commute"] = "housing"
