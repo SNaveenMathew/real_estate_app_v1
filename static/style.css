@@ -50,7 +50,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 /* ── Tabs ────────────────────────────────────────────────────────────── */
 .tabs { display: flex; border-bottom: 1px solid #e8e8e8; background: #fafafa; flex-shrink: 0; }
 .tab {
-  flex: 1; padding: 9px 3px; border: none; background: none;
+  flex: 1 1 auto; padding: 9px 6px; border: none; background: none;
   font-size: 12px; color: #888; cursor: pointer; border-bottom: 2px solid transparent;
   transition: all .2s; font-weight: 500; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis;
@@ -402,3 +402,88 @@ input[type="text"] { border: 1px solid #ddd; border-radius: 6px; padding: 6px 8p
   right: 380px;
 }
 
+/* ── Commute (sidebar tab + map layer) ───────────────────────────────── */
+.marker-wrap { position: relative; width: 30px; height: 30px; }
+.marker-wrap.marker-dim { opacity: .35; }
+.commute-chip {
+  position: absolute; top: -10px; right: -16px; min-width: 22px; height: 16px; padding: 0 5px;
+  border-radius: 8px; border: 1.5px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.35);
+  font-size: 10px; font-weight: 700; line-height: 14px; text-align: center; color: #fff;
+  white-space: nowrap; pointer-events: none;
+}
+.commute-chip.good { background: #10b981; }
+.commute-chip.ok   { background: #f59e0b; }
+.commute-chip.far  { background: #ef4444; }
+.work-pin {
+  width: 34px; height: 34px; border-radius: 50%; background: #1a1a2e; color: #fff; font-size: 17px;
+  display: flex; align-items: center; justify-content: center; border: 2px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.4);
+}
+.leaflet-container.picking-commute { cursor: crosshair; }
+
+.layer-check { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; color: #444; cursor: pointer; user-select: none; }
+.commute-legend { margin-top: 6px; font-size: 11px; color: #666; }
+.commute-legend span { display: inline-block; margin-right: 10px; }
+.commute-legend .lg { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 4px; }
+.commute-legend .lg.good { background: #10b981; }
+.commute-legend .lg.ok   { background: #f59e0b; }
+.commute-legend .lg.far  { background: #ef4444; }
+.commute-legend .lg-mode { color: #999; }
+
+/* Sidebar tab. Plain block / inline-block layouts on purpose: they look the same in every rendering engine. */
+.cm-card { border: 1px solid #e8e8e8; border-radius: 10px; padding: 12px 14px; background: #fff; box-sizing: border-box; }
+.cm-card + .cm-card, .cm-root > * + * { margin-top: 12px; }
+.cm-card h4 { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: #222; }
+.cm-muted { color: #8a8f99; font-size: 12px; line-height: 1.45; margin: 0; }
+.cm-input { display: block; width: 100%; box-sizing: border-box; margin-top: 10px; padding: 8px 10px; border: 1px solid #d5dae3; border-radius: 8px; font-size: 13px; background: #fff; }
+.cm-input:focus { outline: 2px solid #4f8ef7; outline-offset: 1px; border-color: #4f8ef7; }
+.cm-actions { margin-top: 10px; }
+.cm-actions .btn-small { display: inline-block; margin: 0 8px 8px 0; }
+.btn-small.cm-secondary { background: #f0f2f5; color: #333; }
+.btn-small.cm-secondary:hover { background: #e4e8ee; }
+.cm-error { margin: 8px 0 0; color: #b3261e; font-size: 12px; }
+.cm-hint { margin: 8px 0 0; font-size: 12px; color: #1f4fae; }
+.cm-privacy { margin-top: 6px; padding-top: 8px; border-top: 1px solid #f0f0f0; }
+.cm-head { display: table; width: 100%; }
+.cm-where { display: table-cell; width: 100%; vertical-align: top; }
+.cm-links { display: table-cell; vertical-align: top; padding-left: 12px; white-space: nowrap; text-align: right; }
+.cm-kicker { margin: 0; font-size: 12px; color: #8a8f99; }
+.cm-work { margin: 2px 0 0; font-size: 13px; font-weight: 600; color: #222; overflow-wrap: anywhere; }
+.cm-link { background: none; border: 0; padding: 0; margin-left: 10px; color: #4f8ef7; font-size: 12px; cursor: pointer; }
+.cm-link:hover { text-decoration: underline; }
+.cm-banner { margin-top: 10px; padding: 8px 10px; border-radius: 8px; background: #fff7e0; color: #7a5a00; font-size: 12px; }
+.cm-banner .btn-small { display: block; margin-top: 6px; }
+.cm-warn { margin-top: 10px; padding: 8px 10px; border-radius: 8px; background: #fff7e0; color: #7a5a00; font-size: 12px; }
+.cm-warn ul { margin: 4px 0 0 16px; padding: 0; }
+.cm-progress { height: 6px; border-radius: 3px; background: #eef1f6; overflow: hidden; margin: 8px 0 6px; }
+.cm-progress span { display: block; height: 100%; background: #4f8ef7; transition: width .4s ease; }
+.cm-modes { margin-top: 4px; }
+.cm-mode { display: grid; grid-template-columns: 52px 1fr auto; align-items: center; gap: 10px; padding: 6px 0; border-top: 1px solid #f3f3f3; }
+.cm-mode:first-child { border-top: 0; }
+.cm-mode-name { font-size: 12px; color: #555; }
+.cm-bar { height: 8px; border-radius: 4px; background: #eef1f6; overflow: hidden; }
+.cm-fill { display: block; height: 100%; border-radius: 4px; }
+.cm-fill.good { background: #10b981; }
+.cm-fill.ok   { background: #f59e0b; }
+.cm-fill.far  { background: #ef4444; }
+.cm-mode-val { font-size: 12px; white-space: nowrap; text-align: right; }
+.cm-mode-val strong { font-size: 13px; color: #222; }
+.cm-mode-na { grid-template-columns: 52px 1fr; }
+.cm-mode-long { font-size: 12px; color: #8a8f99; }
+.cm-foot { margin-top: 8px; }
+.cm-transit-hint { margin-top: 6px; }
+.cm-check { display: block; margin-top: 8px; font-size: 13px; color: #333; cursor: pointer; }
+.cm-check input { margin-right: 8px; vertical-align: middle; }
+.cm-seg { display: inline-block; margin-top: 10px; border: 1px solid #d5dae3; border-radius: 8px; overflow: hidden; white-space: nowrap; }
+.cm-seg button { display: inline-block; border: 0; background: #fff; padding: 5px 14px; font-size: 12px; color: #555; cursor: pointer; }
+.cm-seg button + button { border-left: 1px solid #d5dae3; }
+.cm-seg button.on { background: #4f8ef7; color: #fff; }
+.cm-slider { margin-top: 12px; }
+.cm-slider label { display: flex; justify-content: space-between; font-size: 12px; color: #555; margin-bottom: 4px; }
+.cm-slider output { font-weight: 600; color: #222; }
+.cm-slider input[type=range] { display: block; width: 100%; margin: 0; }
+.cm-providers { list-style: none; margin: 6px 0 0; padding: 0; }
+.cm-providers li { display: grid; grid-template-columns: 52px 1fr auto; gap: 8px; align-items: center; padding: 4px 0; font-size: 12px; }
+.cm-tag { font-size: 10px; padding: 1px 7px; border-radius: 9px; }
+.cm-tag.pub { background: #fff1e0; color: #8a5100; }
+.cm-tag.loc { background: #e4f5ec; color: #17804f; }
+@media (prefers-reduced-motion: reduce) { .cm-progress span { transition: none; } }

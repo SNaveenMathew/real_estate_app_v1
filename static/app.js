@@ -54,18 +54,21 @@ function statusClass(status) {
   return 'default';
 }
 
-function makeIcon(status, selected = false, isFavorite = false) {
+function makeIcon(status, selected = false, isFavorite = false, houseId = null) {
   const sc = statusClass(status);
+  // Commute layer (static/commute.js): a minutes chip on the marker; houses over the limit fade.
+  const chip = (houseId && typeof CommuteUI !== 'undefined') ? CommuteUI.badgeHtml(houseId) : '';
+  const dim  = (houseId && typeof CommuteUI !== 'undefined') ? CommuteUI.dimClass(houseId) : '';
   if (isFavorite) {
     const selCls = selected ? ' selected' : '';
     return L.divIcon({
-      html: `<div class="marker-heart ${sc}${selCls}">♥</div>`,
+      html: `<div class="marker-wrap${dim}"><div class="marker-heart ${sc}${selCls}">♥</div>${chip}</div>`,
       className: '', iconSize: [30, 28], iconAnchor: [15, 28],
     });
   }
   const cls = `marker-pin ${sc}${selected ? ' marker-selected' : ''}`;
   return L.divIcon({
-    html: `<div class="${cls}"></div>`,
+    html: `<div class="marker-wrap${dim}"><div class="${cls}"></div>${chip}</div>`,
     className: '', iconSize: [30, 30], iconAnchor: [15, 30],
   });
 }
@@ -86,7 +89,7 @@ async function loadHouses() {
   geojson.features.forEach(f => {
     const p = f.properties;
     const [lon, lat] = f.geometry.coordinates;
-    const marker = L.marker([lat, lon], { icon: makeIcon(p.status, false, p.is_favorite) });
+    const marker = L.marker([lat, lon], { icon: makeIcon(p.status, false, p.is_favorite, p.house_id) });
 
     marker.on('click', () => selectHouse(p.house_id));
     marker.bindTooltip(p.address || p.house_id, { direction: 'top', offset: [0, -20] });
@@ -121,18 +124,19 @@ async function selectHouse(houseId) {
   // Deselect old
   if (state.selectedHouseId && state.markers[state.selectedHouseId]) {
     const { marker, props } = state.markers[state.selectedHouseId];
-    marker.setIcon(makeIcon(props.status, false, props.is_favorite));
+    marker.setIcon(makeIcon(props.status, false, props.is_favorite, state.selectedHouseId));
   }
 
   state.selectedHouseId = houseId;
   const { marker, props } = state.markers[houseId];
-  marker.setIcon(makeIcon(props.status, true, props.is_favorite));
+  marker.setIcon(makeIcon(props.status, true, props.is_favorite, houseId));
 
   openSidebar();
   document.getElementById('house-title').textContent = props.address || houseId;
 
   // Switch to details tab
   switchTab('details');
+  if (typeof CommuteUI !== 'undefined') CommuteUI.onHouseSelected(houseId);
 
   // Load full details
   try {
@@ -517,7 +521,7 @@ document.getElementById('btn-favorite').addEventListener('click', async () => {
     const entry = state.markers[state.selectedHouseId];
     if (entry) {
       entry.props.is_favorite = isFav;
-      entry.marker.setIcon(makeIcon(entry.props.status, true, isFav));
+      entry.marker.setIcon(makeIcon(entry.props.status, true, isFav, state.selectedHouseId));
     }
   } catch (e) { alert('Could not update favorite: ' + e.message); }
 });
@@ -1381,6 +1385,8 @@ const LayerControl = L.Control.extend({
         <button class="layer-option" data-layer="nri" type="button">NRI</button>
         <button class="layer-option" data-layer="bike" type="button">Bike Lanes</button>
       </div>
+      <label class="layer-check" title="Show each house's commute time to your work location"><input type="checkbox" id="layer-commute" /> Commute time to work</label>
+      <div class="commute-legend" id="commute-legend" style="display:none"></div>
       <div class="layer-toggle-legend" id="layer-legend" style="display:none"></div>
     `;
     L.DomEvent.disableClickPropagation(div);
@@ -1388,6 +1394,8 @@ const LayerControl = L.Control.extend({
     div.querySelectorAll('.layer-option').forEach(btn => {
       btn.addEventListener('click', () => setActiveLayer(btn.dataset.layer));
     });
+    const commuteBox = div.querySelector('#layer-commute');
+    commuteBox.addEventListener('change', () => { if (typeof CommuteUI !== 'undefined') CommuteUI.setLayer(commuteBox.checked); });
     return div;
   },
 });
@@ -1395,7 +1403,7 @@ const LayerControl = L.Control.extend({
 /* ── Boot ────────────────────────────────────────────────────────────── */
 loadHouses();
 map.addControl(new LayerControl());
-map.addControl(new BikeRouteControl());
+map.addControl(new (BikeRouteControl())());   // BikeRouteControl() returns the control CLASS; instantiate it (was `new BikeRouteControl()`, which made Leaflet call .addTo on a class and abort the rest of this script)
 
 // Deep link from the Data page: /#general-chat opens the General Chat sidebar tab.
 if (location.hash === '#general-chat') {

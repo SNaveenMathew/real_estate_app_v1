@@ -20,7 +20,7 @@
   <!-- Marked (markdown rendering) -->
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 
-  <link rel="stylesheet" href="/static/style.css?v=4" />
+  <link rel="stylesheet" href="/static/style.css?v=5" />
 </head>
 <body>
 
@@ -61,6 +61,7 @@
     <div class="tabs" id="sidebar-tabs">
       <button class="tab active" data-tab="details">Details</button>
       <button class="tab" data-tab="risk">Risk</button>
+      <button class="tab" data-tab="commute">Commute</button>
       <button class="tab" data-tab="chat">Chat</button>
       <button class="tab" data-tab="docs">Docs</button>
       <button class="tab" data-tab="general-chat" id="tab-general-chat-btn">💬 General</button>
@@ -74,6 +75,11 @@
     <!-- Risk tab -->
     <div class="tab-pane" id="tab-risk">
       <div id="risk-content"></div>
+    </div>
+
+    <!-- Commute tab -->
+    <div class="tab-pane" id="tab-commute">
+      <div id="commute-content"></div>
     </div>
 
     <!-- Chat tab -->
@@ -156,6 +162,7 @@
 
 
 
-<script src="/static/app.js?v=4"></script>
+<script src="/static/app.js?v=5"></script>
+<script src="/static/commute.js?v=1"></script>
 </body>
 </html>
