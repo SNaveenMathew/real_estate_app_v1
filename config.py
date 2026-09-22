@@ -97,6 +97,25 @@ class Settings(BaseSettings):
     catalog_llm_max_repairs: int = 1
     catalog_llm_disable_thinking: bool = True
 
+    # ── Commute (free/open services only; see services/commute.py) ──────────
+    work_address: str = ""                      # optional default; the Commute tab saves the real value in the DB
+    commute_modes: str = "drive,bike,walk"      # 'transit' is added automatically when OTP_BASE_URL is set
+    osrm_drive_url: str = "https://router.project-osrm.org"
+    osrm_bike_url: str = "https://routing.openstreetmap.de/routed-bike"
+    osrm_foot_url: str = "https://routing.openstreetmap.de/routed-foot"
+    osrm_min_interval_s: float = 1.0            # politeness delay between requests to a public server (0 for your own)
+    osrm_timeout_s: float = 25.0
+    osrm_table_max: int = 90                    # sources per /table request (the public demo allows 100 coordinates)
+    commute_drive_factor: float = 1.0           # multiply free-flow drive time (e.g. 1.3 for rush hour); 1.0 = free-flow
+    otp_base_url: str = ""                      # self-hosted OpenTripPlanner; empty = no transit
+    otp_api: str = "graphql"                    # graphql | rest
+    commute_depart_time: str = "08:00"
+    census_geocoder_url: str = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
+    nominatim_base_url: str = "https://nominatim.openstreetmap.org"
+    nominatim_user_agent: str = "RealEstateIntelligence/1.0 (local personal app)"
+    nominatim_email: str = ""                   # optional contact, per Nominatim's usage policy
+    nominatim_countrycodes: str = "us"          # empty = worldwide
+
     # ── DuckDB ───────────────────────────────────────────────────────────────
     duckdb_path: Path = BASE_DIR / "data" / "real_estate.duckdb"
 

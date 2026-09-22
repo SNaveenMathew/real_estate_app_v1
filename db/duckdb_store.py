@@ -322,6 +322,35 @@ def _ensure_schema(conn: duckdb.DuckDBPyConnection):
         )
     """)
 
+    # Commute estimates (one row per house for the CURRENT work location) and a small key/value store for app
+    # settings such as the saved work location. See services/commute.py.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS house_commute (
+            house_id            VARCHAR PRIMARY KEY,
+            work_key            VARCHAR,     -- which work location + routing settings these numbers were computed for
+            work_label          VARCHAR,
+            drive_min           DOUBLE,      -- free-flow minutes, house -> work
+            drive_miles         DOUBLE,
+            bike_min            DOUBLE,
+            bike_miles          DOUBLE,
+            walk_min            DOUBLE,
+            walk_miles          DOUBLE,
+            transit_min         DOUBLE,      -- only when OpenTripPlanner is configured
+            transit_transfers   INTEGER,
+            straight_line_miles DOUBLE,
+            status              VARCHAR,     -- ok | partial | failed | out_of_range
+            source              VARCHAR,     -- modes that produced numbers, e.g. drive+bike+walk
+            computed_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key        VARCHAR PRIMARY KEY,
+            value      VARCHAR,              -- JSON
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     # Unified data-model catalog (tables, relationships, concepts, entity domains) plus the
     # workflow tables behind the Data page. Built-in rows are seeded here; see db/catalog_store.py.
     from db import catalog_store
@@ -910,6 +939,26 @@ def get_top_msas_by_population(n: int = 50) -> list[dict]:
         ORDER BY m.population DESC
         LIMIT {n}
     """)
+
+
+# ── App settings (small JSON key/value store) ────────────────────────────────
+
+def get_setting(key: str, default=None):
+    rows = get_conn().execute("SELECT value FROM app_settings WHERE key = ?", [key]).fetchall()
+    if not rows or rows[0][0] is None:
+        return default
+    try:
+        return json.loads(rows[0][0])
+    except (TypeError, ValueError):
+        return default
+
+
+def set_setting(key: str, value) -> None:
+    get_conn().execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)", [key, json.dumps(value)])
+
+
+def delete_setting(key: str) -> None:
+    get_conn().execute("DELETE FROM app_settings WHERE key = ?", [key])
 
 
 def close():

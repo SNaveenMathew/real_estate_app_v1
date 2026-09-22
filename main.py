@@ -30,6 +30,7 @@ from services import bike_routing
 from agents.house_agent import run_house_chat
 from agents.general_agent import run_general_chat
 from api.onboarding import router as onboarding_router
+from api.commute import router as commute_router
 from observability import initialize_observability, ensure_phoenix_server, stop_phoenix_server, phoenix_enabled
 
 
@@ -71,7 +72,8 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
-app.include_router(onboarding_router)   # Data page API: /api/onboarding/*
+app.include_router(onboarding_router)
+app.include_router(commute_router)     # Commute tab API: /api/commute/*   # Data page API: /api/onboarding/*
 settings.uploads_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/metrics", make_asgi_app(), name="metrics")
 
@@ -96,9 +98,9 @@ class DocumentRequest(BaseModel):
 import hashlib as _hashlib
 
 def _static_version() -> str:
-    """MD5 of app.js + style.css contents — changes whenever either file changes."""
+    """MD5 of app.js + commute.js + style.css contents — changes whenever any of them changes."""
     h = _hashlib.md5()
-    for name in ("app.js", "style.css"):
+    for name in ("app.js", "commute.js", "style.css"):
         p = Path("static") / name
         if p.exists():
             h.update(p.read_bytes())

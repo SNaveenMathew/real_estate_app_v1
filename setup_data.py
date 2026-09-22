@@ -32,6 +32,32 @@ def banner(text: str):
     print(f"{'─' * 55}")
 
 
+
+def _run_commute_step(explicit: bool) -> None:
+    """Compute house -> work commute estimates for houses that lack a fresh one (free routing services)."""
+    import asyncio
+    from config import settings
+    from services import commute
+    place = commute.get_work()
+    if place is None and getattr(settings, "work_address", ""):
+        try:
+            place = commute.geocode_work_address(settings.work_address)
+            commute.set_work(place)
+            print(f"  ✓ Work location saved from WORK_ADDRESS: {place.label}")
+        except commute.RoutingError as exc:
+            print(f"  ! WORK_ADDRESS could not be located: {exc}")
+            return
+    if place is None:
+        if explicit:
+            print("  (no work location set: use the sidebar's Commute tab or WORK_ADDRESS in .env)")
+        else:
+            print("  (skipped: no work location set)")
+        return
+    snap = asyncio.run(commute.refresh_now("missing"))
+    print(f"  ✓ {snap['message']}" if snap["state"] == "done" else f"  ! {snap['message']}")
+    for w in snap["warnings"]:
+        print(f"    - {w}")
+
 def run_all(only: str = None, resolve_tracts: bool = False,
             no_geocoding: bool = False):
     t0 = time.time()
@@ -213,6 +239,11 @@ def run_all(only: str = None, resolve_tracts: bool = False,
         n_matched = store.match_sold_to_houses()
         print(f"  ✓ {n_matched} sold records linked to houses as historical snapshots")
 
+    # ── Commute times (only when a work location is saved or WORK_ADDRESS is set) ──
+    if only in (None, "redfin", "commute"):
+        banner("Commute Times")
+        _run_commute_step(explicit=(only == "commute"))
+
     # ── Repair X-coded msa_codes ──────────────────────────────────────────
     if only == "repair":
         banner("Repair X-coded MSA Codes in census_msa")
@@ -296,7 +327,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Load data into DuckDB")
     parser.add_argument(
         "--only",
-        choices=["nri", "census", "redfin", "sold", "crime", "geocode", "repair", "match", "bike", "bike_lanes"],
+        choices=["nri", "census", "redfin", "sold", "crime", "geocode", "repair", "match", "bike", "bike_lanes", "commute"],
         help=(
             "Load only a specific dataset, or run a maintenance task:\n"
             "  nri      — FEMA National Risk Index\n"
@@ -306,6 +337,7 @@ if __name__ == "__main__":
             "  crime    — Per-city crime data (data/crime/<city>/)\n"
             "  bike     — Bike Lanes (BikePGH active transportation network)\n"
             "  geocode  — Retry pending geocodes for sold homes\n"
+            "  commute  — Commute times to your saved work location (see the Commute tab)\n"
             "  repair   — Fix X-coded msa_codes in census_msa (no data reload needed)"
         ),
     )
