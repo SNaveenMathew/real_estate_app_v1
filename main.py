@@ -31,6 +31,7 @@ from agents.house_agent import run_house_chat
 from agents.general_agent import run_general_chat
 from api.onboarding import router as onboarding_router
 from api.commute import router as commute_router
+from api.data_sources import router as data_sources_router
 from observability import initialize_observability, ensure_phoenix_server, stop_phoenix_server, phoenix_enabled
 
 
@@ -74,6 +75,7 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.include_router(onboarding_router)
 app.include_router(commute_router)     # Commute tab API: /api/commute/*   # Data page API: /api/onboarding/*
+app.include_router(data_sources_router)  # Data page API: /api/data-sources/*
 settings.uploads_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/metrics", make_asgi_app(), name="metrics")
 

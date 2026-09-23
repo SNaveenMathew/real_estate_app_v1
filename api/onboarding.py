@@ -34,6 +34,7 @@ from config import settings
 from services import catalog_llm
 from services import dataset_onboarding as ob
 from services import dataset_readers as readers
+from services import data_sources
 
 router = APIRouter(prefix="/api/onboarding", tags=["data-onboarding"])
 
@@ -102,6 +103,22 @@ async def upload_dataset(file: UploadFile = File(...), sheet: str | None = Form(
     store.get_conn()
     dest, name = await _save_upload(file)
     try:
+        # Before treating this as a brand-new dataset, check whether its columns
+        # match one of the built-in sources (see services/data_sources.py) — if so,
+        # this is a refresh of an existing table, not a new one: no new dataset
+        # draft, no new proposals/relationships, just upsert into what's already
+        # there (same path the dedicated "Data sources" panel uses).
+        matched_key = None
+        for cols in data_sources.peek_header_candidates(dest, dest.suffix.lower()):
+            matched_key = data_sources.detect_source_for_columns(cols)
+            if matched_key:
+                break
+        if matched_key:
+            result = data_sources.refresh_source(matched_key, dest, name)
+            shutil.rmtree(dest.parent, ignore_errors=True)  # refresh_source already copied what it needs
+            if not result.get("ok"):
+                raise HTTPException(status_code=422, detail=result.get("error", "Refresh failed."))
+            return {"matched_source": matched_key, "refresh_result": result}
         return _call(ob.create_dataset, dest, name, sheet=sheet or None, skiprows=skiprows)
     except HTTPException:
         shutil.rmtree(dest.parent, ignore_errors=True)
