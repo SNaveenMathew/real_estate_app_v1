@@ -73,6 +73,8 @@ class Settings(BaseSettings):
     # cbsa_csv: Path = BASE_DIR / "data" / "census" / "list1_2020.csv"
     cbsa_xlsx: Path = BASE_DIR / "data" / "census" / "list1_2023.xlsx"
     redfin_dir: Path = BASE_DIR / "data" / "redfin"   # drop any number of Redfin CSVs here
+    # Sold homes data
+    # Allegheny County, PA: https://data.wprdc.org/dataset/real-estate-sales
     sold_dir: Path = BASE_DIR / "data" / "sold"
     shapefile_dir: Path = BASE_DIR / "data" / "shapefiles"
     uploads_dir: Path = BASE_DIR / "uploads"

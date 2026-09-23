@@ -364,6 +364,19 @@ def house_linked_datasets() -> list[dict]:
     return out
 
 
+def _data_sources_for(table: str) -> list[str]:
+    """Keys of built-in data sources (see services/data_sources.py) that feed this
+    table, for the Data page's inspector to offer a "download latest + upload"
+    control when the table is selected. Lazy import: data_sources builds its
+    registry from live config at import time and isn't otherwise on the
+    schema_catalog import path."""
+    try:
+        from services import data_sources
+        return data_sources.sources_for_table(table)
+    except Exception:
+        return []
+
+
 def describe_catalog() -> dict:
     """The unified catalog as plain JSON for the Data page's schema map."""
     _ensure()
@@ -391,7 +404,7 @@ def describe_catalog() -> dict:
         tables.append({"name": name, "description": m.description, "grain": m.grain,
                        "domain": m.domain or "other", "origin": m.origin, "dataset_id": m.dataset_id,
                        "agent_visible": m.agent_visible, "rows": _row_count(name), "columns": cols,
-                       "concepts": counts.get(name, 0)})
+                       "concepts": counts.get(name, 0), "data_sources": _data_sources_for(name)})
     rels = []
     for r in _RELATIONSHIPS:
         meta = rel_meta.get(r.key(), {})

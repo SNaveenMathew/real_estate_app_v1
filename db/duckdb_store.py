@@ -322,32 +322,18 @@ def _ensure_schema(conn: duckdb.DuckDBPyConnection):
         )
     """)
 
-    # Commute estimates (one row per house for the CURRENT work location) and a small key/value store for app
-    # settings such as the saved work location. See services/commute.py.
+    # Tracks the most recent Data-page-triggered refresh of each built-in data source
+    # (see services/data_sources.py). Populated only by UI-driven refreshes — a plain
+    # `python setup_data.py` run does not touch this table, so "last updated" reflects
+    # the last time someone used the Data page, not the last time any file changed on disk.
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS house_commute (
-            house_id            VARCHAR PRIMARY KEY,
-            work_key            VARCHAR,     -- which work location + routing settings these numbers were computed for
-            work_label          VARCHAR,
-            drive_min           DOUBLE,      -- free-flow minutes, house -> work
-            drive_miles         DOUBLE,
-            bike_min            DOUBLE,
-            bike_miles          DOUBLE,
-            walk_min            DOUBLE,
-            walk_miles          DOUBLE,
-            transit_min         DOUBLE,      -- only when OpenTripPlanner is configured
-            transit_transfers   INTEGER,
-            straight_line_miles DOUBLE,
-            status              VARCHAR,     -- ok | partial | failed | out_of_range
-            source              VARCHAR,     -- modes that produced numbers, e.g. drive+bike+walk
-            computed_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS app_settings (
-            key        VARCHAR PRIMARY KEY,
-            value      VARCHAR,              -- JSON
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        CREATE TABLE IF NOT EXISTS data_source_log (
+            source_key      VARCHAR PRIMARY KEY,
+            display_name    VARCHAR,
+            last_loaded_at  TIMESTAMP,
+            row_count       BIGINT,
+            source_files    VARCHAR,   -- JSON list of filenames involved in the last refresh
+            message         VARCHAR    -- short human-readable outcome, e.g. warnings/skips
         )
     """)
 
@@ -708,6 +694,46 @@ def upsert_houses_with_snapshots(latest_df: pd.DataFrame, all_rows_df: pd.DataFr
     conn.unregister("__snap_tmp")
 
 
+def mark_removed_favorites(house_ids, source_file: str) -> int:
+    """
+    Explicitly flag houses that disappeared from a *refreshed* Redfin export (sold,
+    delisted, or un-favorited) instead of silently leaving their last-known status
+    stale forever — upsert_houses_with_snapshots only ever touches house_ids present
+    in the new file, so a removed house's row would otherwise never change again.
+
+    Writes a 'Removed from favorites' house_snapshot entry (so the transition shows
+    up in house history) and updates houses.status to match. Safe to call more than
+    once for the same house/file — the snapshot insert is idempotent (INSERT OR
+    IGNORE, keyed the same way every other snapshot is).
+
+    Returns the number of houses flagged.
+    """
+    ids = [h for h in house_ids if h]
+    if not ids:
+        return 0
+    conn = get_conn()
+    today = pd.Timestamp.now().date().isoformat()
+    removed_df = pd.DataFrame({
+        "house_id": ids,
+        "source_file": source_file,
+        "source_type": "redfin",
+        "snapshot_date": today,
+        "status": "Removed from favorites",
+        "price": None,
+    })
+    snap_df = _build_snap_df(removed_df, source_type="redfin")
+    conn.register("__snap_tmp", snap_df)
+    conn.execute(_SNAP_INSERT)
+    conn.unregister("__snap_tmp")
+
+    placeholders = ",".join(["?"] * len(ids))
+    conn.execute(
+        f"UPDATE houses SET status = 'Removed from favorites' WHERE house_id IN ({placeholders})",
+        ids,
+    )
+    return len(ids)
+
+
 def _table_has_pk(conn: duckdb.DuckDBPyConnection, table: str) -> bool:
     """Return True if the table has at least one PRIMARY KEY column."""
     try:
@@ -764,6 +790,41 @@ def toggle_favorite(house_id: str) -> bool:
         "SELECT is_favorite FROM houses WHERE house_id = ?", [house_id]
     ).fetchone()
     return bool(row[0]) if row else False
+
+
+def record_source_load(source_key: str, display_name: str, row_count: int,
+                        source_files: list[str] | None = None, message: str = "") -> None:
+    """Record that a Data-page refresh of `source_key` just ran. Upserts a single row
+    keyed by source_key — see services/data_sources.py for the orchestration that calls
+    this after saving an uploaded file and re-running the matching loader."""
+    conn = get_conn()
+    conn.execute("""
+        INSERT OR REPLACE INTO data_source_log
+            (source_key, display_name, last_loaded_at, row_count, source_files, message)
+        VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?, ?)
+    """, [source_key, display_name, int(row_count), json.dumps(source_files or []), message])
+
+
+def get_source_log(source_key: str | None = None) -> dict:
+    """Return the data_source_log row(s) as a dict keyed by source_key.
+    Pass source_key to fetch just one (returns {} if it has never been refreshed)."""
+    conn = get_conn()
+    if source_key is not None:
+        row = conn.execute(
+            "SELECT * FROM data_source_log WHERE source_key = ?", [source_key]
+        ).fetchdf()
+        if row.empty:
+            return {}
+        rec = _json_safe_record(row.to_dict(orient="records")[0])
+        rec["source_files"] = json.loads(rec["source_files"] or "[]")
+        return rec
+    df = conn.execute("SELECT * FROM data_source_log").fetchdf()
+    out = {}
+    for rec in df.to_dict(orient="records"):
+        rec = _json_safe_record(rec)
+        rec["source_files"] = json.loads(rec["source_files"] or "[]")
+        out[rec["source_key"]] = rec
+    return out
 
 
 def get_all_houses() -> list[dict]:
@@ -939,26 +1000,6 @@ def get_top_msas_by_population(n: int = 50) -> list[dict]:
         ORDER BY m.population DESC
         LIMIT {n}
     """)
-
-
-# ── App settings (small JSON key/value store) ────────────────────────────────
-
-def get_setting(key: str, default=None):
-    rows = get_conn().execute("SELECT value FROM app_settings WHERE key = ?", [key]).fetchall()
-    if not rows or rows[0][0] is None:
-        return default
-    try:
-        return json.loads(rows[0][0])
-    except (TypeError, ValueError):
-        return default
-
-
-def set_setting(key: str, value) -> None:
-    get_conn().execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)", [key, json.dumps(value)])
-
-
-def delete_setting(key: str) -> None:
-    get_conn().execute("DELETE FROM app_settings WHERE key = ?", [key])
 
 
 def close():

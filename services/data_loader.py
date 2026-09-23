@@ -123,6 +123,23 @@ def _extract_snapshot_date(filename: str) -> str | None:
     return None
 
 
+def compute_redfin_house_ids(path: Path) -> set[str]:
+    """Read a single Redfin CSV and return the set of house_ids it contains, without
+    touching the database. Used by services/data_sources.py to detect which
+    previously-favorited houses disappeared when a file is replaced with a refreshed
+    export (see db.duckdb_store.mark_removed_favorites)."""
+    try:
+        df = pd.read_csv(path, encoding="utf-8-sig", low_memory=False)
+    except Exception:
+        return set()
+    df.columns = df.columns.str.strip().str.lower()
+    col_rename = {c: _REDFIN_COL_MAP[c] for c in df.columns if c in _REDFIN_COL_MAP}
+    df = df.rename(columns=col_rename)
+    if "address" not in df.columns:
+        return set()
+    return set(df.apply(_house_id, axis=1))
+
+
 def load_redfin(geo_utils=None) -> int:
     """Load all Redfin CSVs from data/redfin/ directory."""
     redfin_dir = settings.redfin_dir
@@ -1445,7 +1462,7 @@ class CountyParserBase:
 class AlleghenyParser(CountyParserBase):
     """
     Parser for Allegheny County, PA property sales export.
-    Source: https://apps.county.allegheny.pa.us/SaleSearch/SaleSearch
+    Source: https://data.wprdc.org/dataset/real-estate-sales
     Columns: _id, PARID, FULL_ADDRESS, PROPERTYHOUSENUM, PROPERTYFRACTION,
              PROPERTYADDRESSDIR, PROPERTYADDRESSSTREET, PROPERTYADDRESSSUF,
              PROPERTYADDRESSUNITDESC, PROPERTYUNITNO, PROPERTYCITY,
