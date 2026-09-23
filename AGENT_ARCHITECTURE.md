@@ -35,6 +35,7 @@ query-planning/SQL pipeline described here.
 6. [Known boundaries and sharp edges](#6-known-boundaries-and-sharp-edges)
 7. [Extending the agent](#7-extending-the-agent)
 8. [The catalog is a store, and how it changes](#8-the-catalog-is-a-store-and-how-it-changes)
+9. [Commute times](#9-commute-times)
 
 ---
 
@@ -734,3 +735,59 @@ ordered endpoint chain with health checks and fallback, serializes calls per end
 Because a person reviews every proposal, the cost of a poor draft is bounded by a correction, which is what
 makes a small local model sufficient for this role; `python -m services.catalog_llm --selftest` measures
 whether a given model is.
+
+---
+
+## 9. Commute times
+
+### 9.1 No LLM anywhere in the computation
+
+Commute estimates are deterministic: an address lookup, routing requests, and arithmetic. The LLM only ever sees
+the stored numbers, through the same channels as every other fact (the planner and SQL path in General Chat, a
+function result in House Chat), so the §5 boundary is unchanged.
+
+```
+work address (typed | "lat, lon" | map click)
+  -> geocode_work_address()   Census one-line geocoder, then Nominatim              [HTTP, worker thread]
+  -> app_settings["work_location"]                                                  [DuckDB]
+  -> refresh job (asyncio task, single flight)
+       per chunk of ~90 houses, per mode, in a worker thread:
+         OSRM /table  (sources = houses, destination = work)  -> falls back to /route per house
+         OpenTripPlanner (optional, per house)
+       straight-line caps skip absurd modes (walk > 6 mi, bike > 30 mi, drive > 250 mi)
+       rows written on the loop thread: INSERT OR REPLACE INTO house_commute
+  -> house_commute  (one row per house, keyed to the CURRENT work location by work_key)
+```
+
+`work_key` hashes the destination, the enabled modes, the server URLs and the drive factor. A row whose key does not
+match the current inputs is *stale*: the map and the summary ignore it (numbers for a previous work location would
+mislead), and the tab offers **Recompute**. This is why changing any input needs no migration and no manual cleanup.
+
+### 9.2 Threading
+
+As in the rest of the application, the single DuckDB connection is used only on the event-loop thread. Only pure-HTTP
+work (geocoding, routing) runs in worker threads, so a slow public server never freezes the map or the chats. The job
+is single-flight (`start_refresh` claims it synchronously), always leaves the `running` state (errors are recorded as
+job state, never raised), and reports *why* a mode came back empty (`client.last_error`), so a dead bike server is a
+visible warning instead of silently missing numbers.
+
+### 9.3 How the chats reach it
+
+- **General Chat**: `house_commute` is an ordinary built-in catalog table (`db/catalog_seed.py`), related to `houses` by
+  `house_id`, with five concepts (drive, bike, walk, transit, distance). Rank operations carry
+  `group_by="houses.address"`, so a ranking returns houses. Mode concepts declare `overrides: ["house_commute_drive"]`
+  (computed from alias overlap when the seed is built), so "bike commute" is not also read as the generic word
+  "commute". Nothing in the planner is commute-specific; a test asserts that no existing alias, in any sentence
+  shape, started selecting a commute concept.
+- **House Chat**: a new approved function, `get_commute_info()`, returns the estimates, the work location, whether
+  they are up to date, and a plain statement of the basis (free-flow, no traffic). The dynamic linked-datasets prompt
+  section from section 8 is now numbered 8.
+- Why a separate table rather than columns on `houses`: the loader inserts into `houses` positionally, so new columns
+  would break it; and a table keyed by house carries its own freshness (`work_key`, `computed_at`, `status`).
+
+### 9.4 Privacy and honesty
+
+The work location and house coordinates go to the configured routing servers; the API reports whether each is public
+(`is_public_url`) so the UI can say so, and self-hosting OSRM keeps everything local. Drive, bike and walk are
+free-flow estimates and are labeled as such everywhere they appear. Transit needs a self-hosted OpenTripPlanner and is
+tested only against a mock.

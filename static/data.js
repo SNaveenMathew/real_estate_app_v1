@@ -37,6 +37,18 @@ const fmt = n => (n == null ? '–' : Number(n).toLocaleString('en-US'));
 const pct = n => (n == null ? '–' : `${Number(n) % 1 ? Number(n).toFixed(1) : Number(n)}%`);
 const str = v => (v == null || v === '' ? '—' : String(v));
 const plural = (n, one, many) => `${fmt(n)} ${n === 1 ? one : (many || one + 's')}`;
+const timeAgo = iso => {
+  if (!iso) return 'never';
+  const ms = Date.now() - new Date(iso).getTime();
+  const mins = Math.round(ms / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs} hr${hrs === 1 ? '' : 's'} ago`;
+  const days = Math.round(hrs / 24);
+  if (days < 30) return `${days} day${days === 1 ? '' : 's'} ago`;
+  return new Date(iso).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+};
 
 /* ---------------------------------------------------------------- API */
 async function api(path, opts = {}) {
@@ -52,6 +64,17 @@ const JSON_HDR = { 'Content-Type': 'application/json' };
 const post = (p, body) => api(p, { method: 'POST', headers: JSON_HDR, body: JSON.stringify(body || {}) });
 const put = (p, body) => api(p, { method: 'PUT', headers: JSON_HDR, body: JSON.stringify(body || {}) });
 
+/* /api/data-sources lives outside the /api/onboarding prefix api() uses above. */
+async function apiDS(path, opts = {}) {
+  const res = await fetch('/api/data-sources' + path, opts);
+  if (!res.ok) {
+    let msg = `${res.status} ${res.statusText}`;
+    try { const j = await res.json(); if (j && j.detail) msg = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail); } catch (_) { /* keep default */ }
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
 /* ---------------------------------------------------------------- state */
 const LANES = ['housing', 'geography', 'risk', 'sales', 'safety', 'mobility', 'environment', 'demographics', 'other', 'system'];
 const DOMAIN_COLOR = { housing: '#3d7be8', geography: '#0f9d8a', risk: '#e0742f', sales: '#b08a1e', safety: '#c2415c',
@@ -65,6 +88,7 @@ const S = {
   colRole: 'all', colQuery: '', justAdded: new Set(), edits: {}, lastEnrich: null,
   filter: { q: '', hidden: new Set(), allCols: false, system: false }, upload: { sheet: '', skiprows: '' },
   zoom: 1.0,
+  dataSources: [], activeSourceKey: null, sourceResult: null,
 };
 
 function toast(msg, kind = '') {
@@ -90,6 +114,10 @@ async function loadCatalog() {
   const q = S.ds ? `?dataset_id=${encodeURIComponent(S.ds.dataset_id)}` : '';
   S.catalog = await api('/catalog' + q);
   renderMap();
+}
+async function loadDataSources() {
+  const d = await apiDS('');
+  S.dataSources = d.sources;
 }
 
 /* ================================================================ CATALOG MAP */
@@ -479,6 +507,7 @@ function renderInspector() {
         h('dt', {}, 'Links'), h('dd', {}, rels.length ? rels.map(r => h('div', {}, h('button', { class: 'link-btn mono', type: 'button', onclick: () => select({ type: 'rel', key: r.key, rel: r }) },
           `${r.left_table}.${r.left_expr} = ${r.right_table}.${r.right_expr}`), r.pending ? h('span', { class: 'pill warn', style: { marginLeft: '6px' } }, 'review') : null)) : 'None')),
       t.dataset_id ? h('div', { class: 'row', style: { marginTop: '8px' } }, h('button', { class: 'btn small', type: 'button', onclick: () => { openDataset(t.dataset_id); openPanel(); } }, 'Open this dataset')) : null,
+      (t.data_sources || []).length ? dataSourcesSection(t.data_sources) : null,
       h('ul', { class: 'col-list' }, t.columns.map(c => h('li', {}, h('span', { class: 'mono' }, c.name), h('span', { class: 'muted' }, shortType(c.type)), h('span', { class: 'muted' }, clip(c.note || '', 110))))));
   } else {
     const r = sel.rel, ev = r.evidence && r.evidence.examples ? r.evidence : null;
@@ -495,6 +524,83 @@ function renderInspector() {
       ev ? h('div', { style: { marginTop: '10px' } }, h('h4', {}, 'How it maps when it was approved'), mappingTable(ev, `${r.right_table}`)) : null,
       r.origin !== 'builtin' && !r.pending ? h('div', { class: 'actions' }, h('button', { class: 'btn danger small', type: 'button', onclick: () => revoke(r.key) }, 'Revoke this link')) : null);
   }
+}
+
+/* ---------------------------------------------------------------- data sources */
+function dataSourcesSection(keys) {
+  const rows = keys.map(k => S.dataSources.find(s => s.key === k)).filter(Boolean);
+  if (!rows.length) return null;
+  return h('div', { style: { marginTop: '10px' } }, h('h4', {}, 'Data sources'),
+    h('ul', { class: 'ds-list' }, rows.map(r => h('li', {},
+      h('div', {},
+        h('button', { class: 'title', type: 'button', onclick: () => openSourceView(r.key) }, r.label),
+        h('div', { class: 'muted' }, 'Last refreshed from here: ', timeAgo(r.last_loaded_at))),
+      h('button', { class: 'btn small', type: 'button', onclick: () => openSourceView(r.key) }, 'Manage')))));
+}
+
+function openSourceView(key) {
+  S.activeSourceKey = key; S.sourceResult = null;
+  openPanel(); renderPanel();
+}
+function closeSourceView() {
+  S.activeSourceKey = null; S.sourceResult = null;
+  renderPanel();
+}
+
+async function uploadSourceFile(key, file) {
+  await withBusy(`Uploading ${file.name}…`, async () => {
+    const fd = new FormData();
+    fd.append('file', file);
+    try {
+      const result = await apiDS(`/${key}/refresh`, { method: 'POST', body: fd });
+      S.sourceResult = result;
+      await Promise.all([loadDataSources(), loadCatalog()]);
+      toast(result.message || 'Refreshed.', result.warnings && result.warnings.length ? 'warn' : 'ok');
+    } catch (e) {
+      S.sourceResult = { ok: false, error: e.message || String(e) };
+      toast(e.message || String(e), 'err');
+    }
+  });
+}
+
+function sourceView() {
+  const src = S.dataSources.find(s => s.key === S.activeSourceKey);
+  if (!src) return [h('div', { class: 'panel-head' }, h('h2', {}, 'Data source'), h('p', { class: 'muted' }, 'Not found.')),
+    h('button', { class: 'link-btn', type: 'button', onclick: closeSourceView }, '‹ Back')];
+  const input = h('input', { type: 'file', hidden: true, accept: src.accept, onchange: e => { const f = e.target.files[0]; e.target.value = ''; if (f) uploadSourceFile(src.key, f); } });
+  const drop = h('label', { class: 'drop', tabindex: 0 }, input, h('strong', {}, 'Choose a file'), ' or drop it here',
+    h('small', {}, `Accepts ${src.accept}`));
+  drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } });
+  drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('is-over'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('is-over'));
+  drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('is-over'); const f = e.dataTransfer && e.dataTransfer.files[0]; if (f) uploadSourceFile(src.key, f); });
+
+  const res = S.sourceResult;
+  return [
+    h('div', { class: 'row between' },
+      h('button', { class: 'link-btn', type: 'button', onclick: closeSourceView }, '‹ All data sources'),
+      h('button', { class: 'btn-close-panel', type: 'button', title: 'Close sidebar', 'aria-label': 'Close sidebar', onclick: closePanel }, '✕')
+    ),
+    h('div', { class: 'panel-head' }, h('h2', {}, src.label),
+      h('p', { class: 'muted' }, h('span', { class: 'pill' }, src.category), ' · ', plural(src.current_row_count, 'row'), ' currently loaded')),
+    h('div', { class: 'card' },
+      h('p', {}, src.instructions),
+      src.source_url ? h('p', {}, h('a', { href: src.source_url, target: '_blank', rel: 'noopener' }, 'Open the current source ↗')) : null,
+      src.notes ? h('div', { class: 'note warn', style: { marginTop: '8px' } }, src.notes) : null),
+    h('div', { class: 'card' },
+      h('h3', {}, 'Last refresh from here'),
+      h('dl', { class: 'kv' },
+        h('dt', {}, 'When'), h('dd', {}, timeAgo(src.last_loaded_at)),
+        h('dt', {}, 'Rows'), h('dd', {}, src.last_row_count != null ? fmt(src.last_row_count) : '—'),
+        h('dt', {}, 'File(s)'), h('dd', {}, (src.last_source_files || []).length ? (src.last_source_files || []).map(f => h('span', { class: 'chip' }, f)) : '—')),
+      src.last_message ? h('p', { class: 'muted', style: { marginTop: '6px' } }, src.last_message) : null),
+    h('div', { class: 'card' }, h('h3', {}, 'Upload the latest export'), drop),
+    res && res.ok === false ? h('div', { class: 'note bad' }, res.error) : null,
+    res && res.ok ? [
+      h('div', { class: 'note ' + (res.warnings && res.warnings.length ? 'warn' : 'ok') }, res.message),
+      (res.warnings || []).length ? h('ul', { class: 'col-list' }, res.warnings.map(w => h('li', {}, w))) : null,
+    ] : null,
+  ];
 }
 
 /* ================================================================ WORKBENCH */
@@ -556,7 +662,7 @@ function renderPanel() {
   const panel = $('#panel'), top = panel.scrollTop;
   panel.replaceChildren();
   append(panel, [S.busy ? [h('div', { class: 'progress', role: 'progressbar', 'aria-label': S.busy }), h('p', { class: 'muted', style: { marginBottom: '10px' } }, S.busy)] : null,
-    S.ds ? datasetView() : homeView()]);      // append() flattens nested arrays and skips null
+    S.activeSourceKey ? sourceView() : (S.ds ? datasetView() : homeView())]);      // append() flattens nested arrays and skips null
   panel.scrollTop = top;
 }
 
@@ -572,8 +678,25 @@ function homeView() {
         h('button', { class: 'btn-close-panel', type: 'button', title: 'Close sidebar', 'aria-label': 'Close sidebar', onclick: closePanel }, '✕')
       )
     ),
-    uploadCard(), datasetsCard(), modelCard(),
+    uploadCard(), dataSourcesCard(), datasetsCard(), modelCard(),
   ];
+}
+
+function dataSourcesCard() {
+  const byCategory = {};
+  for (const s of S.dataSources) (byCategory[s.category] = byCategory[s.category] || []).push(s);
+  return h('div', { class: 'card' },
+    h('details', {},
+      h('summary', {}, h('strong', {}, 'Data sources'), ' ',
+        h('span', { class: 'muted' }, `— ${S.dataSources.length} built-in source(s), download links + refresh`)),
+      Object.entries(byCategory).map(([cat, rows]) => [
+        h('h4', { style: { marginTop: '10px' } }, cat),
+        h('ul', { class: 'ds-list' }, rows.map(r => h('li', {},
+          h('div', {},
+            h('button', { class: 'title', type: 'button', onclick: () => openSourceView(r.key) }, r.label),
+            h('div', { class: 'muted' }, plural(r.current_row_count, 'row'), ' · last refreshed here ', timeAgo(r.last_loaded_at))),
+          h('button', { class: 'btn small', type: 'button', onclick: () => openSourceView(r.key) }, 'Manage')))),
+      ])));
 }
 
 function uploadCard() {
@@ -633,9 +756,18 @@ async function uploadFile(file) {
     fd.append('file', file);
     if (S.upload.sheet) fd.append('sheet', S.upload.sheet);
     if (S.upload.skiprows !== '') fd.append('skiprows', S.upload.skiprows);
-    const ds = await api('/datasets', { method: 'POST', body: fd });
-    await adopt(ds, 'describe');
-    toast(`Read ${fmt(ds.row_count)} rows and ${ds.columns.length} columns. Describe it next.`, 'ok');
+    const res = await api('/datasets', { method: 'POST', body: fd });
+    if (res.matched_source) {
+      // Columns matched an existing built-in source — it was refreshed in place
+      // (see services/data_sources.py), not staged as a new dataset draft.
+      await Promise.all([loadDataSources(), loadCatalog()]);
+      const label = (S.dataSources.find(s => s.key === res.matched_source) || {}).label || res.matched_source;
+      toast(`This matches "${label}", an existing data source — ${res.refresh_result.message}`,
+        res.refresh_result.warnings && res.refresh_result.warnings.length ? 'warn' : 'ok');
+      return;
+    }
+    await adopt(res, 'describe');
+    toast(`Read ${fmt(res.row_count)} rows and ${res.columns.length} columns. Describe it next.`, 'ok');
   });
 }
 
@@ -990,7 +1122,7 @@ async function init() {
   const edgeBtn = $('#dm-edge-toggle');
   if (edgeBtn) edgeBtn.addEventListener('click', togglePanel);
 
-  try { await Promise.all([loadDatasets(), loadCatalog()]); }
+  try { await Promise.all([loadDatasets(), loadCatalog(), loadDataSources()]); }
   catch (e) {
     $('#canvas').replaceChildren(h('div', { class: 'pad' }, h('div', { class: 'note bad' }, 'Could not load the catalog: ' + e.message),
       h('button', { class: 'btn', type: 'button', style: { marginTop: '8px' }, onclick: init }, 'Try again')));
@@ -1001,5 +1133,5 @@ async function init() {
   }
   api('/llm/status').then(x => { S.llm = x; if (!S.ds) renderPanel(); }).catch(() => { S.llm = { tiers: { draft: [] }, notes: [] }; if (!S.ds) renderPanel(); });
 }
-window.__dm = { S, uploadFile, openDataset, renderMap, renderPanel, saveForm, analyzeFlow, decide, adopt, openPanel, closePanel, togglePanel, setZoom, zoomIn, zoomOut, zoomReset, fitZoom };
+window.__dm = { S, uploadFile, openDataset, renderMap, renderPanel, saveForm, analyzeFlow, decide, adopt, openPanel, closePanel, togglePanel, setZoom, zoomIn, zoomOut, zoomReset, fitZoom, openSourceView, closeSourceView, uploadSourceFile };
 document.addEventListener('DOMContentLoaded', init);

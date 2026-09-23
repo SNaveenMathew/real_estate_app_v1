@@ -139,6 +139,7 @@ architecture; the SQL agent queries physical tables only.
 - `llama-server` (llama.cpp) installed and running, or Ollama as an alternative
 - Phoenix is optional. When `PHOENIX_ENABLED=true`, the app starts a local Phoenix server automatically on `http://127.0.0.1:6006` if that port is available.
 - Internet access is needed for Nominatim geocoding when sold-home addresses or bike-route endpoints are not already cached.
+- [Commute times](#commute-times) call free public routing servers (OSRM) unless you run your own; nothing else in the app needs a key or an account.
 
 ---
 
@@ -248,6 +249,12 @@ Open **http://localhost:8000** in your browser.
 
 ## Data Sources
 
+### Recent data-source improvements
+
+The app now includes a built-in data-source registry with direct download links and a Data page upload flow for refreshing files without changing the normal `python setup_data.py` workflow. Supported datasets can be reloaded in-place, with append-vs-replace behavior handled automatically for multi-file sources like Redfin, crime, and BikePGH. Redfin refreshes also flag houses that disappeared from a reused export so the status change is recorded in house history instead of silently going stale.
+
+The "Add a dataset" workflow also recognizes known source schemas and upserts into the matching existing table instead of creating a draft dataset. A few crime sources have public links but may need parser updates if their schemas drift over time, especially Pittsburgh, Indianapolis, and Minneapolis.
+
 ### Redfin Favorites (required to see houses on the map)
 
 1. Go to Redfin → My Redfin → Favorites (or Saved Searches)
@@ -345,6 +352,12 @@ anywhere else.
 
 ---
 
+### Commute (optional, needs a work location)
+
+Drive, bike and walk times from every house to your work address, computed with free OpenStreetMap
+routing. Nothing to download: set the address in the sidebar's **Commute** tab. See
+[Commute times](#commute-times) for what is sent where and how to self-host the routing server.
+
 ## Usage Guide
 
 ### Map
@@ -432,6 +445,114 @@ The vector database (ChromaDB) grows automatically as you paste descriptions in 
 | "NRI" layer is empty / shows a warning | It needs both tract *geometry* (from the NRI shapefile, or TIGER/Line shapefiles in `data/shapefiles/`) and tract *attributes* (`python setup_data.py --only nri`) — the layer's warning message says which is missing |
 | Phoenix is unavailable | Set `PHOENIX_ENABLED=false` to run without tracing, or start it manually with `python -m phoenix.server.main serve` |
 | Bike route returns no route | Confirm BikePGH layers were loaded with `python setup_data.py --only bike`; the router does not fall back to an external road-routing service |
+
+---
+
+## Commute times
+
+Say where you work and the app estimates how long each house is from it by car, bike and on foot,
+shows the minutes on the map, and lets both chats rank houses by commute. Free and open only: no API
+keys, no accounts, no credits.
+
+> Unlike the BikePGH route planner (which is fully local), commute times **do** call an external
+> routing service: OSRM. Read [Privacy](#privacy-and-self-hosting) below.
+
+### Set it up
+
+1. Select a house and open the **Commute** tab.
+2. Type your work address (or coordinates such as `40.4406, -79.9959`), or choose **Click the map instead**.
+3. The address is looked up and every house is computed in the background (a progress bar shows). A new
+   house, or a new work location, is computed the same way.
+
+Prefer configuration? Put `WORK_ADDRESS=...` in `.env` and run `python setup_data.py --only commute`. The full
+data load (`python setup_data.py`) also computes commutes whenever a work location exists.
+
+### What you get
+
+- **Commute tab**: for the selected house, one bar per mode (drive, bike, walk; transit if configured) with minutes
+  and miles. Colors follow *your* limit ("My maximum commute"): green up to two-thirds of it, amber up to it, red beyond.
+- **Map layer**: tick **Commute time to work** in the Map Layer control. Each pin shows its minutes, houses over your
+  limit turn red and fade (the one you have open never fades), and your work location is marked.
+- **General Chat**: `house_commute` is a built-in catalog table, so questions such as *"Which houses have the shortest
+  commute?"*, *"Which house has the longest bike commute?"* or *"What is the average commute distance?"* are planned
+  and answered like any other. Mode phrases win over the generic word "commute" (a declared `overrides`, see the
+  architecture doc).
+- **House Chat**: *"How long is the commute from here?"* calls `get_commute_info()`.
+
+### Free services used
+
+| What | Service | Notes |
+|---|---|---|
+| Work address to coordinates | US Census geocoder, then OpenStreetMap Nominatim | one lookup per change; Nominatim's usage policy is followed (identifying `User-Agent`, at most 1 request/second) |
+| Drive | OSRM public demo server (`router.project-osrm.org`) | no key |
+| Bike, walk | OSRM on `routing.openstreetmap.de` (FOSSGIS) | no key |
+| Transit (optional) | **your own** OpenTripPlanner over a GTFS feed | off unless `OTP_BASE_URL` is set |
+
+### How to read the numbers
+
+Drive, bike and walk are **free-flow estimates**: OpenStreetMap roads, house to work, with no traffic, no signal
+timing and no time-of-day effect, so drive times are best-case. `COMMUTE_DRIVE_FACTOR` (for example `1.3`) applies a
+rough rush-hour allowance to drive only. Walking is not estimated beyond ~6 straight-line miles, cycling beyond ~30,
+driving beyond ~250 (the tab says "too far to walk"). Requests are batched (about 90 houses per request) and spaced by
+`OSRM_MIN_INTERVAL_S` to stay within the public servers' fair use.
+
+### Privacy and self-hosting
+
+Your work location and each house's coordinates are sent to the routing servers above (public by default); the tab
+lists exactly which. To keep them private, run OSRM yourself (any container runtime works: Docker Engine, Podman).
+The extracted files are specific to a profile, so use one folder per profile:
+
+```bash
+# car profile, Pennsylvania extract from Geofabrik (repeat with bicycle.lua / foot.lua in their own folders)
+mkdir osrm-car && cd osrm-car
+wget https://download.geofabrik.de/north-america/us/pennsylvania-latest.osm.pbf
+docker run -t -v "$PWD:/data" ghcr.io/project-osrm/osrm-backend osrm-extract   -p /opt/car.lua /data/pennsylvania-latest.osm.pbf
+docker run -t -v "$PWD:/data" ghcr.io/project-osrm/osrm-backend osrm-partition /data/pennsylvania-latest.osrm
+docker run -t -v "$PWD:/data" ghcr.io/project-osrm/osrm-backend osrm-customize /data/pennsylvania-latest.osrm
+docker run -t -p 5000:5000 -v "$PWD:/data" ghcr.io/project-osrm/osrm-backend \
+  osrm-routed --algorithm mld --max-table-size 1000 /data/pennsylvania-latest.osrm
+```
+
+Then in `.env` (bike and walk servers on ports 5001 and 5002 in the same way):
+
+```
+OSRM_DRIVE_URL=http://localhost:5000
+OSRM_BIKE_URL=http://localhost:5001
+OSRM_FOOT_URL=http://localhost:5002
+OSRM_MIN_INTERVAL_S=0
+OSRM_TABLE_MAX=500
+```
+
+The tab then reports "your server" and no longer says coordinates leave your machine (only the address lookup still does).
+
+### Transit (optional, experimental)
+
+OpenTripPlanner is free and open source, but no hosted instance exists for arbitrary use, so transit is off by default.
+To enable it: download your agency's GTFS feed and an OpenStreetMap extract, build and serve an OpenTripPlanner 2.x
+graph, and set `OTP_BASE_URL=http://localhost:8080`. The app asks its GTFS GraphQL API (`OTP_API=rest` selects the
+legacy REST API) for a weekday-morning trip (`COMMUTE_DEPART_TIME`, default `08:00`). **This path is exercised only
+against a mock OpenTripPlanner in the tests.** Check a few itineraries against your own instance before relying on it.
+
+### Settings
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `WORK_ADDRESS` | empty | optional default; the Commute tab saves the real value in the database |
+| `COMMUTE_MODES` | `drive,bike,walk` | modes to estimate (`transit` turns on with `OTP_BASE_URL`) |
+| `OSRM_DRIVE_URL`, `OSRM_BIKE_URL`, `OSRM_FOOT_URL` | public servers | one OSRM server per profile |
+| `OSRM_MIN_INTERVAL_S`, `OSRM_TIMEOUT_S`, `OSRM_TABLE_MAX` | `1.0`, `25`, `90` | politeness delay, timeout, sources per request |
+| `COMMUTE_DRIVE_FACTOR` | `1.0` | multiplies drive time (`1.3` is a rough rush hour) |
+| `OTP_BASE_URL`, `OTP_API`, `COMMUTE_DEPART_TIME` | empty, `graphql`, `08:00` | optional transit |
+| `NOMINATIM_EMAIL`, `NOMINATIM_USER_AGENT`, `NOMINATIM_COUNTRYCODES` | empty, app name, `us` | Nominatim etiquette and scope |
+
+### Limits
+
+- One work location (a second workplace is a natural extension: the table is keyed by house).
+- House to work only, free-flow, no time of day. There are no isochrones: OSRM has no isochrone endpoint.
+- Houses need coordinates; houses without them are skipped and counted.
+- Changing the work location, modes, server URLs or drive factor marks stored estimates stale; the tab offers **Recompute**.
+- If a public server is unreachable or rate-limits you, the job finishes and lists which mode was missing and why
+  (for example "Bike: no routes were returned (...)"); retry later or self-host.
 
 ---
 
@@ -637,6 +758,7 @@ update_eval_ground_truth.py  Regenerate golden expectations from fixture SQL
 
 api/
   onboarding.py       Data page HTTP API (/api/onboarding/*)
+  commute.py          Commute tab HTTP API (/api/commute/*)
 
 agents/
   tools.py            LangChain tools (SQL, vector search, price estimation)
@@ -664,6 +786,7 @@ services/
   dataset_onboarding.py      Data page workflow (stage, enrich, propose, approve, publish, revoke)
   catalog_llm.py      Optional model router for drafting wording, plus --selftest
   house_links.py      Rows of user-added datasets linked to one house (House Chat)
+  commute.py          Commute times: work-address lookup, OSRM/OpenTripPlanner clients, refresh job
 
 eval/
   fixtures.py         Builds a small deterministic DB with hand-verifiable answers
@@ -679,6 +802,7 @@ static/
   style.css            App styles, BikePGH route visuals, route planner UI
   app.js              Frontend logic, layer toggles, bike route rendering
   data.html/.css/.js  The Data page: catalog map + dataset workbench
+  commute.js          The Commute tab and the commute-minutes map layer
 
 observability.py      Phoenix tracing + Prometheus metrics helper
 
@@ -750,6 +874,20 @@ is the recommended way to use those endpoints.
 | POST | `/api/onboarding/relationships/revoke` | `{"rel_key": "..."}` |
 | POST | `/api/onboarding/datasets/{id}/retire` | Retire a published dataset / discard a draft |
 | GET / POST | `/api/onboarding/llm/status`, `/llm/selftest` | The catalog model router |
+
+---
+
+### Commute endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/commute/config` | work location, modes, providers (public or yours), counts, job state |
+| PUT | `/api/commute/work` | `{"address": "..."}` or `{"lat": .., "lon": .., "label": ".."}`: save it and start computing |
+| DELETE | `/api/commute/work` | forget the work location and its estimates |
+| POST | `/api/commute/refresh` | `{"scope": "missing" \| "all"}`: compute in the background |
+| GET | `/api/commute/status` | progress of the running or last job |
+| GET | `/api/commute/house/{house_id}` | one house's estimates and whether they are up to date |
+| GET | `/api/commute/summary` | every up-to-date estimate (drives the map layer) |
 
 ---
 
@@ -978,6 +1116,14 @@ approve -> live, address/spatial/geocode paths), `test_onboarding_api.py` (throu
 `test_catalog_llm.py` (router, repair, fallback, self-test scoring against a mock OpenAI-compatible server).
 
 ---
+
+### Commute tests
+
+`tests/test_commute.py` and `tests/test_commute_api.py` run against one local mock that stands in for OSRM (car, bike,
+foot), the Census and Nominatim geocoders and OpenTripPlanner, so they need no network or keys: request format
+(lon,lat order, batching, `/table` fallback to `/route`), retries and outages, range caps, the drive factor, staleness,
+the single-flight background job, transit parsing, the built-in catalog entries, the planner ranking houses by commute,
+House Chat, `setup_data`, and the HTTP API. `tests/commute_helpers.py` holds the mock.
 
 ## Crime-aware bike routing
 Crime-aware bike route requests are now executed deterministically in `agents/general_agent.py` when the user asks for a bike route that avoids crime/high-crime/dangerous areas. This prevents a local LLM from omitting the `find_bike_route` tool call. The resulting `find_bike_route` tool span is visible in observability, and its intermediate filtered BikePGH/crime visualization remains attached to the response.
