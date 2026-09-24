@@ -5,7 +5,6 @@ Run via setup_data.py — only needed when data files change.
 import json
 import hashlib
 import warnings
-from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -121,23 +120,6 @@ def _extract_snapshot_date(filename: str) -> str | None:
             except Exception:
                 continue
     return None
-
-
-def compute_redfin_house_ids(path: Path) -> set[str]:
-    """Read a single Redfin CSV and return the set of house_ids it contains, without
-    touching the database. Used by services/data_sources.py to detect which
-    previously-favorited houses disappeared when a file is replaced with a refreshed
-    export (see db.duckdb_store.mark_removed_favorites)."""
-    try:
-        df = pd.read_csv(path, encoding="utf-8-sig", low_memory=False)
-    except Exception:
-        return set()
-    df.columns = df.columns.str.strip().str.lower()
-    col_rename = {c: _REDFIN_COL_MAP[c] for c in df.columns if c in _REDFIN_COL_MAP}
-    df = df.rename(columns=col_rename)
-    if "address" not in df.columns:
-        return set()
-    return set(df.apply(_house_id, axis=1))
 
 
 def load_redfin(geo_utils=None) -> int:
@@ -543,20 +525,34 @@ _CRIME_SCHEMA_COLS = [
 
 def _crime_incident_id(city: str, source_file: str, natural_id, row_pos: int) -> str:
     """
-    Stable, idempotent ID: prefers a natural per-row identifier from the
-    source (Pittsburgh's PK, Chicago's ID, Boston's INCIDENT_NUMBER, ...)
-    when the parser found one, else falls back to its position within that
-    file. Re-running setup_data.py on the same files won't create
-    duplicates; note that if a source file is later re-exported with rows
-    reordered or removed, position-based IDs for that file can shift —
-    acceptable for open-data crime exports, which are typically wholesale
-    replacements rather than incremental diffs.
+    Stable, idempotent ID: prefers a natural per-row identifier from the source
+    (Pittsburgh's PK, Chicago's ID, Boston's INCIDENT_NUMBER, ...) when the parser
+    found one, else falls back to its position within that file.
+
+    A natural ID is keyed on city + id alone, deliberately *not* including
+    source_file: these IDs come from the source city's own system and are
+    expected to be globally unique for that city, so the same real-world
+    incident reported in two different exports (e.g. a full historical archive
+    that overlaps a few years with a newer incremental one) collapses onto the
+    same row instead of being double-counted. load_crime()'s existing
+    `combined.drop_duplicates(subset=["incident_id"])` is what actually performs
+    that collapse — this is what makes the IDs line up for it to find.
+
+    A position-based fallback ID *does* include source_file, since a row's
+    position is only meaningful within the one file it came from. Re-running
+    setup_data.py on the same files won't create duplicates either way; note
+    that if a source file with no natural ID is later re-exported with rows
+    reordered or removed, its position-based IDs can shift — acceptable for
+    open-data crime exports, which are typically wholesale replacements rather
+    than incremental diffs.
     """
     has_natural = natural_id is not None and not (
         isinstance(natural_id, float) and pd.isna(natural_id)
     ) and str(natural_id).strip().lower() not in ("", "nan", "none")
-    key_part = str(natural_id).strip() if has_natural else f"row{row_pos}"
-    key = f"{city}:{source_file}:{key_part}"
+    if has_natural:
+        key = f"{city}:{str(natural_id).strip()}"
+    else:
+        key = f"{city}:{source_file}:row{row_pos}"
     return hashlib.md5(key.encode()).hexdigest()[:16]
 
 
@@ -1462,7 +1458,7 @@ class CountyParserBase:
 class AlleghenyParser(CountyParserBase):
     """
     Parser for Allegheny County, PA property sales export.
-    Source: https://data.wprdc.org/dataset/real-estate-sales
+    Source: https://apps.county.allegheny.pa.us/SaleSearch/SaleSearch
     Columns: _id, PARID, FULL_ADDRESS, PROPERTYHOUSENUM, PROPERTYFRACTION,
              PROPERTYADDRESSDIR, PROPERTYADDRESSSTREET, PROPERTYADDRESSSUF,
              PROPERTYADDRESSUNITDESC, PROPERTYUNITNO, PROPERTYCITY,
