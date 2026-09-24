@@ -111,6 +111,26 @@ def _ensure_schema(conn: duckdb.DuckDBPyConnection):
     except Exception:
         pass
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS house_commute (
+            house_id             VARCHAR,
+            work_key             VARCHAR,
+            work_label           VARCHAR,
+            drive_min            DOUBLE,
+            drive_miles          DOUBLE,
+            bike_min             DOUBLE,
+            bike_miles            DOUBLE,
+            walk_min             DOUBLE,
+            walk_miles            DOUBLE,
+            transit_min          DOUBLE,
+            transit_transfers    INTEGER,
+            straight_line_miles  DOUBLE,
+            status                VARCHAR,
+            source                VARCHAR,
+            PRIMARY KEY (house_id, work_key)
+        )
+    """)
+
     # house_snapshots — one row per (house × source_file × status × price).
     # Captures every distinct state observed across all Redfin CSV exports and
     # matched sold records. The `houses` table always holds the LATEST snapshot.
@@ -337,6 +357,14 @@ def _ensure_schema(conn: duckdb.DuckDBPyConnection):
         )
     """)
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key         VARCHAR PRIMARY KEY,
+            value_json  VARCHAR NOT NULL,
+            updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     # Unified data-model catalog (tables, relationships, concepts, entity domains) plus the
     # workflow tables behind the Data page. Built-in rows are seeded here; see db/catalog_store.py.
     from db import catalog_store
@@ -386,6 +414,32 @@ def _json_safe_record(record: dict) -> dict:
         else:
             safe[k] = v
     return safe
+
+
+def get_setting(key: str, default: Any = None) -> Any:
+    """Return one application setting decoded from JSON, or ``default`` when unset."""
+    row = get_conn().execute(
+        "SELECT value_json FROM app_settings WHERE key = ?", [key]
+    ).fetchone()
+    if row is None:
+        return default
+    return json.loads(row[0])
+
+
+def set_setting(key: str, value: Any) -> None:
+    """Persist one JSON-serializable application setting."""
+    get_conn().execute(
+        """
+        INSERT OR REPLACE INTO app_settings (key, value_json, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        """,
+        [key, json.dumps(value, ensure_ascii=False)],
+    )
+
+
+def delete_setting(key: str) -> None:
+    """Remove one application setting if it exists."""
+    get_conn().execute("DELETE FROM app_settings WHERE key = ?", [key])
 
 
 _SNAP_COLS = [
