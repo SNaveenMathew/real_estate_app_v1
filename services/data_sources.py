@@ -40,6 +40,8 @@ import contextlib
 import io
 import re
 import shutil
+import time
+import uuid
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,7 +52,8 @@ import pandas as pd
 from config import settings
 import db.duckdb_store as store
 from services import data_loader
-from services.crime_sources import CRIME_PARSERS, _find_col as _find_crime_col
+from services.crime_sources import (CRIME_PARSERS, _find_col as _find_crime_col,
+                                     read_table as crime_read_table)
 
 
 # ── Small shared helpers ─────────────────────────────────────────────────────
@@ -82,6 +85,73 @@ def _warnings_from_log(log_text: str) -> list[str]:
                           "  ✗", "  ⚠")):
             out.append(s.lstrip("  "))
     return out
+
+
+def _precheck_upload(source: DataSource, path: Path) -> tuple[bool, str]:
+    """
+    Faithfully re-check, read-only, whether this exact staged file would
+    actually produce rows — using the *same* logic the real loader applies per
+    file, not a re-derived guess. This runs immediately after staging and
+    before anything is discarded: a bad file is rejected here, before the real
+    loader (and any DB change) ever runs, closing the gap a bare post-load
+    row-count check can't: a loader that gracefully skips one bad file
+    internally leaves that file's *old* rows untouched, which a bare ">0" row
+    count can't tell apart from a genuine success.
+
+    Returns (ok, reason) — reason is empty when ok is True. A source with no
+    precheck defined here (single-file sources, bike) always returns (True, "")
+    and relies on the loader's own return value / post-load row count instead,
+    which is unambiguous for those (see refresh_source).
+    """
+    if source.key == "redfin":
+        try:
+            df = pd.read_csv(path, encoding="utf-8-sig", low_memory=False, nrows=5000)
+        except Exception as e:
+            return False, f"Could not read this file as CSV: {e}"
+        df.columns = df.columns.str.strip().str.lower()
+        col_rename = {c: data_loader._REDFIN_COL_MAP[c] for c in df.columns if c in data_loader._REDFIN_COL_MAP}
+        df = df.rename(columns=col_rename)
+        if "lat" not in df.columns or "lon" not in df.columns:
+            return False, "This file doesn't have latitude/longitude columns — a Redfin export normally does."
+        lat = pd.to_numeric(df["lat"], errors="coerce")
+        lon = pd.to_numeric(df["lon"], errors="coerce")
+        if lat.notna().sum() == 0 or lon.notna().sum() == 0:
+            return False, "No rows had usable latitude/longitude values."
+        return True, ""
+
+    if source.key == "sold":
+        try:
+            df = pd.read_csv(path, low_memory=False, nrows=5000, dtype=str)
+        except Exception as e:
+            return False, f"Could not read this file as CSV: {e}"
+        if df.empty:
+            return False, "This file has no data rows."
+        parser = data_loader._detect_parser(list(df.columns))
+        try:
+            parsed = parser.parse(df, path.name)
+        except Exception as e:
+            return False, f"Could not parse this file as sold-homes data: {e}"
+        if parsed is None or parsed.empty:
+            return False, "No usable sale records were found in this file."
+        return True, ""
+
+    if source.key.startswith("crime_"):
+        city = source.key.split("crime_", 1)[1]
+        parser = next((p for p in CRIME_PARSERS if p.city == city), None)
+        if parser is None:
+            return False, f"No parser is registered for '{city}'."
+        try:
+            df = crime_read_table(path, parser._WANTED, parser._REQUIRED)
+        except Exception as e:
+            return False, f"Could not read this file: {e}"
+        if df is None:
+            return False, ("This file is missing one or more required columns for "
+                            f"{parser.city_label} — see the loader's own message for which ones.")
+        if df.empty:
+            return False, "This file was read successfully but had no data rows."
+        return True, ""
+
+    return True, ""
 
 
 # ── Loader wrappers (zero-arg, so the registry can call them uniformly) ─────
@@ -426,20 +496,91 @@ def peek_header_candidates(path: Path, ext: str) -> list[list[str]]:
     return candidates
 
 
-# ── Placement: "single" sources ─────────────────────────────────────────────
+# ── Backup / rollback helpers ────────────────────────────────────────────────
+# The rule for everything below: never delete or overwrite anything that already
+# exists until the replacement has been *confirmed* to load successfully. Every
+# placement function backs up (renames aside) whatever it would otherwise
+# destroy; refresh_source() only discards those backups after the reload comes
+# back with actual rows, and restores them — then reloads once more — if it
+# doesn't. This is what stands between a malformed upload and silently wiping
+# real data (see the Copilot review this responds to).
 
-def _clear_single_matches(source: DataSource) -> list[str]:
-    """Remove whatever currently satisfies this source's canonical-file slot so the
-    loader's own glob/first-match logic can't pick up a stale leftover. Returns the
-    names removed."""
-    removed = []
-    for pattern in source.match_globs:
-        for p in sorted(source.dest_dir.glob(pattern)):
-            if p.is_file():
-                removed.append(p.name)
+def _backup_aside(paths: list[Path]) -> dict[Path, Path]:
+    """Move each existing path to a sibling backup name instead of deleting or
+    overwriting it. Returns {original_path: backup_path}."""
+    token = f".refresh_backup_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
+    moved = {}
+    for p in paths:
+        if p.exists():
+            backup = p.parent / f"{p.name}{token}"
+            p.rename(backup)
+            moved[p] = backup
+    return moved
+
+
+def _restore_backups(backups: dict[Path, Path], new_files: list[Path]) -> None:
+    """Undo a failed refresh: remove whatever we newly wrote, then move every
+    backed-up original back to its real name. Safe to call with an empty/partial
+    `backups` or `new_files` (e.g. mid-failure during placement itself)."""
+    for p in new_files:
+        try:
+            if p.exists():
                 p.unlink()
-    return removed
+        except OSError:
+            pass
+    for original, backup in backups.items():
+        try:
+            if backup.exists():
+                backup.rename(original)
+        except OSError:
+            pass
 
+
+def _discard_backups(backups: dict[Path, Path]) -> None:
+    """Confirm a successful refresh: permanently remove the backed-up originals."""
+    for backup in backups.values():
+        try:
+            if backup.exists():
+                backup.unlink()
+        except OSError:
+            pass
+
+
+def _rows_by_source_file(table: str, id_col: str, source_file_value: str,
+                          city: Optional[str] = None) -> set:
+    """IDs currently in `table` attributed to this exact filename (and city, for
+    crime_incidents)."""
+    conn = store.get_conn()
+    if city is not None:
+        rows = conn.execute(f"SELECT {id_col} FROM {table} WHERE source_file = ? AND city = ?",
+                             [source_file_value, city]).fetchall()
+    else:
+        rows = conn.execute(f"SELECT {id_col} FROM {table} WHERE source_file = ?",
+                             [source_file_value]).fetchall()
+    return {r[0] for r in rows}
+
+
+def _snapshot_rows_by_source_file(table: str, source_file_value: str,
+                                   city: Optional[str] = None) -> pd.DataFrame:
+    """Full row data (every column, in table order) for this exact filename —
+    enough to restore them verbatim if a refresh needs to be undone, or to
+    re-insert a subset with one field changed (see the redfin "removed from
+    favorites" handling in refresh_source)."""
+    conn = store.get_conn()
+    if city is not None:
+        return conn.execute(f"SELECT * FROM {table} WHERE source_file = ? AND city = ?",
+                             [source_file_value, city]).df()
+    return conn.execute(f"SELECT * FROM {table} WHERE source_file = ?", [source_file_value]).df()
+
+
+def _delete_ids(table: str, id_col: str, ids: set) -> None:
+    if not ids:
+        return
+    placeholders = ",".join(["?"] * len(ids))
+    store.get_conn().execute(f"DELETE FROM {table} WHERE {id_col} IN ({placeholders})", list(ids))
+
+
+# ── Placement: "single" sources ─────────────────────────────────────────────
 
 def _sniff_is_tract_csv(path: Path) -> bool:
     try:
@@ -450,52 +591,65 @@ def _sniff_is_tract_csv(path: Path) -> bool:
         return False
 
 
-def _clear_census_population_files(source_key: str) -> list[str]:
+def _census_population_matches(source_key: str) -> list[Path]:
     """census_tracts and census_msa share a folder and overlapping glob patterns
     (DECENNIALPL2020*.csv); the loaders themselves tell them apart by sniffing
-    content (see load_census_tracts), so cleanup mirrors that instead of a fixed
-    glob to avoid ever deleting the *other* population table's file."""
-    census_dir = _census_dir()
-    removed = []
-    for p in sorted(census_dir.glob("DECENNIALPL2020*.csv")):
+    content (see load_census_tracts), so this mirrors that instead of a fixed
+    glob — otherwise refreshing one could end up displacing the *other* table's
+    file."""
+    out = []
+    for p in sorted(_census_dir().glob("DECENNIALPL2020*.csv")):
         is_tract = _sniff_is_tract_csv(p)
         if (source_key == "census_tracts" and is_tract) or (source_key == "census_msa" and not is_tract):
-            removed.append(p.name)
-            p.unlink()
-    return removed
+            out.append(p)
+    return out
 
 
-def _place_single(source: DataSource, tmp_path: Path, orig_filename: str) -> tuple[Path, list[str]]:
-    source.dest_dir.mkdir(parents=True, exist_ok=True)
+def _single_source_matches(source: DataSource) -> list[Path]:
+    """Files that currently satisfy this source's canonical-file slot — found the
+    same way the loader itself would find them, so a refresh can never disagree
+    with what load_*() actually reads."""
     if source.key in ("census_tracts", "census_msa"):
-        removed = _clear_census_population_files(source.key)
-    else:
-        removed = _clear_single_matches(source)
-
-    if source.key == "nri":
-        dest_files = _extract_nri_zip(tmp_path, source.dest_dir)
-        return dest_files[0] if dest_files else source.dest_dir, removed
-
-    # Plain single CSV/XLSX sources: save under a name the loader's own glob will
-    # find. If the upload's own name already matches, keep it (nicer for the user
-    # to recognize later); otherwise synthesize a compliant name.
-    name = _safe_filename(orig_filename)
-    if source.key == "census_tracts" and "DECENNIALPL2020" not in name:
-        name = f"DECENNIALPL2020_P1_tract_{name}"
-    elif source.key == "census_msa" and not name.startswith("DECENNIALPL2020_P1"):
-        name = f"DECENNIALPL2020_P1_msa_{name}"
-    elif source.key == "cbsa" and not name.lower().startswith("list"):
-        name = f"list_{name}"
-    dest = source.dest_dir / name
-    shutil.copyfile(tmp_path, dest)
-    return dest, removed
+        return _census_population_matches(source.key)
+    matches = []
+    for pattern in source.match_globs:
+        matches.extend(p for p in sorted(source.dest_dir.glob(pattern)) if p.is_file())
+    return matches
 
 
-def _extract_nri_zip(tmp_path: Path, dest_dir: Path) -> list[Path]:
+def _place_single(source: DataSource, tmp_path: Path, orig_filename: str
+                   ) -> tuple[Path, dict[Path, Path], list[Path]]:
+    """Stage the new file next to (not over) whatever currently satisfies this
+    source's canonical-file slot. Returns (dest, backups, new_files) — new_files
+    is every file this call wrote, so a caller can clean all of them up on
+    failure (matters for NRI, which writes a whole shapefile's worth)."""
+    source.dest_dir.mkdir(parents=True, exist_ok=True)
+    backups = _backup_aside(_single_source_matches(source))
+    try:
+        if source.key == "nri":
+            shp_path, written = _extract_nri_zip(tmp_path, source.dest_dir)
+            return shp_path, backups, written
+
+        name = _safe_filename(orig_filename)
+        if source.key == "census_tracts" and "DECENNIALPL2020" not in name:
+            name = f"DECENNIALPL2020_P1_tract_{name}"
+        elif source.key == "census_msa" and not name.startswith("DECENNIALPL2020_P1"):
+            name = f"DECENNIALPL2020_P1_msa_{name}"
+        elif source.key == "cbsa" and not name.lower().startswith("list"):
+            name = f"list_{name}"
+        dest = source.dest_dir / name
+        shutil.copyfile(tmp_path, dest)
+        return dest, backups, [dest]
+    except Exception:
+        _restore_backups(backups, [])
+        raise
+
+
+def _extract_nri_zip(tmp_path: Path, dest_dir: Path) -> tuple[Path, list[Path]]:
     """Extract an NRI shapefile zip flat into dest_dir, renaming the shapefile (and
     its same-stem sidecar files) to match settings.nri_shp's expected name — the
     FEMA zip's internal filename varies by release and load_nri() only ever looks
-    at one fixed path."""
+    at one fixed path. Returns (the renamed .shp path, every file written)."""
     expected_stem = settings.nri_shp.stem
     with zipfile.ZipFile(tmp_path) as zf:
         shp_members = [m for m in zf.namelist() if m.lower().endswith(".shp")]
@@ -504,6 +658,7 @@ def _extract_nri_zip(tmp_path: Path, dest_dir: Path) -> list[Path]:
         shp_member = shp_members[0]
         stem_in_zip = shp_member.rsplit("/", 1)[-1].rsplit(".", 1)[0]
         written = []
+        shp_out = None
         for member in zf.namelist():
             base = member.rsplit("/", 1)[-1]
             if not base or member.endswith("/"):
@@ -517,93 +672,93 @@ def _extract_nri_zip(tmp_path: Path, dest_dir: Path) -> list[Path]:
             with zf.open(member) as src, open(out_path, "wb") as dst:
                 shutil.copyfileobj(src, dst)
             written.append(out_path)
-    return [p for p in written if p.suffix.lower() == ".shp"] or written
+            if out_path.suffix.lower() == ".shp":
+                shp_out = out_path
+    return (shp_out or written[0]), written
 
 
 # ── Placement: "append" sources ─────────────────────────────────────────────
 
-def _delete_rows_for_source_file(table: str, source_file_value: str, city: Optional[str] = None) -> None:
-    conn = store.get_conn()
-    if city is not None:
-        conn.execute(f"DELETE FROM {table} WHERE source_file = ? AND city = ?", [source_file_value, city])
-    else:
-        conn.execute(f"DELETE FROM {table} WHERE source_file = ?", [source_file_value])
-
-
 def _place_append(source: DataSource, tmp_path: Path, orig_filename: str,
-                   dest_subdir: Optional[Path] = None) -> tuple[Path, bool]:
-    """Save into an accumulating folder. Returns (dest_path, was_overwrite)."""
+                   dest_subdir: Optional[Path] = None) -> tuple[Path, dict[Path, Path]]:
+    """Save into an accumulating folder. If a file with this name already exists,
+    it's backed up rather than overwritten in place, so a bad upload can't
+    destroy it — refresh_source discards the backup on success or restores it on
+    failure. An empty `backups` means this was a new filename, not a refresh of
+    an existing one."""
     target_dir = dest_subdir if dest_subdir is not None else source.dest_dir
     target_dir.mkdir(parents=True, exist_ok=True)
     name = _safe_filename(orig_filename)
     dest = target_dir / name
-    was_overwrite = dest.exists()
-    shutil.copyfile(tmp_path, dest)
-    return dest, was_overwrite
+    backups = _backup_aside([dest]) if dest.exists() else {}
+    try:
+        shutil.copyfile(tmp_path, dest)
+        return dest, backups
+    except Exception:
+        _restore_backups(backups, [])
+        raise
 
 
-def _extract_bike_zip(tmp_path: Path, dest_root: Path) -> list[Path]:
+def _extract_bike_zip(tmp_path: Path, dest_root: Path) -> tuple[list[Path], dict[Path, Path]]:
     """Extract a BikePGH layer zip under data/bike/, preserving whatever internal
     folder structure it has (WPRDC's zips are typically a flat set of
     <LayerName>.shp/.dbf/.shx/.prj at the top level). If the zip has no city
     folder in its paths, files land under data/bike/pittsburgh/<layer>/ — the
-    only city with recognized layers today (see _BIKE_LAYER_SPECS)."""
+    only city with recognized layers today (see _BIKE_LAYER_SPECS). Any file
+    this would overwrite is backed up rather than replaced in place, same as
+    _place_append."""
     from services.data_loader import _BIKE_LAYER_SPECS, _norm_folder_name
 
-    written = []
-    overwritten = []
-    with zipfile.ZipFile(tmp_path) as zf:
-        names = [n for n in zf.namelist() if not n.endswith("/")]
-        # Try to find a layer name from the shapefile's own name (WPRDC zips are
-        # named e.g. "Bike Lanes.shp"); fall back to the zip's own filename stem.
-        shp = next((n for n in names if n.lower().endswith(".shp")), None)
-        stem = Path(shp).stem if shp else Path(tmp_path).stem
-        layer_dir_name = None
-        for spec_key, spec in _BIKE_LAYER_SPECS.items():
-            if spec_key == _norm_folder_name(stem):
-                layer_dir_name = spec[1]  # canonical label, e.g. "Bike Lanes"
-                break
-        layer_dir_name = layer_dir_name or stem
-        out_dir = dest_root / "pittsburgh" / layer_dir_name
-        out_dir.mkdir(parents=True, exist_ok=True)
-        for member in names:
-            base = Path(member).name
-            out_path = out_dir / base
-            if out_path.exists():
-                overwritten.append(str(out_path.relative_to(dest_root)))
-            with zf.open(member) as src, open(out_path, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-            written.append(out_path)
-    for rel in overwritten:
-        _delete_rows_for_source_file("bike_routes", rel)
-    return written
+    written: list[Path] = []
+    backups: dict[Path, Path] = {}
+    try:
+        with zipfile.ZipFile(tmp_path) as zf:
+            names = [n for n in zf.namelist() if not n.endswith("/")]
+            if not any(n.lower().endswith(".shp") for n in names):
+                raise ValueError("This zip doesn't contain a .shp file — expected a BikePGH layer shapefile zip.")
+            shp = next(n for n in names if n.lower().endswith(".shp"))
+            stem = Path(shp).stem
+            layer_dir_name = None
+            for spec_key, spec in _BIKE_LAYER_SPECS.items():
+                if spec_key == _norm_folder_name(stem):
+                    layer_dir_name = spec[1]  # canonical label, e.g. "Bike Lanes"
+                    break
+            layer_dir_name = layer_dir_name or stem
+            out_dir = dest_root / "pittsburgh" / layer_dir_name
+            out_dir.mkdir(parents=True, exist_ok=True)
 
-
-# ── Redfin-specific: detect houses that dropped out of a refreshed export ──
-
-def _redfin_removed_favorites(dest: Path, was_overwrite: bool) -> int:
-    if not was_overwrite:
-        return 0
-    old_ids = {
-        r[0] for r in store.get_conn().execute(
-            "SELECT house_id FROM houses WHERE source_file = ?", [dest.name]
-        ).fetchall()
-    }
-    if not old_ids:
-        return 0
-    new_ids = data_loader.compute_redfin_house_ids(dest)
-    removed = old_ids - new_ids
-    if not removed:
-        return 0
-    return store.mark_removed_favorites(removed, dest.name)
+            planned = [(member, out_dir / Path(member).name) for member in names]
+            backups = _backup_aside([p for _, p in planned if p.exists()])
+            for member, out_path in planned:
+                with zf.open(member) as src, open(out_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                written.append(out_path)
+        return written, backups
+    except Exception:
+        _restore_backups(backups, written)
+        raise
 
 
 # ── Orchestration ────────────────────────────────────────────────────────────
 
 def refresh_source(key: str, tmp_path: Path, orig_filename: str) -> dict:
-    """Save an uploaded file into the right place for `key` and re-run its loader.
+    """
+    Save an uploaded file into the right place for `key` and re-run its loader.
+
+    Nothing that already exists — file or database row — is removed until the
+    new upload has been confirmed to actually be usable. For redfin/sold/crime
+    that confirmation happens *before* the real loader ever runs, via
+    _precheck_upload, which faithfully replays the same per-file logic the
+    loader itself uses; for single-file sources (NRI/Census/CBSA) the loader's
+    own return value is authoritative (each processes exactly one canonical
+    file, so its count can't be confused with stale data left over from
+    before). If a check fails, whatever was displaced is restored — reloading
+    once more if it was — so a malformed upload can never leave a source worse
+    off than before it was tried.
+
     Returns a JSON-safe result dict — see list_sources() for the shape "rows"
-    fields take once persisted."""
+    fields take once persisted.
+    """
     source = get_source(key)
     if source is None:
         return {"ok": False, "error": f"Unknown data source: {key}"}
@@ -614,39 +769,132 @@ def refresh_source(key: str, tmp_path: Path, orig_filename: str) -> dict:
         return {"ok": False, "error": f"Expected one of {sorted(allowed)} for this source, got '{ext}'."}
 
     rows_before = _current_row_count(source)
-    removed_favorites = 0
-    saved_files: list[str] = []
-    warnings: list[str] = []
 
+    # ── Stage: place the new file, backing up (never deleting) anything it displaces ──
     try:
         if source.placement == "single":
-            dest, cleared = _place_single(source, tmp_path, orig_filename)
-            saved_files = [dest.name] if dest.is_file() else [p.name for p in dest.parent.glob("*") if p.is_file()]
+            dest, backups, new_files = _place_single(source, tmp_path, orig_filename)
+            saved_files = [p.name for p in new_files]
+            dest_name = None
         elif source.key == "bike":
-            dest_files = _extract_bike_zip(tmp_path, source.dest_dir)
-            saved_files = [str(p.relative_to(source.dest_dir)) for p in dest_files]
+            new_files, backups = _extract_bike_zip(tmp_path, source.dest_dir)
+            saved_files = [str(p.relative_to(source.dest_dir)) for p in new_files]
+            dest, dest_name = None, None
         else:
-            dest, was_overwrite = _place_append(source, tmp_path, orig_filename)
-            saved_files = [dest.name]
-            if source.key == "redfin":
-                removed_favorites = _redfin_removed_favorites(dest, was_overwrite)
-            elif source.key == "sold" and was_overwrite:
-                _delete_rows_for_source_file("sold_homes", dest.name)
-            elif source.key.startswith("crime_") and was_overwrite:
-                city = source.key.split("crime_", 1)[1]
-                _delete_rows_for_source_file("crime_incidents", dest.name, city=city)
+            dest, backups = _place_append(source, tmp_path, orig_filename)
+            new_files, saved_files = [dest], [dest.name]
+            dest_name = dest.name
     except (zipfile.BadZipFile, ValueError) as e:
         return {"ok": False, "error": str(e)}
     except Exception as e:
         return {"ok": False, "error": f"Could not save the file: {e}"}
 
-    try:
-        _, log_text = _capture(source.loader)
-        warnings = _warnings_from_log(log_text)
-    except Exception as e:
-        return {"ok": False, "error": f"Saved the file, but reloading failed: {e}",
-                "saved_files": saved_files}
+    def _rollback(reason: str, warnings: list[str] | None = None) -> dict:
+        # Drop what we just wrote, restore whatever it displaced, and — if it
+        # displaced something — reload once more so the database reflects the
+        # restored (known-good) file rather than whatever the failed attempt
+        # left behind (matters most for cbsa_counties, which has no primary
+        # key and is fully replaced on every load).
+        _restore_backups(backups, new_files)
+        if backups:
+            try:
+                _capture(source.loader)
+            except Exception:
+                pass
+        return {"ok": False, "error": f"This upload wasn't applied \u2014 {reason}",
+                "warnings": warnings or []}
 
+    # ── Pre-check (redfin/sold/crime only): faithfully replay the loader's own
+    # per-file gate on the staged file *before* running anything or touching
+    # the database, so an obviously-bad upload is rejected without the database
+    # being touched at all.
+    if dest_name:
+        ok, reason = _precheck_upload(source, dest)
+        if not ok:
+            return _rollback(reason)
+
+    # For append sources that track a specific file (redfin/sold/crime): snapshot
+    # the full row data this exact file currently owns, then clear it, *before*
+    # running the real loader. This is what makes "did the new content replace
+    # everything the old content did" answerable at all — a row the loader
+    # doesn't touch keeps its old source_file tag forever, so simply comparing
+    # "what's tagged with this filename before vs. after" can't tell a row that
+    # was never reprocessed from one that legitimately survived (this is exactly
+    # the gap that let a shrunk file leave stale rows behind in an earlier
+    # version of this function). Clearing first means anything present
+    # afterward is unambiguously fresh. The precheck above already confirmed
+    # the file is usable, so this is safe to do unconditionally for those three.
+    old_ids: set = set()
+    old_snapshot: pd.DataFrame = pd.DataFrame()
+    scope_table = scope_col = scope_city = None
+    if source.key == "redfin":
+        scope_table, scope_col = "houses", "house_id"
+    elif source.key == "sold":
+        scope_table, scope_col = "sold_homes", "sale_id"
+    elif source.key.startswith("crime_"):
+        scope_table, scope_col, scope_city = "crime_incidents", "incident_id", source.key.split("crime_", 1)[1]
+    if scope_table and dest_name:
+        old_snapshot = _snapshot_rows_by_source_file(scope_table, dest_name, city=scope_city)
+        old_ids = set(old_snapshot[scope_col]) if not old_snapshot.empty else set()
+        _delete_ids(scope_table, scope_col, old_ids)
+
+    # ── Load ──
+    try:
+        loader_result, log_text = _capture(source.loader)
+        load_error = None
+    except Exception as e:
+        loader_result, log_text, load_error = 0, "", str(e)
+
+    # ── Validate: did the new content actually produce anything? ──
+    new_ids: set = set()
+    if load_error is not None:
+        upload_succeeded = False
+    elif scope_table and dest_name:
+        new_ids = _rows_by_source_file(scope_table, scope_col, dest_name, city=scope_city)
+        upload_succeeded = len(new_ids) > 0
+    elif source.key == "bike":
+        shp_files = [p for p in new_files if p.suffix.lower() == ".shp"]
+        upload_succeeded = any(
+            _rows_by_source_file("bike_routes", "route_id", str(p.relative_to(source.dest_dir)))
+            for p in shp_files
+        )
+    else:
+        # "single" sources: each processes exactly one canonical file, so its
+        # own return value is exactly this attempt's count — never stale data
+        # left over from before (every load_*() here returns 0 on every
+        # failure path without writing anything; see services/data_loader.py).
+        upload_succeeded = loader_result > 0
+
+    if not upload_succeeded:
+        # The precheck already validated the file in isolation, so reaching
+        # here means something more surprising happened (e.g. every row failed
+        # a downstream sanity check the precheck doesn't replicate, such as a
+        # date or bounding-box filter). Put back exactly what was cleared.
+        if scope_table and not old_snapshot.empty:
+            store.upsert_df(scope_table, old_snapshot)
+        detail = load_error or ("the file didn't produce any usable rows \u2014 see the loader's own "
+                                 "message below for why.")
+        warnings = _warnings_from_log(log_text) if load_error is None else []
+        return _rollback(detail, warnings)
+
+    # ── Success: discard backups, then handle whatever this file's old content no longer covers ──
+    _discard_backups(backups)
+    removed_favorites = 0
+    stale = old_ids - new_ids
+    if stale and source.key == "redfin":
+        # Put the dropped houses back (their pre-refresh data, from the
+        # snapshot) so mark_removed_favorites has a row to flag rather than
+        # leaving them deleted — sold/delisted/unfavorited houses stay visible
+        # with their history intact, per the "removed from favorites" design.
+        stale_rows = old_snapshot[old_snapshot[scope_col].isin(stale)]
+        if not stale_rows.empty:
+            store.upsert_df(scope_table, stale_rows)
+        removed_favorites = store.mark_removed_favorites(stale, dest_name)
+    # For sold/crime, `stale` ids were already cleared above and simply stay
+    # gone — correct, since a shrunk export means those specific records are no
+    # longer part of the authoritative file that produced them.
+
+    warnings = _warnings_from_log(log_text)
     rows_after = _current_row_count(source)
     message_parts = [f"{rows_after:,} row(s) now loaded (was {rows_before:,})."]
     if removed_favorites:
