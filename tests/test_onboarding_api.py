@@ -29,6 +29,48 @@ def test_data_page_and_assets_are_served_with_cache_busting(client):
     assert "/data" in client.get("/").text                            # the map app links to it
 
 
+def test_data_sources_are_listed_and_validate_refresh_uploads(client):
+    response = client.get("/api/data-sources")
+    assert response.status_code == 200
+    sources = response.json()["sources"]
+    keys = {source["key"] for source in sources}
+    assert {"redfin", "nri", "census_tracts", "sold", "bike"} <= keys
+    assert all(source["source_url"] for source in sources)
+
+    response = client.post(
+        "/api/data-sources/redfin/refresh",
+        files={"file": ("not-redfin.txt", b"not a CSV", "text/plain")},
+    )
+    assert response.status_code == 422
+    assert "Expected one of" in response.json()["detail"]
+
+
+def test_redfin_source_refresh_loads_uploaded_export(client, tmp_path, monkeypatch):
+    from dataclasses import replace
+    from config import settings
+    from services import data_sources
+
+    redfin_dir = tmp_path / "redfin"
+    monkeypatch.setattr(settings, "redfin_dir", redfin_dir)
+    monkeypatch.setitem(data_sources.REGISTRY, "redfin",
+                        replace(data_sources.REGISTRY["redfin"], dest_dir=redfin_dir))
+    csv = (
+        "Address,City,State,Zip,Latitude,Longitude,Price,Status\n"
+        "10 Test Street,Pittsburgh,PA,15213,40.44,-80.00,275000,Active\n"
+    ).encode()
+
+    response = client.post(
+        "/api/data-sources/redfin/refresh",
+        files={"file": ("redfin-test.csv", csv, "text/csv")},
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["ok"] is True
+    assert result["rows_after"] == result["rows_before"] + 1
+    assert client.get("/api/data-sources").json()["sources"]
+    assert client.get("/api/houses").json()["features"]
+
+
 def test_full_flow_over_http(client, blockgroup_csv):
     ds = _upload(client, blockgroup_csv)
     did = ds["dataset_id"]
