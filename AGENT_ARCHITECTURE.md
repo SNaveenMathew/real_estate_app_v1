@@ -702,6 +702,10 @@ reads the catalog fresh, so:
   (`schema.house_link_plan`).
 - **Metadata retrieval** re-synchronizes the vector index when the catalog version changes and embeds only
   changed documents; with Ollama down it falls back to lexical search over the live catalog.
+- **The map's layer panel** (`services/map_layers.py`, no LLM involved) classifies every agent-visible
+  table by its columns and lists it as a marker/heat/line/choropleth layer, or leaves it out - the same
+  "read the live catalog, not a fixed list" approach as the three consumers above, applied to
+  visualization rather than chat. See "Map layers" in `README.md`.
 
 Two catalog facts exist so that new concepts cannot disturb old ones: `scope_guard: false` (measure columns
 of generated concepts are legitimately filterable, so `_validate_sql_against_plan` does not treat them as
