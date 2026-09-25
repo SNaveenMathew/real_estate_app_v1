@@ -70,6 +70,33 @@ def blockgroup_csv(tmp_path):
     return write_blockgroups(tmp_path)
 
 
+def tract_polygons(tracts: list[tuple[str, tuple]]):
+    """A small GeoDataFrame of box polygons, one per (tract_fips, (minx, miny, maxx, maxy)) - a stand-in
+    for services/geo_utils.py's real tract-shapefile cache, for tests that need actual polygon geometry
+    (choropleth rendering) rather than just the tract_fips join logic."""
+    import geopandas as gpd
+    from shapely.geometry import box
+    return gpd.GeoDataFrame({"tract_fips": [t for t, _ in tracts]},
+                            geometry=[box(*bounds) for _, bounds in tracts], crs="EPSG:4326")
+
+
+@pytest.fixture()
+def tracts_gdf(monkeypatch):
+    """Patches geo_utils to serve the six reference_data/HOUSES tracts as real polygons on request."""
+    from services import geo_utils
+    gdf = tract_polygons([
+        ("42003040100", (-80.01, 40.43, -79.99, 40.45)), ("42003050100", (-79.99, 40.43, -79.97, 40.45)),
+        ("42101000100", (-75.20, 39.95, -75.18, 39.97)), ("42101000200", (-75.18, 39.95, -75.16, 39.97)),
+        ("39035100100", (-81.70, 41.48, -81.68, 41.50)), ("06037000100", (-118.30, 34.05, -118.28, 34.07)),
+    ])
+
+    def _patch():
+        monkeypatch.setattr(geo_utils, "_load_tracts_gdf", lambda: gdf)
+        monkeypatch.setattr(geo_utils, "geometry_source", lambda: "test tract polygons")
+    _patch()
+    return gdf
+
+
 @pytest.fixture()
 def walk_dataset(reference_data, blockgroup_csv):
     """The block-group dataset, described, analysed and approved (table + links to houses and nri_tracts)."""
