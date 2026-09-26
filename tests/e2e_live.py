@@ -81,8 +81,30 @@ check("GET /static/data.js returns 200", r.status_code == 200)
 r = requests.get(f"{BASE}/static/data.css")
 check("GET /static/data.css returns 200", r.status_code == 200)
 
-# ─── 2. Catalog API — built-in sources ───────────────────────────────────────
-section("2. Catalog API — built-in sources visible")
+# ─── 2. Data-source API — public links and refresh contract ──────────────────
+section("2. Data-source API — public links and refresh contract")
+
+r = requests.get(f"{BASE}/api/data-sources")
+check("GET /api/data-sources returns 200", r.status_code == 200,
+      r.text[:120] if r.status_code != 200 else "")
+sources = r.json().get("sources", []) if r.status_code == 200 else []
+source_keys = {s.get("key") for s in sources}
+check("data-source registry includes core sources",
+      {"redfin", "nri", "census_tracts", "sold", "bike"} <= source_keys,
+      f"keys={sorted(k for k in source_keys if k)}")
+check("registered sources expose public links",
+      bool(sources) and all(s.get("source_url") for s in sources))
+
+# This checks request validation without changing any source files or tables.
+r = requests.post(
+    f"{BASE}/api/data-sources/redfin/refresh",
+    files={"file": ("invalid.txt", io.BytesIO(b"not a Redfin export"), "text/plain")},
+)
+check("refresh rejects unsupported file types", 400 <= r.status_code < 500,
+      f"got {r.status_code}")
+
+# ─── 2b. Catalog API — built-in sources ──────────────────────────────────────
+section("2b. Catalog API — built-in sources visible")
 
 r = requests.get(f"{BASE}/api/onboarding/catalog")
 check("GET /api/onboarding/catalog returns 200", r.status_code == 200,

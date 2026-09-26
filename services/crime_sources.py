@@ -158,6 +158,7 @@ class CrimeParserBase:
 # process_crime_baltimore.R: single xlsx (Part1_Crime_Beta_*.xlsx),
 # CrimeDateTime / Latitude / Longitude. Baltimore's open-data "Description"
 # field carries the offense (e.g. "AGG. ASSAULT", "AUTO THEFT", "LARCENY").
+# Data source: https://data.baltimorecity.gov/datasets/baltimore::part-1-crime-data-legacy-srs/about
 
 class BaltimoreCrimeParser(CrimeParserBase):
     city = "baltimore"
