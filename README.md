@@ -251,9 +251,9 @@ Open **http://localhost:8000** in your browser.
 
 ### Recent data-source improvements
 
-The app now includes a built-in data-source registry with direct download links and a Data page upload flow for refreshing files without changing the normal `python setup_data.py` workflow. Supported datasets can be reloaded in-place, with append-vs-replace behavior handled automatically for multi-file sources like Redfin, crime, and BikePGH. Redfin refreshes also flag houses that disappeared from a reused export so the status change is recorded in house history instead of silently going stale.
+The app includes a built-in data-source registry and a Data page upload flow for refreshing files without changing the normal `python setup_data.py` workflow. The source details distinguish direct downloads from portals that require choosing a file; Chicago and Buffalo have direct CSV links, while Chicago's endpoint defaults to a 1,000-row limit. Refreshes validate replacement files before overwriting existing data, with rollback coverage for Census, NRI, sold homes, crime, and bike sources. Append-vs-replace behavior is handled for multi-file sources, and Redfin refreshes record houses missing from a reused export in house history.
 
-The "Add a dataset" workflow also recognizes known source schemas and upserts into the matching existing table instead of creating a draft dataset. A few crime sources have public links but may need parser updates if their schemas drift over time, especially Pittsburgh, Indianapolis, and Minneapolis.
+The "Add a dataset" workflow recognizes known source schemas and upserts into the matching table. Crime-source schemas may drift over time, particularly for Pittsburgh, Indianapolis, and Minneapolis. The Commute table's catalog and semantic-query registration have also been restored.
 
 ### Redfin Favorites (required to see houses on the map)
 

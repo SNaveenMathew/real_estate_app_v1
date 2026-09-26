@@ -585,7 +585,11 @@ function sourceView() {
       h('p', { class: 'muted' }, h('span', { class: 'pill' }, src.category), ' · ', plural(src.current_row_count, 'row'), ' currently loaded')),
     h('div', { class: 'card' },
       h('p', {}, src.instructions),
-      src.source_url ? h('p', {}, h('a', { href: src.source_url, target: '_blank', rel: 'noopener' }, 'Open the current source ↗')) : null,
+      src.source_url ? h('p', {},
+        h('a', { href: src.source_url, target: '_blank', rel: 'noopener' },
+          src.direct_download ? 'Download the current file ↓' : 'Open the source page ↗'),
+        src.direct_download ? null : h('span', { class: 'muted' }, ' — you will need to find the current download there, this isn\'t a one-click file.')
+      ) : null,
       src.notes ? h('div', { class: 'note warn', style: { marginTop: '8px' } }, src.notes) : null),
     h('div', { class: 'card' },
       h('h3', {}, 'Last refresh from here'),
