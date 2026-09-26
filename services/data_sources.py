@@ -36,6 +36,7 @@ loader's own "missing required column(s)" message rather than hiding it.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import io
 import re
@@ -47,6 +48,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+import httpx
 import pandas as pd
 
 from config import settings
@@ -87,59 +89,56 @@ def _warnings_from_log(log_text: str) -> list[str]:
     return out
 
 
-def _precheck_upload(source: DataSource, path: Path) -> tuple[bool, str]:
-    """
-    Faithfully re-check, read-only, whether this exact staged file would
-    actually produce rows — using the *same* logic the real loader applies per
-    file, not a re-derived guess. This runs immediately after staging and
-    before anything is discarded: a bad file is rejected here, before the real
-    loader (and any DB change) ever runs, closing the gap a bare post-load
-    row-count check can't: a loader that gracefully skips one bad file
-    internally leaves that file's *old* rows untouched, which a bare ">0" row
-    count can't tell apart from a genuine success.
+def _precheck_redfin_file(path: Path) -> tuple[bool, str]:
+    """Faithfully re-check, read-only, whether this exact staged Redfin file would
+    actually produce rows — using the same column-resolution logic load_redfin()
+    applies per file, not a re-derived guess. Registered on the "redfin" DataSource's
+    `precheck` field (see refresh_source) rather than called directly."""
+    try:
+        df = pd.read_csv(path, encoding="utf-8-sig", low_memory=False, nrows=5000)
+    except Exception as e:
+        return False, f"Could not read this file as CSV: {e}"
+    df.columns = df.columns.str.strip().str.lower()
+    col_rename = {c: data_loader._REDFIN_COL_MAP[c] for c in df.columns if c in data_loader._REDFIN_COL_MAP}
+    df = df.rename(columns=col_rename)
+    if "lat" not in df.columns or "lon" not in df.columns:
+        return False, "This file doesn't have latitude/longitude columns — a Redfin export normally does."
+    lat = pd.to_numeric(df["lat"], errors="coerce")
+    lon = pd.to_numeric(df["lon"], errors="coerce")
+    if lat.notna().sum() == 0 or lon.notna().sum() == 0:
+        return False, "No rows had usable latitude/longitude values."
+    return True, ""
 
-    Returns (ok, reason) — reason is empty when ok is True. A source with no
-    precheck defined here (single-file sources, bike) always returns (True, "")
-    and relies on the loader's own return value / post-load row count instead,
-    which is unambiguous for those (see refresh_source).
-    """
-    if source.key == "redfin":
-        try:
-            df = pd.read_csv(path, encoding="utf-8-sig", low_memory=False, nrows=5000)
-        except Exception as e:
-            return False, f"Could not read this file as CSV: {e}"
-        df.columns = df.columns.str.strip().str.lower()
-        col_rename = {c: data_loader._REDFIN_COL_MAP[c] for c in df.columns if c in data_loader._REDFIN_COL_MAP}
-        df = df.rename(columns=col_rename)
-        if "lat" not in df.columns or "lon" not in df.columns:
-            return False, "This file doesn't have latitude/longitude columns — a Redfin export normally does."
-        lat = pd.to_numeric(df["lat"], errors="coerce")
-        lon = pd.to_numeric(df["lon"], errors="coerce")
-        if lat.notna().sum() == 0 or lon.notna().sum() == 0:
-            return False, "No rows had usable latitude/longitude values."
-        return True, ""
 
-    if source.key == "sold":
-        try:
-            df = pd.read_csv(path, low_memory=False, nrows=5000, dtype=str)
-        except Exception as e:
-            return False, f"Could not read this file as CSV: {e}"
-        if df.empty:
-            return False, "This file has no data rows."
-        parser = data_loader._detect_parser(list(df.columns))
-        try:
-            parsed = parser.parse(df, path.name)
-        except Exception as e:
-            return False, f"Could not parse this file as sold-homes data: {e}"
-        if parsed is None or parsed.empty:
-            return False, "No usable sale records were found in this file."
-        return True, ""
+def _precheck_sold_file(path: Path) -> tuple[bool, str]:
+    """Faithfully re-check, read-only, whether this exact staged sold-homes file
+    would actually produce rows, using the same parser-detection logic
+    load_sold_homes() applies. Registered on the "sold" DataSource's `precheck`
+    field (see refresh_source) rather than called directly."""
+    try:
+        df = pd.read_csv(path, low_memory=False, nrows=5000, dtype=str)
+    except Exception as e:
+        return False, f"Could not read this file as CSV: {e}"
+    if df.empty:
+        return False, "This file has no data rows."
+    parser = data_loader._detect_parser(list(df.columns))
+    try:
+        parsed = parser.parse(df, path.name)
+    except Exception as e:
+        return False, f"Could not parse this file as sold-homes data: {e}"
+    if parsed is None or parsed.empty:
+        return False, "No usable sale records were found in this file."
+    return True, ""
 
-    if source.key.startswith("crime_"):
-        city = source.key.split("crime_", 1)[1]
-        parser = next((p for p in CRIME_PARSERS if p.city == city), None)
-        if parser is None:
-            return False, f"No parser is registered for '{city}'."
+
+def _make_crime_precheck(parser) -> Callable[[Path], tuple[bool, str]]:
+    """Build a `precheck` for one city's crime DataSource: faithfully re-check,
+    read-only, whether this exact staged file would actually produce rows, using
+    the *same* crime_sources.read_table() call load_crime() applies per file for
+    this city. A factory (one closure per city) rather than one big dispatcher,
+    so each crime DataSource in the registry owns and declares its own check —
+    see the module docstring's note on why this shape exists."""
+    def _check(path: Path) -> tuple[bool, str]:
         try:
             df = crime_read_table(path, parser._WANTED, parser._REQUIRED)
         except Exception as e:
@@ -150,8 +149,7 @@ def _precheck_upload(source: DataSource, path: Path) -> tuple[bool, str]:
         if df.empty:
             return False, "This file was read successfully but had no data rows."
         return True, ""
-
-    return True, ""
+    return _check
 
 
 # ── Loader wrappers (zero-arg, so the registry can call them uniformly) ─────
@@ -206,6 +204,17 @@ class DataSource:
     row_count_sql: str = ""             # SQL returning one row/one column: current row count for this source
     direct_download: bool = False       # True: source_url IS the file. False: source_url is a page to
                                          # navigate from — the UI must say so, not imply a one-click download.
+    precheck: Optional[Callable[[Path], tuple[bool, str]]] = None
+    # Faithful, read-only re-check of a staged file against this source's own loader logic, called
+    # by refresh_source() before anything is discarded (see that function's docstring for why).
+    # Every "append"-placement source whose loader can silently skip one bad file while leaving
+    # its *old* rows in place (currently: redfin, sold, every crime_<city>) MUST set this — a bare
+    # post-load row count can't tell "genuinely reprocessed" from "stale row nobody touched" for
+    # those. Sources without that ambiguity (every "single" source, and bike) may leave this None:
+    # refresh_source falls back to the loader's own return value / a per-file row count instead,
+    # which is already unambiguous for those. tests/test_data_sources_registry.py enforces this
+    # contract — a new append source that needs one and doesn't set it fails that test, not
+    # silently in production.
 
 
 # ── Detection helpers (used by both the registry below and the generic
@@ -339,6 +348,7 @@ _STATIC_SOURCES: list[DataSource] = [
         row_count_sql="SELECT COUNT(*) FROM houses",
         detect=_detect_redfin,
         direct_download=False,
+        precheck=_precheck_redfin_file,
     ),
     DataSource(
         key="sold", label="Sold homes (Allegheny County, PA)", category="Sold homes",
@@ -353,6 +363,7 @@ _STATIC_SOURCES: list[DataSource] = [
         row_count_sql="SELECT COUNT(*) FROM sold_homes",
         detect=_detect_sold_allegheny,
         direct_download=False,
+        precheck=_precheck_sold_file,
     ),
 ]
 
@@ -432,6 +443,7 @@ def _crime_sources() -> list[DataSource]:
             row_count_sql=f"SELECT COUNT(*) FROM crime_incidents WHERE city = '{parser.city}'",
             detect=_make_crime_detector(parser),
             direct_download=direct,
+            precheck=_make_crime_precheck(parser),
         ))
     return out
 
@@ -499,6 +511,59 @@ def list_sources() -> list[dict]:
             "last_message": entry.get("message", ""),
         })
     return out
+
+
+_HEALTH_USER_AGENT = "RealEstateIntelligence/1.0 (data source health check)"
+_HEALTH_TIMEOUT_SECONDS = 10.0
+
+
+async def _check_one_link(client: httpx.AsyncClient, source: "DataSource") -> dict:
+    if not source.source_url:
+        return {"key": source.key, "label": source.label, "url": source.source_url,
+                "ok": None, "status": None, "redirected_to": None, "error": "No URL configured."}
+    try:
+        resp = await client.head(source.source_url)
+        if resp.status_code in (403, 405) or resp.status_code >= 500:
+            # Some servers reject HEAD outright, or block it as a bot signal — retry with GET
+            # before concluding anything's actually wrong.
+            resp = await client.get(source.source_url)
+    except Exception as e:
+        return {"key": source.key, "label": source.label, "url": source.source_url,
+                "ok": False, "status": None, "redirected_to": None, "error": str(e)}
+    ok = resp.status_code < 400
+    redirected = str(resp.url)
+    return {
+        "key": source.key, "label": source.label, "url": source.source_url, "ok": ok,
+        "status": resp.status_code,
+        "redirected_to": redirected if redirected != source.source_url else None,
+        "error": None if ok else f"HTTP {resp.status_code}",
+    }
+
+
+async def check_source_links(keys: Optional[list[str]] = None) -> list[dict]:
+    """
+    Best-effort reachability check for each source's `source_url` — the practical
+    answer to a review caveat that's otherwise just true: this app can't make an
+    upstream government site or public-data portal stay at the same URL forever.
+    What it *can* do is surface that drift proactively rather than leaving it to be
+    discovered when a user's refresh silently finds nothing to download. Wired to
+    the Data page's "Check source links" button (see api/data_sources.py) rather
+    than run automatically — checking up to 15 third-party sites on every page
+    load would make the page feel slow for no benefit, and a stale link is a
+    maintenance-timescale problem, not a per-visit one.
+
+    Every check runs concurrently (not one after another), so checking all 15
+    still returns in roughly one request's worth of time rather than fifteen's.
+    Returns one dict per source: {key, label, url, ok, status, redirected_to,
+    error}. `ok` is None (not False) when a source has no URL at all — that's a
+    registry gap, not a broken link, and the UI should say so differently.
+    """
+    targets = [REGISTRY[k] for k in keys if k in REGISTRY] if keys else list(REGISTRY.values())
+    async with httpx.AsyncClient(
+        timeout=_HEALTH_TIMEOUT_SECONDS, follow_redirects=True,
+        headers={"User-Agent": _HEALTH_USER_AGENT},
+    ) as client:
+        return list(await asyncio.gather(*(_check_one_link(client, s) for s in targets)))
 
 
 def detect_source_for_columns(columns: list[str]) -> Optional[str]:
@@ -786,10 +851,11 @@ def refresh_source(key: str, tmp_path: Path, orig_filename: str) -> dict:
     Save an uploaded file into the right place for `key` and re-run its loader.
 
     Nothing that already exists — file or database row — is removed until the
-    new upload has been confirmed to actually be usable. For redfin/sold/crime
-    that confirmation happens *before* the real loader ever runs, via
-    _precheck_upload, which faithfully replays the same per-file logic the
-    loader itself uses; for single-file sources (NRI/Census/CBSA) the loader's
+    new upload has been confirmed to actually be usable. For any source that
+    declares a `precheck` (redfin/sold/every crime_<city> today) that
+    confirmation happens *before* the real loader ever runs, via that
+    function, which faithfully replays the same per-file logic the loader
+    itself uses; for single-file sources (NRI/Census/CBSA) the loader's
     own return value is authoritative (each processes exactly one canonical
     file, so its count can't be confused with stale data left over from
     before). If a check fails, whatever was displaced is restored — reloading
@@ -844,12 +910,13 @@ def refresh_source(key: str, tmp_path: Path, orig_filename: str) -> dict:
         return {"ok": False, "error": f"This upload wasn't applied \u2014 {reason}",
                 "warnings": warnings or []}
 
-    # ── Pre-check (redfin/sold/crime only): faithfully replay the loader's own
-    # per-file gate on the staged file *before* running anything or touching
-    # the database, so an obviously-bad upload is rejected without the database
-    # being touched at all.
-    if dest_name:
-        ok, reason = _precheck_upload(source, dest)
+    # ── Pre-check (only sources that declare one — see the `precheck` field's
+    # docstring on DataSource): faithfully replay the loader's own per-file gate
+    # on the staged file *before* running anything or touching the database, so
+    # an obviously-bad upload is rejected without the database being touched at
+    # all.
+    if dest_name and source.precheck is not None:
+        ok, reason = source.precheck(dest)
         if not ok:
             return _rollback(reason)
 
