@@ -117,6 +117,15 @@ TABLES = {
     "crime_incidents": TableMeta("crime_incidents", "Standardized crime incidents.", grain="one row per incident"),
     "bike_routes": TableMeta("bike_routes", "BikePGH-style line features.", grain="one row per line feature"),
     "geocode_cache": TableMeta("geocode_cache", "Internal geocoding cache.", agent_visible=False),
+    "data_source_log": TableMeta(
+        "data_source_log", "Tracks when each built-in data source was last refreshed from the Data page.",
+        agent_visible=False, grain="one row per data source",
+    ),
+    "house_commute": TableMeta(
+        "house_commute", "Commute time and distance from each house to the current work location.",
+        setup_hint="Set a work location on the Commute tab to populate commute estimates for every house.",
+        hidden_columns=("work_key",), grain="one row per house, for the current work location",
+    ),
 }
 
 RELATIONSHIPS = [
@@ -129,6 +138,7 @@ RELATIONSHIPS = [
     Relationship("cbsa_counties", "state_fips || county_fips", "census_tracts", "LEFT(tract_fips, 5)", "County-to-Census-tract geography bridge; tract FIPS begins with the 5-digit state+county FIPS.", "one-to-many", bridge=True, grain_effect="county -> Census tracts"),
     Relationship("house_snapshots", "house_id", "houses", "house_id", "Historical observation to current house.", "many-to-one", grain_effect="snapshot -> house"),
     Relationship("houses", "crime_city", "crime_incidents", "city", "City-level contextual relationship; not spatial.", "many-to-many", confidence="medium", preferred=False),
+    Relationship("house_commute", "house_id", "houses", "house_id", "Commute estimate for the current work location, one row per house.", "many-to-one", grain_effect="house -> house (current work location)"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -183,6 +193,86 @@ SEMANTIC_GLOSSARY.update({
     "history": _concept("history", ["house_snapshots"], ["price history", "listing history", "historical price", "price changes", "price cuts"], "Historical listing/sale observations.", columns=("house_snapshots.snapshot_date", "house_snapshots.price"), grain="snapshot"),
 })
 
+# Commute concepts. Each mode phrase (e.g. "bike commute") textually contains the generic
+# "commute" alias that house_commute_drive matches, so — per the `overrides` mechanism in
+# db/schema_catalog.py's semantic_matches() — each of the other four declares drive as
+# overridden: a query naming a specific mode is never *also* read as the generic (drive)
+# commute concept. "shortest"/"longest" are given directly as rank-operation aliases since
+# the built-in RANK_ASC/RANK_DESC alias lists don't include them.
+SEMANTIC_GLOSSARY.update({
+    "house_commute_drive": _concept(
+        "house_commute_drive", ["house_commute"],
+        ["commute", "commute time", "commute time to work", "driving commute", "drive to work",
+         "driving to work", "drive time to work", "time to work"],
+        "Free-flow driving commute time to the current work location.",
+        columns=("house_commute.drive_min", "house_commute.drive_miles"),
+        operations=(
+            AVG("house_commute.drive_min"), MEDIAN("house_commute.drive_min"),
+            _op("rank", ["shortest commute", "quickest commute", "fastest commute", "best commute"],
+                "house_commute.drive_min", direction="ASC", group_by="houses.address"),
+            _op("rank", ["longest commute", "slowest commute", "worst commute"],
+                "house_commute.drive_min", direction="DESC", group_by="houses.address"),
+        ),
+        null_policy="exclude NULL", grain="house",
+    ),
+    "house_commute_bike": _concept(
+        "house_commute_bike", ["house_commute"],
+        ["bike commute", "biking commute", "bike to work", "biking to work",
+         "cycling commute", "cycling to work", "bike time to work"],
+        "Free-flow biking commute time to the current work location.",
+        columns=("house_commute.bike_min", "house_commute.bike_miles"),
+        operations=(
+            AVG("house_commute.bike_min"), MEDIAN("house_commute.bike_min"),
+            _op("rank", ["shortest bike commute", "quickest bike commute", "fastest bike commute"],
+                "house_commute.bike_min", direction="ASC", group_by="houses.address"),
+            _op("rank", ["longest bike commute", "slowest bike commute"],
+                "house_commute.bike_min", direction="DESC", group_by="houses.address"),
+        ),
+        null_policy="exclude NULL", grain="house",
+    ),
+    "house_commute_walk": _concept(
+        "house_commute_walk", ["house_commute"],
+        ["walk commute", "walking commute", "walk to work", "walking to work", "walk time to work"],
+        "Free-flow walking commute time to the current work location.",
+        columns=("house_commute.walk_min", "house_commute.walk_miles"),
+        operations=(
+            AVG("house_commute.walk_min"), MEDIAN("house_commute.walk_min"),
+            _op("rank", ["shortest walk commute", "quickest walk commute"],
+                "house_commute.walk_min", direction="ASC", group_by="houses.address"),
+            _op("rank", ["longest walk commute", "slowest walk commute"],
+                "house_commute.walk_min", direction="DESC", group_by="houses.address"),
+        ),
+        null_policy="exclude NULL", grain="house",
+    ),
+    "house_commute_transit": _concept(
+        "house_commute_transit", ["house_commute"],
+        ["transit commute", "public transit commute", "transit to work", "public transit to work",
+         "bus commute", "train commute"],
+        "Public-transit commute time to the current work location (requires a self-hosted trip planner).",
+        columns=("house_commute.transit_min", "house_commute.transit_transfers"),
+        operations=(
+            AVG("house_commute.transit_min"), MEDIAN("house_commute.transit_min"),
+            _op("rank", ["shortest transit commute", "quickest transit commute"],
+                "house_commute.transit_min", direction="ASC", group_by="houses.address"),
+            _op("rank", ["longest transit commute", "slowest transit commute"],
+                "house_commute.transit_min", direction="DESC", group_by="houses.address"),
+        ),
+        null_policy="exclude NULL", grain="house",
+    ),
+    "house_commute_distance": _concept(
+        "house_commute_distance", ["house_commute"],
+        ["commute distance", "distance to work", "how far to work", "miles to work",
+         "driving distance to work"],
+        "Commute distance in miles (driving distance to the current work location).",
+        columns=("house_commute.drive_miles", "house_commute.straight_line_miles"),
+        operations=(AVG("house_commute.drive_miles"), MAX("house_commute.drive_miles"),
+                    MIN("house_commute.drive_miles")),
+        null_policy="exclude NULL", grain="house",
+    ),
+})
+for _mode_key in ("house_commute_bike", "house_commute_walk", "house_commute_transit", "house_commute_distance"):
+    SEMANTIC_GLOSSARY[_mode_key]["overrides"] = ["house_commute_drive"]
+
 ENTITY_DOMAINS = (
     EntityDomain("house_city", "houses", "city", "city", "Current house city labels", match_mode="exact_or_prefix", preferred_for=("house_inventory", "house_list_price", "house_walk_score", "house_bike_score", "house_transit_score")),
     EntityDomain("sold_city", "sold_homes", "city", "city", "Sold-home city labels", match_mode="exact_or_prefix", preferred_for=("sold_price",)),
@@ -204,92 +294,6 @@ SEED_DOMAINS = {
     "crime_incidents": "safety",
     "bike_routes": "mobility",
     "geocode_cache": "system",
+    "data_source_log": "system",
+    "house_commute": "housing",
 }
-
-
-# ---------------------------------------------------------------------------
-# Commute: a built-in source populated from the sidebar's Commute tab (see services/commute.py).
-# One row per house for the CURRENT work location. Free-flow OpenStreetMap routing, no traffic.
-# ---------------------------------------------------------------------------
-
-TABLES["house_commute"] = TableMeta(
-    "house_commute",
-    "Estimated travel time and distance from each house to the user's saved work location. Drive, bike and walk are "
-    "free-flow OpenStreetMap routing estimates (no traffic); transit is present only when OpenTripPlanner is configured. "
-    "One row per house for the CURRENT work location; the table is empty until a work location is set.",
-    setup_hint="Set your work location in the sidebar's Commute tab (or WORK_ADDRESS in .env), then choose Compute.",
-    column_notes=(
-        ColumnNote("drive_min", "Free-flow drive time in minutes, house to work. NULL when not computed or out of range."),
-        ColumnNote("drive_miles", "Driving distance in miles along the routed path."),
-        ColumnNote("bike_min", "Cycling time in minutes (OpenStreetMap bike routing). NULL beyond ~30 straight-line miles."),
-        ColumnNote("bike_miles", "Cycling distance in miles."),
-        ColumnNote("walk_min", "Walking time in minutes. NULL beyond ~6 straight-line miles (not a realistic walk)."),
-        ColumnNote("walk_miles", "Walking distance in miles."),
-        ColumnNote("transit_min", "Public-transit minutes for a weekday morning. NULL unless OpenTripPlanner is configured."),
-        ColumnNote("transit_transfers", "Number of transfers on the transit itinerary."),
-        ColumnNote("straight_line_miles", "Straight-line (as-the-crow-flies) miles from the house to work."),
-        ColumnNote("status", "ok | partial | failed | out_of_range - how completely the modes were estimated."),
-    ),
-    hidden_columns=("work_key",),
-    grain="one row per house",
-)
-RELATIONSHIPS.append(Relationship(
-    "house_commute", "house_id", "houses", "house_id",
-    "Commute estimates are keyed by house.", "one-to-one",
-    confidence="high", preferred=True, grain_effect="house_commute row -> one house"))
-
-
-def _commute_ops(col):
-    expr = f"house_commute.{col}"
-    return (
-        AVG(expr), MEDIAN(expr),
-        _op("rank", ["shortest", "quickest", "fastest", "closest", "nearest", "lowest", "least", "smallest", "best"],
-            expr, direction="ASC", group_by="houses.address"),
-        _op("rank", ["longest", "slowest", "farthest", "furthest", "highest", "worst", "largest"],
-            expr, direction="DESC", group_by="houses.address"),
-        _op("min", ["minimum", "min"], expr),
-        _op("max", ["maximum", "max"], expr),
-    )
-
-
-def _commute_concept(key, aliases, description, col):
-    """A commute concept; ``overrides`` is computed from alias overlap so a phrase like "bike commute" does not also
-    pull in the drive concept (whose alias "commute" sits inside it) or an existing score concept."""
-    c = _concept(key, ["houses", "house_commute"], aliases, description, columns=(f"house_commute.{col}",),
-                 operations=_commute_ops(col), null_policy="exclude NULL", orderings=(f"house_commute.{col} ASC",),
-                 grain="house", default_operation="rank")
-    mine = [a.lower() for a in aliases]
-    over = sorted(k for k, item in SEMANTIC_GLOSSARY.items() if k != key and any(
-        e.lower() != a and f" {e.lower()} " in f" {a} " for e in item.get("aliases", []) for a in mine))
-    if over:
-        c["overrides"] = over
-    return c
-
-
-SEMANTIC_GLOSSARY["house_commute_drive"] = _commute_concept(
-    "house_commute_drive",
-    ["commute", "commuting", "commute time", "commute times", "commute length", "drive to work", "driving to work",
-     "drive time to work", "driving time to work", "drive time", "driving time", "time to work", "travel time to work",
-     "get to work", "how long to get to work"],
-    "Estimated free-flow drive time in minutes from the house to the user's work location.", "drive_min")
-SEMANTIC_GLOSSARY["house_commute_bike"] = _commute_concept(
-    "house_commute_bike",
-    ["bike commute", "biking commute", "cycling commute", "bike to work", "bicycle to work", "cycle to work",
-     "bike time to work", "biking time to work", "cycling time to work", "bike ride to work"],
-    "Estimated cycling time in minutes from the house to the user's work location.", "bike_min")
-SEMANTIC_GLOSSARY["house_commute_walk"] = _commute_concept(
-    "house_commute_walk",
-    ["walk commute", "walking commute", "walk to work", "walking to work", "walk time to work", "walking time to work"],
-    "Estimated walking time in minutes from the house to the user's work location.", "walk_min")
-SEMANTIC_GLOSSARY["house_commute_transit"] = _commute_concept(
-    "house_commute_transit",
-    ["transit commute", "transit to work", "transit time to work", "public transit to work", "public transportation to work",
-     "bus to work", "take transit to work"],
-    "Estimated public-transit time in minutes from the house to the user's work location (needs OpenTripPlanner).",
-    "transit_min")
-SEMANTIC_GLOSSARY["house_commute_distance"] = _commute_concept(
-    "house_commute_distance",
-    ["commute distance", "distance to work", "miles to work", "how far from work", "how far is work", "how far to work"],
-    "Driving distance in miles from the house to the user's work location.", "drive_miles")
-
-SEED_DOMAINS["house_commute"] = "housing"
