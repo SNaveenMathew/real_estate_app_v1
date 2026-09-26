@@ -291,18 +291,10 @@ BIKE_ROUTE_LAYERS = (
 
 BIKE_GRAPH_SNAP_MAX_MILES = 0.50
 
-# Same display hierarchy used by services.layers.py. Raw source layers remain
-# independently routable; this hierarchy only resolves coincident classifications
-# for the route visualization.
-BIKE_DISPLAY_PRIORITY = {
-    "protected_bike_lanes": 100,
-    "bike_lanes": 90,
-    "trails": 80,
-    "bikeable_sidewalks": 70,
-    "sharrows": 60,
-    "cautionary_bike_route": 50,
-    "on_street_bike_route": 40,
-}
+# Same display hierarchy used by the map-layer renderer (services/map_layers.py), imported from there
+# so the two never drift apart. Raw source layers remain independently routable; this hierarchy only
+# resolves coincident classifications for the route visualization.
+from services.map_layers import BIKE_DISPLAY_PRIORITY
 BIKE_GRAPH_CACHE: dict[str, tuple[int, dict]] = {}
 
 # Crime-avoidance uses the same coarse, severity-weighted grid philosophy as
