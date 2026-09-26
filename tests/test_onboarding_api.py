@@ -71,6 +71,191 @@ def test_redfin_source_refresh_loads_uploaded_export(client, tmp_path, monkeypat
     assert client.get("/api/houses").json()["features"]
 
 
+def _source_row_count(client, key):
+    sources = client.get("/api/data-sources").json()["sources"]
+    return next(s for s in sources if s["key"] == key)["current_row_count"]
+
+
+def test_census_tracts_source_refresh_rejects_bad_replacement_without_losing_data(client, tmp_path, monkeypatch):
+    """Rollback coverage for a single-file source (Copilot review gap)."""
+    from dataclasses import replace
+    from config import settings
+    from services import data_sources
+
+    census_dir = tmp_path / "census"
+    monkeypatch.setattr(settings, "census_tract_csv", census_dir / "DECENNIALPL2020.P1-Data.csv")
+    monkeypatch.setattr(settings, "census_msa_csv", census_dir / "DECENNIALPL2020.P1-msa.csv")
+    monkeypatch.setitem(data_sources.REGISTRY, "census_tracts",
+                        replace(data_sources.REGISTRY["census_tracts"], dest_dir=census_dir))
+
+    good_csv = (
+        "GEO_ID,NAME,P1_001N\n"
+        "1400000US42003140100,\"Census Tract 1401, Allegheny County, Pennsylvania\",3456\n"
+    ).encode()
+    good = client.post("/api/data-sources/census_tracts/refresh",
+                        files={"file": ("DECENNIALPL2020.P1-Data.csv", good_csv, "text/csv")})
+    assert good.status_code == 200, good.text
+    assert good.json()["ok"] is True
+    rows_after_good = _source_row_count(client, "census_tracts")
+    assert rows_after_good >= 1
+
+    bad = client.post("/api/data-sources/census_tracts/refresh",
+                       files={"file": ("DECENNIALPL2020.P1-Data.csv",
+                                       b"\x00\x01\x02\xffnot,a,valid\ncsv\x00file", "text/csv")})
+    assert bad.status_code == 422
+    assert _source_row_count(client, "census_tracts") == rows_after_good   # nothing lost
+
+
+def test_nri_source_refresh_rejects_corrupt_shapefile_without_losing_data(client, tmp_path, monkeypatch):
+    """Rollback coverage for the shapefile-zip single-file source (Copilot review gap).
+    Exercises the "precheck passes structurally (a .shp is present), the real read fails"
+    path, distinct from census's "unreadable file" case."""
+    import zipfile
+    import geopandas as gpd
+    from shapely.geometry import Point
+    from dataclasses import replace
+    from config import settings
+    from services import data_sources
+
+    nri_dir = tmp_path / "nri"
+    nri_dir.mkdir()
+    monkeypatch.setattr(settings, "nri_shp", nri_dir / "NRI_CensusTracts_Prod.shp")
+    monkeypatch.setitem(data_sources.REGISTRY, "nri",
+                        replace(data_sources.REGISTRY["nri"], dest_dir=nri_dir))
+
+    shp_dir = tmp_path / "shp_build"
+    shp_dir.mkdir()
+    gdf = gpd.GeoDataFrame({"TRACTFIPS": ["42003140100"], "RISK_SCORE": [55.5]},
+                            geometry=[Point(-80.0, 40.44)], crs="EPSG:4326")
+    gdf.to_file(shp_dir / "NRI_Shapefile_CensusTracts.shp")
+    good_zip = tmp_path / "nri_good.zip"
+    with zipfile.ZipFile(good_zip, "w") as zf:
+        for f in shp_dir.iterdir():
+            zf.write(f, f.name)
+
+    good = client.post("/api/data-sources/nri/refresh",
+                        files={"file": ("nri_good.zip", good_zip.read_bytes(), "application/zip")})
+    assert good.status_code == 200, good.text
+    assert good.json()["ok"] is True
+    rows_after_good = _source_row_count(client, "nri")
+    assert rows_after_good >= 1
+
+    bad_zip = tmp_path / "nri_bad.zip"
+    with zipfile.ZipFile(bad_zip, "w") as zf:
+        zf.writestr("x.shp", b"this is not a real shapefile")
+
+    bad = client.post("/api/data-sources/nri/refresh",
+                       files={"file": ("nri_bad.zip", bad_zip.read_bytes(), "application/zip")})
+    assert bad.status_code == 422
+    assert _source_row_count(client, "nri") == rows_after_good   # nothing lost
+
+
+def test_sold_source_refresh_rejects_unreadable_replacement_without_losing_data(client, tmp_path, monkeypatch):
+    """Rollback coverage for an append source keyed by filename (Copilot review gap)."""
+    from dataclasses import replace
+    from config import settings
+    from services import data_sources
+
+    sold_dir = tmp_path / "sold"
+    monkeypatch.setattr(settings, "sold_dir", sold_dir)
+    monkeypatch.setitem(data_sources.REGISTRY, "sold",
+                        replace(data_sources.REGISTRY["sold"], dest_dir=sold_dir))
+
+    good_csv = (
+        "PARID,MUNIDESC,SCHOOLDESC,SALECODE,SALEDESC,INSTRTYP,SALEDATE,PRICE,FULL_ADDRESS,"
+        "PROPERTYHOUSENUM,PROPERTYFRACTION,PROPERTYADDRESSDIR,PROPERTYADDRESSSTREET,"
+        "PROPERTYADDRESSSUF,PROPERTYADDRESSUNITDESC,PROPERTYUNITNO,PROPERTYCITY,"
+        "PROPERTYSTATE,PROPERTYZIP,MUNICODE,RECORDDATE\n"
+        "0001A00100000000,Pittsburgh,Pittsburgh SD,0,VALID SALE,DE,1/1/2024,200000,100 Main St,"
+        "100,,,Main,St,,,Pittsburgh,PA,15213,101,1/2/2024\n"
+    ).encode()
+    good = client.post("/api/data-sources/sold/refresh",
+                        files={"file": ("sales.csv", good_csv, "text/csv")})
+    assert good.status_code == 200, good.text
+    assert good.json()["ok"] is True
+    rows_after_good = _source_row_count(client, "sold")
+    assert rows_after_good >= 1
+
+    bad = client.post("/api/data-sources/sold/refresh",
+                       files={"file": ("sales.csv", b"\x00\x01\x02\xffnot,a,valid\ncsv\x00file", "text/csv")})
+    assert bad.status_code == 422
+    assert _source_row_count(client, "sold") == rows_after_good   # nothing lost
+
+
+def test_crime_source_refresh_rejects_replacement_missing_required_columns(client, tmp_path, monkeypatch):
+    """Rollback coverage for a per-city append source (Copilot review gap). Exercises the
+    precheck-rejects-before-touching-the-database path specifically (missing columns),
+    distinct from sold's "unreadable file" case."""
+    from dataclasses import replace
+    from config import settings
+    from services import data_sources
+
+    crime_dir = tmp_path / "data" / "crime" / "pittsburgh"
+    monkeypatch.setattr(settings, "data_dir", tmp_path / "data")
+    monkeypatch.setitem(data_sources.REGISTRY, "crime_pittsburgh",
+                        replace(data_sources.REGISTRY["crime_pittsburgh"], dest_dir=crime_dir))
+
+    good_csv = (
+        "INCIDENTTIME,X,Y,INCIDENTHIERARCHYDESC,OFFENSES,INCIDENTLOCATION,PK\n"
+        "2024-01-01 10:00:00,-79.95,40.44,Robbery,Robbery,100 Main St,PK1\n"
+        "2024-01-02 11:00:00,-79.96,40.45,Assault,Assault,200 Main St,PK2\n"
+    ).encode()
+    good = client.post("/api/data-sources/crime_pittsburgh/refresh",
+                        files={"file": ("blotter.csv", good_csv, "text/csv")})
+    assert good.status_code == 200, good.text
+    assert good.json()["ok"] is True
+    rows_after_good = _source_row_count(client, "crime_pittsburgh")
+    assert rows_after_good == 2
+
+    bad = client.post("/api/data-sources/crime_pittsburgh/refresh",
+                       files={"file": ("blotter.csv", b"foo,bar\n1,2\n", "text/csv")})
+    assert bad.status_code == 422
+    assert "missing" in bad.json()["detail"].lower() or bad.json().get("warnings")
+    assert _source_row_count(client, "crime_pittsburgh") == rows_after_good   # both incidents survive
+
+
+def test_bike_source_refresh_rejects_zip_without_shapefile_without_losing_data(client, tmp_path, monkeypatch):
+    """Rollback coverage for the shapefile-zip append source (Copilot review gap)."""
+    import zipfile
+    import geopandas as gpd
+    from shapely.geometry import LineString
+    from dataclasses import replace
+    from config import settings
+    from services import data_sources
+
+    bike_dir = tmp_path / "data" / "bike"
+    bike_dir.mkdir(parents=True)
+    monkeypatch.setattr(settings, "data_dir", tmp_path / "data")
+    monkeypatch.setitem(data_sources.REGISTRY, "bike",
+                        replace(data_sources.REGISTRY["bike"], dest_dir=bike_dir))
+
+    shp_dir = tmp_path / "bike_shp_build"
+    shp_dir.mkdir()
+    gdf = gpd.GeoDataFrame({"id": [1]}, geometry=[LineString([(-80.0, 40.44), (-79.99, 40.45)])],
+                            crs="EPSG:4326")
+    gdf.to_file(shp_dir / "Bike Lanes.shp")
+    good_zip = tmp_path / "bike_good.zip"
+    with zipfile.ZipFile(good_zip, "w") as zf:
+        for f in shp_dir.iterdir():
+            zf.write(f, f.name)
+
+    good = client.post("/api/data-sources/bike/refresh",
+                        files={"file": ("Bike Lanes.zip", good_zip.read_bytes(), "application/zip")})
+    assert good.status_code == 200, good.text
+    assert good.json()["ok"] is True
+    rows_after_good = _source_row_count(client, "bike")
+    assert rows_after_good >= 1
+
+    bad_zip = tmp_path / "bike_bad.zip"
+    with zipfile.ZipFile(bad_zip, "w") as zf:
+        zf.writestr("readme.txt", b"no shapefile in here")
+
+    bad = client.post("/api/data-sources/bike/refresh",
+                       files={"file": ("bike_bad.zip", bad_zip.read_bytes(), "application/zip")})
+    assert bad.status_code == 422
+    assert _source_row_count(client, "bike") == rows_after_good   # nothing lost
+
+
 def test_full_flow_over_http(client, blockgroup_csv):
     ds = _upload(client, blockgroup_csv)
     did = ds["dataset_id"]

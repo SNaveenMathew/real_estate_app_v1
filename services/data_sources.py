@@ -204,6 +204,8 @@ class DataSource:
     notes: str = ""
     detect: Optional[Callable[[list[str]], bool]] = None   # header-only sniff, generic upload flow
     row_count_sql: str = ""             # SQL returning one row/one column: current row count for this source
+    direct_download: bool = False       # True: source_url IS the file. False: source_url is a page to
+                                         # navigate from — the UI must say so, not imply a one-click download.
 
 
 # ── Detection helpers (used by both the registry below and the generic
@@ -269,131 +271,167 @@ _STATIC_SOURCES: list[DataSource] = [
         key="nri", label="FEMA National Risk Index", category="Reference data",
         table="nri_tracts", dest_dir=settings.nri_shp.parent, placement="single",
         accept=".zip",
-        source_url="https://www.fema.gov/about/openfema/data-sets/national-risk-index-data",
-        instructions="Download the \u201cNRI Census Tract Shapefile\u201d zip and upload it as-is "
-                      "(don't unzip it first) \u2014 it contains the .shp plus its .dbf/.shx/.prj siblings.",
+        source_url="https://hazards.fema.gov/nri/data-resources",
+        instructions="This is FEMA's download page, not a direct file \u2014 under \u201cShapefile Format\u201d, "
+                      "find \u201cCensus Tracts\u201d and download the nationwide zip. Upload it as-is (don't "
+                      "unzip it first); it contains the .shp plus its .dbf/.shx/.prj siblings.",
         loader=_run_nri,
         match_globs=("*.shp", "*.shx", "*.dbf", "*.prj", "*.cpg", "*.sbn", "*.sbx",
                      "*.shp.xml", "*.dbf.xml", "nri_geometry_cache.parquet"),
         row_count_sql="SELECT COUNT(*) FROM nri_tracts",
         detect=_detect_nri,
+        direct_download=False,
     ),
     DataSource(
         key="census_tracts", label="Census tract population (Eg: DECENNIALPL2020.P1-Data.csv)",
         category="Reference data", table="census_tracts", dest_dir=_census_dir(), placement="single",
         accept=".csv",
         source_url="https://data.census.gov/table/DECENNIALPL2020.P1",
-        instructions="Table DECENNIALPL2020.P1 \u2192 Geography: Census Tracts \u2192 All United States \u2192 Download.",
+        instructions="This is a table-browser page, not a direct file \u2014 set Geography to Census Tracts "
+                      "\u2192 All United States, then use the page's own Download button.",
         loader=_run_census_tracts,
         match_globs=(),   # handled specially in refresh_source — see _replace_census_tracts
         row_count_sql="SELECT COUNT(*) FROM census_tracts",
         detect=_detect_census_tracts,
+        direct_download=False,
     ),
     DataSource(
         key="census_msa", label="Census MSA population (Eg: DECENNIALPL2020.P1-2026-03-25T232220.csv)",
         category="Reference data", table="census_msa", dest_dir=_census_dir(), placement="single",
         accept=".csv",
         source_url="https://data.census.gov/table/DECENNIALPL2020.P1",
-        instructions="Same table as tract population, but with Geography: Metropolitan/Micropolitan "
-                      "Statistical Areas \u2192 All.",
+        instructions="Same table-browser page as tract population, not a direct file \u2014 set Geography to "
+                      "Metropolitan/Micropolitan Statistical Areas \u2192 All, then Download.",
         loader=_run_census_msa,
         match_globs=(),   # handled specially in refresh_source
         row_count_sql="SELECT COUNT(*) FROM census_msa",
         detect=None,  # a header-only sniff can't reliably tell this apart from the tract file
+        direct_download=False,
     ),
     DataSource(
         key="cbsa", label="CBSA \u2192 county crosswalk", category="Reference data",
         table="cbsa_counties", dest_dir=_census_dir(), placement="single",
         accept=".xlsx,.xls,.csv",
         source_url="https://www.census.gov/geographies/reference-files/time-series/demo/metro-micro/delineation-files.html",
-        instructions="Download the current delineation file (list1_*.xlsx). Refresh this before Census "
+        instructions="This is an index page, not a direct file \u2014 open the current year's entry and "
+                      "download the delineation file (named like list1_*.xlsx). Refresh this before Census "
                       "MSA population so MSA name\u2192code matching has something to match against.",
         loader=_run_cbsa,
         match_globs=("list*.xlsx", "list*.xls", "list*.csv"),
         row_count_sql="SELECT COUNT(*) FROM cbsa_counties",
         detect=_detect_cbsa,
+        direct_download=False,
     ),
     DataSource(
         key="redfin", label="Redfin favorites", category="Redfin",
         table="houses", dest_dir=settings.redfin_dir, placement="append",
         accept=".csv",
         source_url="https://www.redfin.com",
-        instructions="From your Redfin saved search, use \u201cDownload All\u201d to export the current "
-                      "favorites CSV. Re-uploading a file with the same name as one you've already loaded "
-                      "refreshes it: any house that drops out of that export (sold, delisted, unfavorited) "
-                      "is marked \u201cRemoved from favorites\u201d and gets a history entry, rather than being "
-                      "left showing its last known status.",
+        instructions="This is Redfin's own site, not a direct file \u2014 it can't be, since the export is "
+                      "specific to your saved search and requires your login. From your saved search, use "
+                      "\u201cDownload All\u201d to get the current favorites CSV. Re-uploading a file with the "
+                      "same name as one you've already loaded refreshes it: any house that drops out of that "
+                      "export (sold, delisted, unfavorited) is marked \u201cRemoved from favorites\u201d and "
+                      "gets a history entry, rather than being left showing its last known status.",
         loader=_run_redfin,
         notes="Tract/MSA joins for newly added houses may need a separate tract-resolution pass "
               "(see README: `python setup_data.py --resolve-tracts`).",
         row_count_sql="SELECT COUNT(*) FROM houses",
         detect=_detect_redfin,
+        direct_download=False,
     ),
     DataSource(
         key="sold", label="Sold homes (Allegheny County, PA)", category="Sold homes",
         table="sold_homes", dest_dir=settings.sold_dir, placement="append",
         accept=".csv",
         source_url="https://data.wprdc.org/dataset/real-estate-sales",
-        instructions="Run a sale search and export the results as CSV. Other counties fall back to a "
-                      "generic parser with reduced field coverage \u2014 see README.",
+        instructions="This is a WPRDC dataset page, not a direct file \u2014 open it and download the current "
+                      "CSV resource (\u201cAllegheny County Property Sale Transactions\u201d, all sales since "
+                      "2013). Other counties fall back to a generic parser with reduced field coverage "
+                      "\u2014 see README.",
         loader=_run_sold,
         row_count_sql="SELECT COUNT(*) FROM sold_homes",
         detect=_detect_sold_allegheny,
+        direct_download=False,
     ),
 ]
 
 
-def _crime_source_url(city: str) -> tuple[str, str]:
-    """(url, notes) verified separately for each city — see module docstring."""
+def _crime_source_url(city: str) -> tuple[str, str, bool]:
+    """(url, notes, direct_download) verified separately for each city — see module
+    docstring. direct_download=True only for the two cities confirmed to sit on a
+    stable, documented direct-file API (Socrata's /resource/{id}.csv, which always
+    reflects that city's own current dataset) rather than a portal page a person has
+    to click through. The rest are CKAN/ArcGIS/Carto portals whose "current file" is
+    a moving target (new resources get added, old ones split by year, etc.) — Copilot's
+    review called pointing at those portal pages "reasonable"; what mattered was
+    making sure the UI says a click-through is needed rather than implying a direct
+    download every time (see the `direct_download` field's use in list_sources()).
+    """
     return {
         "baltimore": (
-            "https://data.baltimorecity.gov/datasets/baltimore::part1-crime-data", ""),
+            "https://data.baltimorecity.gov/datasets/baltimore::part1-crime-data", "", False),
         "boston": (
-            "https://data.boston.gov/dataset/crime-incident-reports-august-2015-to-date-source-new-system", ""),
+            "https://data.boston.gov/dataset/crime-incident-reports-august-2015-to-date-source-new-system",
+            "", False),
         "buffalo": (
-            "https://data.buffalony.gov/Public-Safety/Crime-Incidents/d6g9-xbgu", ""),
+            "https://data.buffalony.gov/resource/d6g9-xbgu.csv",
+            "This is Buffalo's Socrata API endpoint, not a portal page \u2014 it downloads the current "
+            "\u201cCrime Incidents\u201d dataset directly as CSV.", True),
         "chicago": (
-            "https://data.cityofchicago.org/Public-Safety/Crimes-2001-to-present/ijzp-q8t2", ""),
+            "https://data.cityofchicago.org/resource/ijzp-q8t2.csv",
+            "This is Chicago's Socrata API endpoint, not a portal page \u2014 it downloads the current "
+            "\u201cCrimes \u2014 2001 to present\u201d dataset directly as CSV. Socrata caps a single request "
+            "at 1,000 rows by default; for the full history use the dataset's own export page instead: "
+            "https://data.cityofchicago.org/Public-Safety/Crimes-2001-to-present/ijzp-q8t2", True),
         "indianapolis": (
             "https://data.indy.gov",
-            "IMPD launched a new \u201cIMPD Transparency\u201d portal in Nov 2025; the old OpenIndy UCR "
-            "export this parser was built against may no longer be the current source. If the upload "
-            "reports missing columns, services/crime_sources.py's IndianapolisCrimeParser likely needs "
-            "updating to the new export's column names."),
+            "This is a portal page, not a direct file. IMPD launched a new \u201cIMPD Transparency\u201d "
+            "portal in Nov 2025; the old OpenIndy UCR export this parser was built against may no longer "
+            "be the current source. If the upload reports missing columns, "
+            "services/crime_sources.py's IndianapolisCrimeParser likely needs updating to the new export's "
+            "column names.", False),
         "minneapolis": (
             "http://opendata.minneapolismn.gov/",
-            "Minneapolis has migrated crime reporting to NIBRS since this parser was written; column "
-            "names may have shifted. If the upload reports missing columns, "
-            "MinneapolisCrimeParser likely needs a column-name update."),
+            "This is a portal page, not a direct file. Minneapolis has migrated crime reporting to NIBRS "
+            "since this parser was written; column names may have shifted. If the upload reports missing "
+            "columns, MinneapolisCrimeParser likely needs a column-name update.", False),
         "philadelphia": (
-            "https://opendataphilly.org/datasets/crime-incidents/", ""),
+            "https://opendataphilly.org/datasets/crime-incidents/",
+            "This is a portal page, not a direct file \u2014 it's also a large dataset that OpenDataPhilly "
+            "itself splits by year; download each year you want, or use the API link on that page.", False),
         "pittsburgh": (
             "https://data.wprdc.org/dataset/uniform-crime-reporting-data/resource/044f2016-1dfd-4ab0-bc1e-065da05fca2e",
-            "The dataset PittsburghCrimeParser was built against (\u201cPolice Incident Blotter\u201d) "
-            "stopped updating on 11/14/2023. This links to its replacement, \u201cMonthly Criminal "
-            "Activity\u201d, which uses the newer NIBRS-based schema \u2014 PittsburghCrimeParser was not "
-            "written against it and will very likely report missing required columns until it's updated "
-            "in services/crime_sources.py."),
-    }.get(city, ("", ""))
+            "This is a portal page, not a direct file. It's the specific resource PittsburghCrimeParser's "
+            "columns match, from the dataset also listed as \u201cPolice Incident Blotter (Archived)\u201d, "
+            "which stopped updating on 11/14/2023 \u2014 this link won't have anything newer than that date. "
+            "Its successor, \u201cMonthly Criminal Activity\u201d "
+            "(data.wprdc.org/dataset/monthly-criminal-activity-dashboard), covers more recent incidents but "
+            "uses a different NIBRS-based schema that PittsburghCrimeParser doesn't understand yet.", False),
+    }.get(city, ("", "", False))
 
 
 def _crime_sources() -> list[DataSource]:
     out = []
     for parser in CRIME_PARSERS:
-        url, notes = _crime_source_url(parser.city)
+        url, notes, direct = _crime_source_url(parser.city)
+        instructions = ("Downloads the current data directly as CSV." if direct else
+                         "This is a portal page, not a direct file \u2014 open it and download the current "
+                         "export.") + (" Re-uploading a file with the same name replaces just that file's "
+                         "incidents; a differently-named file is added alongside what's already loaded "
+                         "(e.g. one file per year).")
         out.append(DataSource(
             key=f"crime_{parser.city}", label=f"Crime \u2014 {parser.city_label}",
             category="Crime", table="crime_incidents",
             dest_dir=settings.data_dir / "crime" / parser.city, placement="append",
             accept=".csv,.xlsx,.xls",
             source_url=url,
-            instructions="Download the current export and upload it below. Re-uploading a file with the "
-                         "same name replaces just that file's incidents; a differently-named file is "
-                         "added alongside what's already loaded (e.g. one file per year).",
+            instructions=instructions,
             loader=_run_crime,
             notes=notes,
             row_count_sql=f"SELECT COUNT(*) FROM crime_incidents WHERE city = '{parser.city}'",
             detect=_make_crime_detector(parser),
+            direct_download=direct,
         ))
     return out
 
@@ -404,14 +442,16 @@ def _bike_source() -> DataSource:
         table="bike_routes", dest_dir=settings.data_dir / "bike", placement="append",
         accept=".zip",
         source_url="https://data.wprdc.org/dataset/shape-files-for-bikepgh-s-pittsburgh-bike-map",
-        instructions="Download a layer's shapefile zip (e.g. \u201cBike Lanes\u201d) and upload it as-is. "
-                     "It's extracted under data/bike/pittsburgh/<layer name>/ automatically; upload each "
-                     "layer you want separately.",
+        instructions="This is a WPRDC dataset page, not a direct file \u2014 open it, download a layer's "
+                     "shapefile zip (e.g. \u201cBike Lanes\u201d), and upload it as-is. It's extracted under "
+                     "data/bike/pittsburgh/<layer name>/ automatically; upload each layer you want "
+                     "separately.",
         loader=_run_bike,
         notes="Currently only Pittsburgh has recognized layers (see services/data_loader.py's "
               "_BIKE_LAYER_SPECS) \u2014 uploads are placed under data/bike/pittsburgh/.",
         row_count_sql="SELECT COUNT(*) FROM bike_routes",
         detect=None,  # shapefile zip — not part of the generic CSV/XLSX upload auto-detect
+        direct_download=False,
     )
 
 
@@ -451,7 +491,7 @@ def list_sources() -> list[dict]:
         out.append({
             "key": s.key, "label": s.label, "category": s.category, "table": s.table,
             "placement": s.placement, "accept": s.accept, "source_url": s.source_url,
-            "instructions": s.instructions, "notes": s.notes,
+            "instructions": s.instructions, "notes": s.notes, "direct_download": s.direct_download,
             "current_row_count": _current_row_count(s),
             "last_loaded_at": entry.get("last_loaded_at"),
             "last_row_count": entry.get("row_count"),
