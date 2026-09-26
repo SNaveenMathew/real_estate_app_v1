@@ -147,13 +147,19 @@ def _sample_match(p: dict, pattern: str) -> float:
     return sum(1 for v in s if re.fullmatch(pattern, v)) / len(s) if s else 0.0
 
 
+# Shared with services/map_layers.py's generic point/heat-layer detector, so "what counts as a latitude
+# or longitude column" is defined once, not maintained separately in two places.
+LAT_NAMES = r"(lat|latitude|lat_deg|ycoord|y)"
+LON_NAMES = r"(lon|lng|long|longitude|lon_deg|xcoord|x)"
+
+
 def detect_key_kind(name: str, p: dict) -> str | None:
     n, fam = name.lower(), p.get("family")
-    if fam == "float":
+    if fam in ("float", "int"):    # a real-world upload can have whole-degree coordinates, inferred as int
         lo, hi = p.get("min"), p.get("max")
-        if lo is not None and re.fullmatch(r"(lat|latitude|lat_deg|ycoord|y)", n) and -90 <= lo and hi <= 90:
+        if lo is not None and re.fullmatch(LAT_NAMES, n) and -90 <= lo and hi <= 90:
             return "lat"
-        if lo is not None and re.fullmatch(r"(lon|lng|long|longitude|lon_deg|xcoord|x)", n) and -180 <= lo and hi <= 180:
+        if lo is not None and re.fullmatch(LON_NAMES, n) and -180 <= lo and hi <= 180:
             return "lon"
         return None
     if fam != "text":

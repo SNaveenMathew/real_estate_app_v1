@@ -25,12 +25,12 @@ from pydantic import BaseModel
 from config import settings
 import db.duckdb_store as store
 import db.vector_store as vs
-from services import layers as layer_service
 from services import bike_routing
 from agents.house_agent import run_house_chat
 from agents.general_agent import run_general_chat
 from api.onboarding import router as onboarding_router
 from api.commute import router as commute_router
+from api.map_layers import router as map_layers_router
 from observability import initialize_observability, ensure_phoenix_server, stop_phoenix_server, phoenix_enabled
 
 
@@ -74,6 +74,7 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.include_router(onboarding_router)
 app.include_router(commute_router)     # Commute tab API: /api/commute/*   # Data page API: /api/onboarding/*
+app.include_router(map_layers_router)  # Map layer panel API: /api/layers/*
 settings.uploads_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/metrics", make_asgi_app(), name="metrics")
 
@@ -98,9 +99,9 @@ class DocumentRequest(BaseModel):
 import hashlib as _hashlib
 
 def _static_version() -> str:
-    """MD5 of app.js + commute.js + style.css contents — changes whenever any of them changes."""
+    """MD5 of app.js + commute.js + layers.js + style.css contents — changes whenever any of them changes."""
     h = _hashlib.md5()
-    for name in ("app.js", "commute.js", "style.css"):
+    for name in ("app.js", "commute.js", "layers.js", "style.css"):
         p = Path("static") / name
         if p.exists():
             h.update(p.read_bytes())
@@ -301,41 +302,11 @@ async def get_nri(tract_fips: str):
     return nri
 
 
-# ── Map layers (Crime / NRI overlays) ─────────────────────────────────────────
-# Both are viewport-scoped: the frontend passes the current Leaflet map
-# bounds (map.getBounds()) and re-requests on pan/zoom, so a national-scale
-# dataset never has to be shipped whole just to render what's on screen. See
-# services/layers.py for the aggregation/filtering logic.
-
-@app.get("/api/layers/crime")
-async def get_crime_layer(west: float, south: float, east: float, north: float,
-                           grid_deg: float = 0.003, city: Optional[str] = None):
-    """Severity-weighted crime heatmap points within the given map bounds,
-    aggregated into a coarse grid. `city` optionally restricts to one
-    crime_incidents.city key (e.g. 'pittsburgh')."""
-    return layer_service.get_crime_heatmap(west, south, east, north, grid_deg=grid_deg, city=city)
-
-
-@app.get("/api/layers/nri")
-async def get_nri_layer(west: float, south: float, east: float, north: float):
-    """FEMA National Risk Index census-tract choropleth (GeoJSON) within the
-    given map bounds."""
-    return layer_service.get_nri_choropleth(west, south, east, north)
-
-
-@app.get("/api/layers/bike")
-async def get_bike_layer(west: float, south: float, east: float, north: float,
-                         city: Optional[str] = None,
-                         exclusive: bool = False):
-    """BikePGH overlay within the current viewport.
-
-    ``exclusive=true`` is used by visualizations to resolve known overlapping
-    BikePGH classifications into one canonical display category without
-    altering the underlying bike_routes data.
-    """
-    return layer_service.get_bike_routes(
-        west, south, east, north, city=city, exclusive=exclusive
-    )
+# ── Map layers (Houses, Crime, Risk, Bike routes, Sold homes, and anything added on the Data page) ──
+# Genuinely one route per KIND of request, not one per table: see api/map_layers.py and
+# services/map_layers.py. Both are viewport-scoped the same way /api/nri/{tract_fips} above's siblings
+# always were: the frontend passes the current Leaflet map bounds and re-requests on pan/zoom, so a
+# national-scale dataset never has to be shipped whole just to render what is on screen.
 
 
 class BikeRouteRequest(BaseModel):
