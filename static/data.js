@@ -88,7 +88,7 @@ const S = {
   colRole: 'all', colQuery: '', justAdded: new Set(), edits: {}, lastEnrich: null,
   filter: { q: '', hidden: new Set(), allCols: false, system: false }, upload: { sheet: '', skiprows: '' },
   zoom: 1.0,
-  dataSources: [], activeSourceKey: null, sourceResult: null,
+  dataSources: [], activeSourceKey: null, sourceResult: null, linkHealth: {}, checkingLinks: false,
 };
 
 function toast(msg, kind = '') {
@@ -118,6 +118,31 @@ async function loadCatalog() {
 async function loadDataSources() {
   const d = await apiDS('');
   S.dataSources = d.sources;
+}
+
+async function checkSourceLinks() {
+  S.checkingLinks = true; renderPanel();
+  try {
+    const d = await apiDS('/health', { method: 'POST', headers: JSON_HDR, body: JSON.stringify({}) });
+    const byKey = {};
+    for (const r of d.results) byKey[r.key] = r;
+    S.linkHealth = byKey;
+    const broken = d.results.filter(r => r.ok === false).length;
+    toast(broken ? `${broken} source link(s) look broken — see below.` : 'All source links are reachable.',
+      broken ? 'warn' : 'ok');
+  } catch (e) {
+    toast(e.message || String(e), 'err');
+  } finally {
+    S.checkingLinks = false; renderPanel();
+  }
+}
+
+function linkHealthBadge(key) {
+  const r = S.linkHealth[key];
+  if (!r) return null;
+  if (r.ok === null) return h('span', { class: 'pill', title: r.error }, 'no link');
+  if (r.ok) return h('span', { class: 'pill ok', title: `HTTP ${r.status}` }, 'reachable');
+  return h('span', { class: 'pill bad', title: r.error || '' }, 'unreachable');
 }
 
 /* ================================================================ CATALOG MAP */
@@ -588,6 +613,7 @@ function sourceView() {
       src.source_url ? h('p', {},
         h('a', { href: src.source_url, target: '_blank', rel: 'noopener' },
           src.direct_download ? 'Download the current file ↓' : 'Open the source page ↗'),
+        ' ', linkHealthBadge(src.key),
         src.direct_download ? null : h('span', { class: 'muted' }, ' — you will need to find the current download there, this isn\'t a one-click file.')
       ) : null,
       src.notes ? h('div', { class: 'note warn', style: { marginTop: '8px' } }, src.notes) : null),
@@ -693,11 +719,16 @@ function dataSourcesCard() {
     h('details', {},
       h('summary', {}, h('strong', {}, 'Data sources'), ' ',
         h('span', { class: 'muted' }, `— ${S.dataSources.length} built-in source(s), download links + refresh`)),
+      h('div', { class: 'row', style: { marginTop: '8px' } },
+        h('button', { class: 'btn small', type: 'button', disabled: S.checkingLinks, onclick: checkSourceLinks },
+          S.checkingLinks ? 'Checking…' : 'Check source links'),
+        h('span', { class: 'muted' }, ' confirms each source\'s link is still reachable — doesn\'t upload or refresh anything.')),
       Object.entries(byCategory).map(([cat, rows]) => [
         h('h4', { style: { marginTop: '10px' } }, cat),
         h('ul', { class: 'ds-list' }, rows.map(r => h('li', {},
           h('div', {},
-            h('button', { class: 'title', type: 'button', onclick: () => openSourceView(r.key) }, r.label),
+            h('button', { class: 'title', type: 'button', onclick: () => openSourceView(r.key) }, r.label), ' ',
+            linkHealthBadge(r.key),
             h('div', { class: 'muted' }, plural(r.current_row_count, 'row'), ' · last refreshed here ', timeAgo(r.last_loaded_at))),
           h('button', { class: 'btn small', type: 'button', onclick: () => openSourceView(r.key) }, 'Manage')))),
       ])));
@@ -1137,5 +1168,5 @@ async function init() {
   }
   api('/llm/status').then(x => { S.llm = x; if (!S.ds) renderPanel(); }).catch(() => { S.llm = { tiers: { draft: [] }, notes: [] }; if (!S.ds) renderPanel(); });
 }
-window.__dm = { S, uploadFile, openDataset, renderMap, renderPanel, saveForm, analyzeFlow, decide, adopt, openPanel, closePanel, togglePanel, setZoom, zoomIn, zoomOut, zoomReset, fitZoom, openSourceView, closeSourceView, uploadSourceFile };
+window.__dm = { S, uploadFile, openDataset, renderMap, renderPanel, saveForm, analyzeFlow, decide, adopt, openPanel, closePanel, togglePanel, setZoom, zoomIn, zoomOut, zoomReset, fitZoom, openSourceView, closeSourceView, uploadSourceFile, checkSourceLinks };
 document.addEventListener('DOMContentLoaded', init);
