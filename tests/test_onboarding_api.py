@@ -319,3 +319,27 @@ def test_hostile_cell_values_and_headers_are_stored_as_plain_data(client, tmp_pa
     ds = _upload(client, p)
     assert all(re.fullmatch(r"[a-z][a-z0-9_]*", c["name"]) for c in ds["columns"])           # identifiers are sanitised
     assert any("<script>" in str(v) for row in ds["preview"] for v in row.values())          # values stay data; the UI uses textContent
+
+
+def test_data_source_health_check_endpoint_reports_reachable_and_broken_links(client, monkeypatch):
+    """The endpoint itself, not just the service function — real network calls are
+    avoided here (would be flaky/slow in CI) by monkeypatching check_source_links,
+    the same way test_draft_endpoint_degrades_when_no_model_is_reachable avoids a
+    real model call. services/data_sources.py's own test suite covers the real
+    httpx mechanics (concurrency, redirects, status handling) against live URLs."""
+    from services import data_sources
+
+    async def fake_check(keys=None):
+        assert keys == ["redfin", "cbsa"]      # the endpoint must forward the request body through
+        return [
+            {"key": "redfin", "label": "Redfin favorites", "url": "https://www.redfin.com",
+             "ok": True, "status": 200, "redirected_to": None, "error": None},
+            {"key": "cbsa", "label": "CBSA \u2192 county crosswalk", "url": "https://example.invalid/gone",
+             "ok": False, "status": 404, "redirected_to": None, "error": "HTTP 404"},
+        ]
+    monkeypatch.setattr(data_sources, "check_source_links", fake_check)
+
+    response = client.post("/api/data-sources/health", json={"keys": ["redfin", "cbsa"]})
+    assert response.status_code == 200, response.text
+    results = response.json()["results"]
+    assert {r["key"]: r["ok"] for r in results} == {"redfin": True, "cbsa": False}
