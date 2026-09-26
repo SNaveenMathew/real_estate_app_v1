@@ -129,6 +129,30 @@ def test_coordinates_gain_a_tract_via_geo_utils_even_where_polygons_overlap(refe
     assert link["payload"]["left_expr"] == "tract_fips" and link["payload"]["derive"] is None     # already a real column
 
 
+def test_whole_degree_coordinates_still_offer_the_spatial_tract_enrichment(reference_data, tmp_path, monkeypatch):
+    """Regression test: whole-number coordinates infer as an integer SQL column, and
+    relationship_discovery.detect_key_kind used to recognise lat/lon by name only when the column's SQL
+    family was exactly "float" - so a dataset whose coordinates all happened to be round numbers lost the
+    "Add census tract from coordinates" offer entirely, with nothing in the UI explaining why."""
+    _tract_polygons(monkeypatch, overlapping=False)
+    p = tmp_path / "stations.csv"
+    pd.DataFrame({"Station": list("AB"), "Latitude": [40, 41], "Longitude": [-80, -79]}).to_csv(p, index=False)
+    ds = ob.create_dataset(p, "stations.csv")
+    cols = {c["name"]: c for c in ds["columns"]}
+    assert cols["latitude"]["dtype"] == "integer" and cols["latitude"]["key_kind"] == "lat"
+    assert cols["longitude"]["dtype"] == "integer" and cols["longitude"]["key_kind"] == "lon"
+    assert [e["kind"] for e in ds["available_enrichments"]] == ["spatial_tract"]
+
+
+def test_detect_key_kind_accepts_integer_family_lat_lon_directly():
+    from services.relationship_discovery import detect_key_kind
+    assert detect_key_kind("latitude", {"family": "int", "min": 40, "max": 42}) == "lat"
+    assert detect_key_kind("longitude", {"family": "int", "min": -80, "max": -78}) == "lon"
+    assert detect_key_kind("lat", {"family": "float", "min": 40.1, "max": 40.9}) == "lat"      # the float path: unaffected
+    assert detect_key_kind("y", {"family": "int", "min": 42000, "max": 44000}) is None          # out of range: rejected
+    assert detect_key_kind("count", {"family": "int", "min": 1, "max": 100}) is None            # not a coordinate name at all
+
+
 def test_geocoding_can_never_write_to_sold_homes(reference_data, tmp_path, monkeypatch):
     calls = []
 

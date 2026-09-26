@@ -144,6 +144,70 @@ def test_retiring_that_dataset_removes_it_from_the_layer_panel(walk_dataset):
     assert "smart_location_database" not in names
 
 
+def test_a_plain_latlon_upload_becomes_a_points_layer_with_no_code_change(reference_data, tmp_path):
+    """Regression test: the simplest possible geo upload - a CSV with human-written coordinate headers
+    and whole-number values - used to disappear from the layer list entirely. Two independent causes,
+    both fixed: (1) whole-degree coordinates infer as an integer SQL type, which the classifier required
+    to be exactly "float"; (2) "Latitude"/"Longitude" sanitize to latitude/longitude, not the literal
+    "lat"/"lon" this app's built-in tables happen to use, so the column-name check never matched."""
+    p = tmp_path / "stations.csv"
+    pd.DataFrame({"Station": ["A", "B", "C"], "Latitude": [40, 41, 42], "Longitude": [-80, -79, -78],
+                 "Ridership": [1200, 800, 50]}).to_csv(p, index=False)
+    ds = ob.create_dataset(p, "stations.csv")
+    cols = {c["name"]: c["dtype"] for c in ds["columns"]}
+    assert cols["latitude"] == "integer" and cols["longitude"] == "integer"   # confirms this exercises the int path
+    ds = ob.analyze(ds["dataset_id"])
+    ob.decide(next(x for x in ds["proposals"] if x["kind"] == "table")["proposal_id"], "approve")
+
+    spec = next(s for s in ml.derive_layer_specs() if s["name"] == "stations")
+    assert spec["kind"] == "points" and spec["group"] == "overlay"
+    assert (spec["lat_col"], spec["lon_col"]) == ("latitude", "longitude")
+
+    data = ml.get_points("stations", -81, 39, -77, 43)
+    assert data["feature_count"] == 3
+    coords = sorted(f["geometry"]["coordinates"] for f in data["features"])
+    assert coords == [[-80, 40], [-79, 41], [-78, 42]]
+    props = data["features"][0]["properties"]
+    assert props == {"station": "A", "ridership": 1200}    # latitude/longitude themselves are not "properties"
+
+
+def test_latlon_alias_names_are_accepted_and_ranked_by_geographic_plausibility(reference_data, tmp_path):
+    p = tmp_path / "sensors.csv"
+    pd.DataFrame({"Sensor": ["s1", "s2"], "Lat": [40.4, 40.5], "Lng": [-80.1, -80.2],
+                 "Reading": [5.5, 6.5]}).to_csv(p, index=False)
+    ds = ob.create_dataset(p, "sensors.csv")
+    ds = ob.analyze(ds["dataset_id"])
+    ob.decide(next(x for x in ds["proposals"] if x["kind"] == "table")["proposal_id"], "approve")
+    spec = next(s for s in ml.derive_layer_specs() if s["name"] == "sensors")
+    assert (spec["lat_col"], spec["lon_col"]) == ("lat", "lng")
+    data = ml.get_points("sensors", -81, 40, -80, 41)
+    assert data["feature_count"] == 2
+
+
+def test_a_same_named_but_non_geographic_column_is_not_mistaken_for_coordinates(reference_data, tmp_path):
+    """The safety net for the broader alias set: a column named like a coordinate but holding values well
+    outside any real lat/lon range must not turn an ordinary table into a bogus map layer."""
+    p = tmp_path / "readings.csv"
+    pd.DataFrame({"Sensor": ["s1", "s2", "s3"], "y": [42000, 43000, 44000], "x": [91000, 92000, 93000],
+                 "Value": [1.0, 2.0, 3.0]}).to_csv(p, index=False)
+    ds = ob.create_dataset(p, "readings.csv")
+    ds = ob.analyze(ds["dataset_id"])
+    ob.decide(next(x for x in ds["proposals"] if x["kind"] == "table")["proposal_id"], "approve")
+    assert not any(s["name"] == "readings" for s in ml.derive_layer_specs())
+
+
+def test_builtin_tables_are_unaffected_even_when_currently_empty_or_sparse(reference_data):
+    """sold_homes and crime_incidents use the literal "lat"/"lon" convention; that must be trusted
+    unconditionally; the fixture used here only ever inserts a sold_homes row with no coordinates at
+    all, which the broader alias set's range safety net would (correctly) reject - the exact-name path
+    must not be subject to that same check, or an otherwise-fine, simply-quiet table would fall through
+    to being misread as a tract choropleth instead of a heat/points layer."""
+    row = reference_data.execute("SELECT lat, lon FROM sold_homes").fetchone()
+    assert row == (None, None)          # confirms this test is exercising the all-NULL case, not a fluke
+    spec = next(s for s in ml.derive_layer_specs() if s["name"] == "sold_homes")
+    assert spec["kind"] in ("points", "heat") and (spec["lat_col"], spec["lon_col"]) == ("lat", "lon")
+
+
 def test_an_uploaded_polygon_dataset_becomes_a_fill_layer_with_no_code_change(reference_data, tmp_path):
     """A second, independent auto-expansion path: a shapefile/GeoJSON upload with its OWN polygon
     geometry (not joined to anything) - e.g. neighborhood boundaries - rather than a join to nri_tracts."""

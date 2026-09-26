@@ -57,6 +57,7 @@ import pandas as pd
 import db.duckdb_store as store
 import db.schema_catalog as schema
 from services import geo_utils
+from services.relationship_discovery import LAT_NAMES, LON_NAMES
 
 # ---------------------------------------------------------------------------
 # Tunables
@@ -157,6 +158,40 @@ def _has_columns(table: str, *names: str, family: str | None = None) -> bool:
     return all(n in cols and (family is None or _family(cols[n]) == family) for n in names)
 
 
+def _in_range(conn, table: str, col: str, lo: float, hi: float) -> bool:
+    row = conn.execute(f"SELECT MIN({_q(col)}), MAX({_q(col)}) FROM {_q(table)}").fetchone()
+    return row[0] is not None and lo <= row[0] and row[1] <= hi
+
+
+def _find_latlon_columns(table: str) -> tuple[str, str] | None:
+    """The best (lat_col, lon_col) pair for `table`.
+
+    "lat" and "lon" are this app's own, unambiguous schema convention (every built-in table uses them),
+    so an exact match is trusted immediately - exactly as before this function existed - with no value
+    check, since a table can be legitimately empty or between updates. Anything else is a real-world
+    header a person might use instead (Latitude/Longitude, Lat/Lng, Y/X, ...; the same alias set
+    services/relationship_discovery.py uses for the same purpose): those names are more ambiguous, so
+    they additionally need their actual values to fall inside a real coordinate range before they count,
+    the same safety net detect_key_kind applies during dataset onboarding.
+    """
+    cols = [(c, t) for c, t in _columns(table) if _family(t) in ("int", "float")]
+    names = {c.lower(): c for c, _ in cols}
+    if "lat" in names and "lon" in names:
+        return names["lat"], names["lon"]
+    lat_hits = [c for c, _ in cols if re.fullmatch(LAT_NAMES, c.lower())]
+    lon_hits = [c for c, _ in cols if re.fullmatch(LON_NAMES, c.lower())]
+    if not lat_hits or not lon_hits:
+        return None
+    conn = store.get_conn()
+    for lat_col in lat_hits:
+        if not _in_range(conn, table, lat_col, -90, 90):
+            continue
+        for lon_col in lon_hits:
+            if _in_range(conn, table, lon_col, -180, 180):
+                return lat_col, lon_col
+    return None
+
+
 def _geometry_kinds(table: str, sample: int = 200) -> set[str]:
     """Distinct GeoJSON geometry 'type' values found in ``table.geometry_json`` (a small sample is enough:
     a table mixes at most a couple of geometry kinds in practice, and this only decides lines vs polygons)."""
@@ -228,12 +263,14 @@ def _classify(table: str, meta) -> dict | None:
                     "has_color_col": "color" in cols and "color" not in hidden}
         return None
 
-    if _has_columns(table, "lat", "lon", family="float"):
+    latlon = _find_latlon_columns(table)
+    if latlon:
+        lat_col, lon_col = latlon
         n = schema._row_count(table)
         kind = "heat" if n > HEAT_ROW_THRESHOLD else "points"
-        spec = {"kind": kind, "group": "overlay", "row_count": n, "lat_col": "lat", "lon_col": "lon"}
+        spec = {"kind": kind, "group": "overlay", "row_count": n, "lat_col": lat_col, "lon_col": lon_col}
         if kind == "heat":
-            weights = _weight_columns(table, hidden)
+            weights = _weight_columns(table, hidden | {lat_col, lon_col})
             spec["weight_options"] = weights
             spec["weight"] = weights[0]["column"] if weights and _WEIGHT_HINT.search(weights[0]["column"]) else None
         else:
@@ -307,8 +344,8 @@ def _spec_for(name: str) -> dict:
 # Generic data builders
 # ---------------------------------------------------------------------------
 
-def _bbox_params(west: float, south: float, east: float, north: float) -> tuple[str, list]:
-    return "lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?", [south, north, west, east]
+def _bbox_params(lat_col: str, lon_col: str, west: float, south: float, east: float, north: float) -> tuple[str, list]:
+    return f"{_q(lat_col)} BETWEEN ? AND ? AND {_q(lon_col)} BETWEEN ? AND ?", [south, north, west, east]
 
 
 def get_points(table: str, west: float, south: float, east: float, north: float,
@@ -316,12 +353,13 @@ def get_points(table: str, west: float, south: float, east: float, north: float,
     spec = _spec_for(table)
     if spec["kind"] != "points":
         raise LayerError(f"'{table}' is a {spec['kind']} layer, not points.")
-    hidden = set(schema._tables()[table].hidden_columns) | {"lat", "lon"}
+    lat_col, lon_col = spec["lat_col"], spec["lon_col"]
+    hidden = set(schema._tables()[table].hidden_columns) | {lat_col, lon_col}
     cols = _default_props(table, hidden)
-    where, params = _bbox_params(west, south, east, north)
+    where, params = _bbox_params(lat_col, lon_col, west, south, east, north)
     df = store.query(
-        f"SELECT lat, lon, {', '.join(_q(c) for c in cols)} FROM {_q(table)} WHERE {where} LIMIT {int(limit) + 1}",
-        params)
+        f"SELECT {_q(lat_col)} AS lat, {_q(lon_col)} AS lon, {', '.join(_q(c) for c in cols)} "
+        f"FROM {_q(table)} WHERE {where} LIMIT {int(limit) + 1}", params)
     truncated = len(df) > limit
     df = df.head(limit)
     features = []
@@ -342,15 +380,16 @@ def get_heat(table: str, west: float, south: float, east: float, north: float,
     weight = weight if weight is not None else spec.get("weight")
     if not grid_deg or grid_deg <= 0:
         grid_deg = DEFAULT_GRID_DEG
+    lat_col, lon_col = spec["lat_col"], spec["lon_col"]
     weight_expr = f"SUM({_q(weight)})" if weight else "COUNT(*)"
-    where, params = _bbox_params(west, south, east, north)
+    where, params = _bbox_params(lat_col, lon_col, west, south, east, north)
     params = [grid_deg, grid_deg, grid_deg, grid_deg, *params]
     city_clause = ""
     if city and _has_columns(table, "city"):
         city_clause = f"AND {_q('city')} = ?"
         params.append(city)
     df = store.query(f"""
-        SELECT ROUND(lat / ?) * ? AS glat, ROUND(lon / ?) * ? AS glon,
+        SELECT ROUND({_q(lat_col)} / ?) * ? AS glat, ROUND({_q(lon_col)} / ?) * ? AS glon,
                COUNT(*) AS incident_count, {weight_expr} AS weighted_score
         FROM {_q(table)}
         WHERE {where} {city_clause}
