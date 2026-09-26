@@ -362,7 +362,7 @@ routing. Nothing to download: set the address in the sidebar's **Commute** tab. 
   - 🟣 Purple = Contingent
   - 🟢 Green = Pre-Market
 - **Click any marker** to open the sidebar
-- **Map Layer control** (top-right): toggle an optional overlay on top of the map — **Crime** (severity-weighted heatmap), **NRI** (FEMA risk choropleth by census tract), or **Bike Lanes** (BikePGH network overlay). Only one layer is shown at a time; select **None** to turn it off. Layers re-fetch automatically as you pan/zoom.
+- **Map Layers panel** (top-right): **Houses** is on by default; turn on any combination of **Crime**, **Sold Homes**, **Bike Routes** and **Commute time to work** alongside it, plus at most one **area** fill (**Risk (NRI)** or **Population** — picking one turns the other off, since two overlapping fills would just hide one under the other). See [Map layers](#map-layers) for how this list is built and what a new dataset from the Data page adds to it automatically.
 - **Bike route planner**: a control on the map lets you enter a start and end location and route using the local BikePGH network. Resulting route geometry is drawn directly on the map and in chat responses when applicable.
 
 ### House Sidebar
@@ -547,6 +547,80 @@ against a mock OpenTripPlanner in the tests.** Check a few itineraries against y
 - Changing the work location, modes, server URLs or drive factor marks stored estimates stale; the tab offers **Recompute**.
 - If a public server is unreachable or rate-limits you, the job finishes and lists which mode was missing and why
   (for example "Bike: no routes were returned (...)"); retry later or self-host.
+
+---
+
+## Map layers
+
+The map has one toggle panel for every layer the app currently knows how to draw — built-in or added
+through the [Data page](#the-data-page) — built the same way the SQL planner discovers what it can query:
+by reading the live [catalog](#the-catalog-is-a-store), not a hardcoded list. `services/map_layers.py`
+looks at each agent-visible table's actual columns and classifies it:
+
+| A table has... | Becomes | Example today |
+|---|---|---|
+| `lat` + `lon` columns, few rows | a marker layer | (none yet at this size) |
+| `lat` + `lon` columns, many rows | a heat layer, weighted by whatever numeric column looks most like a weight (`severity`, `score`...), else a uniform count | Crime, Sold Homes |
+| a `geometry_json` column of line features | a line layer | Bike Routes |
+| a `geometry_json` column of polygon features | its own fill, colorable by any numeric column | (whatever you upload with its own shapes) |
+| a `tract_fips`-keyed relationship to `nri_tracts`/`census_tracts`, no geometry of its own | a choropleth on the **same shared tract polygons** `services/geo_utils.py` already loads, colored by any numeric column | Risk (NRI), Population |
+| none of the above | not a map layer (still fully queryable in chat) | `house_snapshots`, `census_msa`, `cbsa_counties` |
+
+Approve a new dataset on the Data page and, on your next visit to the map, it is already in this list —
+nothing to wire up. The two tests proving this end to end
+(`tests/test_map_layers.py::test_a_dataset_linked_to_nri_tracts_becomes_a_choropleth_with_no_code_change`
+and `...test_an_uploaded_polygon_dataset_becomes_a_fill_layer_with_no_code_change`) upload a CSV and a
+GeoJSON respectively and assert the resulting layer appears with no line of `map_layers.py` naming either
+one.
+
+### Combining layers: what's allowed, grounded in your own database
+
+Two layers **conflict** only when they would draw a solid fill over the same space — stacking two of those
+mostly just hides one under the other, so the panel keeps at most one **area** fill active (a radio group,
+not a rule you have to remember) and turning one on turns the other off automatically. Everything else
+(markers, heat, lines) draws as distinct glyphs rather than solid coverage, so any number of them combine
+with each other and with the one active fill.
+
+Loading your `data/real_estate.duckdb` and asking `services.map_layers.describe_layers()` what it finds
+gives a concrete, current answer rather than a hypothetical one — this is exactly what
+`tests/test_map_layers.py::test_real_database_layer_inventory_and_fill_exclusivity` asserts against a copy
+of your file:
+
+| Layer | Kind | Group | Notes |
+|---|---|---|---|
+| Houses | markers | — | always available; the only layer on by default |
+| Risk (NRI) | choropleth | **area** (pick one) | 24 hazard/score columns to color by; defaults to `risk_score` |
+| Population | choropleth | **area** (pick one) | shares Risk's tract polygons, so the two are mutually exclusive |
+| Crime | heat | overlay | weighted by `severity_weight` (769,286 rows) |
+| Sold Homes | heat | overlay | uniform count (no weight-like column on this table) |
+| Bike Routes | lines | overlay | its own overlap-resolution logic, unchanged (see below) |
+| Commute time to work | decoration on Houses | overlay | needs a work location set in the Commute tab |
+
+Not shown, on purpose: `bike_lanes` is a real, populated-looking table left over from before this catalog
+existed, but it was never registered through the Data page, so — like anything outside the catalog — the
+map (and chat) correctly doesn't know about it; `geocode_cache` is marked internal
+(`agent_visible: false`); `house_snapshots`, `house_commute`, `census_msa` and `cbsa_counties` have no
+coordinates or shared polygon source of their own, so they stay fully queryable in chat without becoming a
+map layer. `census_msa`/`cbsa_counties` (county/CBSA-level data) could become choropleths the same way NRI
+and Population do; nothing in the real data currently links to them richly enough to be worth it, and
+there's no bundled county/CBSA polygon source the way there is for tracts, so that stayed out of this pass.
+
+### Bike Routes' own overlap resolution (unchanged)
+
+BikePGH's raw data classifies some street segments under more than one category (e.g. "On Street Bike
+Route" and "Bike Lane" for the same block). `services/map_layers.py::_canonicalize_bike_features` (moved
+here from the old `services/layers.py`, logic untouched) resolves this by a fixed priority — protected lane
+> bike lane > trail > bikeable sidewalk > sharrows > cautionary route > on-street route — so the map shows
+one category per segment without editing the underlying data. `services/bike_routing.py`'s separate route
+*planner* ("Find a bikeable route") imports the same priority table rather than keeping its own copy.
+
+### Choropleth geometry
+
+Both built-in choropleths, and any future tract-linked dataset, share whatever tract polygons
+`services/geo_utils.py` already loads for house-to-tract assignment (the NRI shapefile's cache, or
+TIGER/Line files under `data/shapefiles/`) — nothing new to configure. If that cache isn't present, both
+choropleth options are listed but shown as unavailable, with the reason stated, exactly like the
+onboarding page's own "Add census tract from coordinates" step when it hits the same gap.
 
 ---
 
@@ -753,6 +827,7 @@ update_eval_ground_truth.py  Regenerate golden expectations from fixture SQL
 api/
   onboarding.py       Data page HTTP API (/api/onboarding/*)
   commute.py          Commute tab HTTP API (/api/commute/*)
+  map_layers.py       Map layer panel HTTP API (/api/layers/*)
 
 agents/
   tools.py            LangChain tools (SQL, vector search, price estimation)
@@ -781,6 +856,7 @@ services/
   catalog_llm.py      Optional model router for drafting wording, plus --selftest
   house_links.py      Rows of user-added datasets linked to one house (House Chat)
   commute.py          Commute times: work-address lookup, OSRM/OpenTripPlanner clients, refresh job
+  map_layers.py       Generic, catalog-driven map layer classification and data builders
 
 eval/
   fixtures.py         Builds a small deterministic DB with hand-verifiable answers
@@ -797,6 +873,7 @@ static/
   app.js              Frontend logic, layer toggles, bike route rendering
   data.html/.css/.js  The Data page: catalog map + dataset workbench
   commute.js          The Commute tab and the commute-minutes map layer
+  layers.js           The Map Layers panel: builds the toggle list from /api/layers and renders every kind
 
 observability.py      Phoenix tracing + Prometheus metrics helper
 
@@ -870,6 +947,13 @@ is the recommended way to use those endpoints.
 | GET / POST | `/api/onboarding/llm/status`, `/llm/selftest` | The catalog model router |
 
 ---
+
+### Map layer endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/layers` | Every layer the live catalog supports right now, its kind, group and availability |
+| GET | `/api/layers/{name}` | That layer's data for a viewport (`west,south,east,north`); `measure=`, `weight=`, `city=`, `grid_deg=` as the kind allows |
 
 ### Commute endpoints
 
@@ -1110,6 +1194,14 @@ approve -> live, address/spatial/geocode paths), `test_onboarding_api.py` (throu
 `test_catalog_llm.py` (router, repair, fallback, self-test scoring against a mock OpenAI-compatible server).
 
 ---
+
+### Map layer tests
+
+`tests/test_map_layers.py` and `tests/test_map_layers_api.py` cover classification (including the two
+no-code-change onboarding scenarios above), every generic data builder, the preserved bike-overlap and
+crime-severity behavior, and — using an actual copy of `data/real_estate.duckdb` when this repository
+includes one — the concrete layer inventory and fill-exclusivity table shown above, so that table stays
+true as your data changes rather than drifting into documentation fiction.
 
 ### Commute tests
 
