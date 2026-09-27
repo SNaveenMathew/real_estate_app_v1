@@ -13,6 +13,7 @@ const MapLayers = (() => {
   const S = {
     specs: [], byName: {}, on: new Set(), fill: null, measure: {}, weight: {},
     leaflet: {}, loading: new Set(), error: '', control: null, fetchSeq: {},
+    year: {}, animateMax: {}, animateTimer: {},
   };
 
   const BIKE_COLORS = { protected_bike_lanes: '#0d9488', bike_lanes: '#16a34a', trails: '#65a30d',
@@ -117,6 +118,11 @@ const MapLayers = (() => {
       if (spec.kind === 'heat' && spec.weight_options && spec.weight_options.length > 1) {
         extra.push(weightPicker(spec));
       }
+      if (spec.kind === 'heat' && spec.year_options && spec.year_options.length > 0) {
+        extra.push(yearPicker(spec));
+        const btn = animateButton(spec);
+        if (btn) extra.push(btn);
+      }
       if ((spec.kind === 'choropleth' || spec.kind === 'polygons') && spec.measures && spec.measures.length > 1) {
         extra.push(measurePicker(spec));
       }
@@ -143,6 +149,68 @@ const MapLayers = (() => {
       onchange: (e) => { S.measure[spec.name] = e.target.value; refresh(spec.name); } },
       spec.measures.map(m => el('option', { value: m.column, selected: m.column === current }, m.label)));
     return sel;
+  }
+
+  function yearPicker(spec) {
+    const years = spec.year_options || [];
+    const current = S.year[spec.name] ?? null;
+    const allOpt = el('option', { value: '', selected: current === null }, 'All years');
+    const yearOpts = years.map(y => el('option', { value: String(y), selected: current === y }, String(y)));
+    const sel = el('select', { class: 'ml-select', id: `ml-year-${spec.name}`, 'aria-label': `${spec.title} year`,
+      onchange: (e) => {
+        S.year[spec.name] = e.target.value ? parseInt(e.target.value, 10) : null;
+        delete S.animateMax[spec.name];
+        refresh(spec.name);
+      } }, allOpt, yearOpts);
+    return sel;
+  }
+
+  function animateButton(spec) {
+    const years = spec.year_options || [];
+    if (years.length < 2) return null;
+    const name = spec.name;
+    const isRunning = () => !!S.animateTimer[name];
+
+    function stopAnimate() {
+      clearInterval(S.animateTimer[name]);
+      delete S.animateTimer[name];
+      delete S.animateMax[name];
+      render();
+    }
+
+    async function startAnimate() {
+      if (isRunning()) { stopAnimate(); return; }
+
+      // Lock the colour scale: find the per-viewport max across ALL years first.
+      // We do a lightweight fetch for each year at current viewport and take the global max.
+      const allMaxes = await Promise.all(years.map(async (y) => {
+        try {
+          const p = { ...bbox(), weight: S.weight[name] || undefined, grid_deg: gridDegForZoom(), year: y };
+          const url = new URL('/api/layers/' + encodeURIComponent(name), location.origin);
+          for (const [k, v] of Object.entries(p)) if (v != null) url.searchParams.set(k, v);
+          const r = await fetch(url);
+          if (!r.ok) return 0;
+          const d = await r.json();
+          return d.max_weight || 0;
+        } catch { return 0; }
+      }));
+      S.animateMax[name] = Math.max(1, ...allMaxes);
+
+      let idx = 0;
+      async function step() {
+        S.year[name] = years[idx];
+        render();   // update year dropdown to show current year
+        await refresh(name);
+        idx = (idx + 1) % years.length;
+      }
+      await step();
+      S.animateTimer[name] = setInterval(step, 1000);
+      render();
+    }
+
+    const label = isRunning() ? '\u23F9 Stop' : '\u25B6 Animate';
+    return el('button', { class: 'ml-animate-btn' + (isRunning() ? ' running' : ''),
+      id: `ml-animate-${name}`, onclick: isRunning() ? stopAnimate : startAnimate }, label);
   }
 
   function panelBody() {
@@ -208,7 +276,11 @@ const MapLayers = (() => {
 
   function heatLegend(spec) {
     const gradient = `linear-gradient(90deg, ${Object.entries(HEAT_GRADIENT).map(([p, c]) => `${c} ${p * 100}%`).join(',')})`;
-    return el('div', {}, el('div', { class: 'ml-legend-title' }, `${spec.title} density`),
+    const selectedYear = S.year[spec.name];
+    const yearLabel = selectedYear != null ? ` (${selectedYear})` : '';
+    const lockedMax = S.animateMax[spec.name];
+    const scaleNote = lockedMax != null ? ' — scale locked' : '';
+    return el('div', {}, el('div', { class: 'ml-legend-title' }, `${spec.title} density${yearLabel}${scaleNote}`),
       el('div', { class: 'ml-legend-gradient', style: `background:${gradient}` }),
       el('div', { class: 'ml-legend-scale' }, el('span', {}, 'fewer'), el('span', {}, 'more')));
   }
@@ -269,7 +341,11 @@ const MapLayers = (() => {
     S.loading.add(name); S.error = ''; render();
     try {
       const params = { ...bbox() };
-      if (spec.kind === 'heat') { params.weight = S.weight[name] || undefined; params.grid_deg = gridDegForZoom(); }
+      if (spec.kind === 'heat') {
+        params.weight = S.weight[name] || undefined;
+        params.grid_deg = gridDegForZoom();
+        if (S.year[name] != null) params.year = S.year[name];
+      }
       if (spec.kind === 'choropleth' || spec.kind === 'polygons') params.measure = S.measure[name] || spec.default_measure;
       const data = await api('/' + encodeURIComponent(name), params);
       if (seq !== S.fetchSeq[name]) return;    // a newer request for this layer has already landed
@@ -292,7 +368,7 @@ const MapLayers = (() => {
   function mount(name, spec, data) {
     removeLeaflet(name);
     let layer;
-    if (spec.kind === 'heat') layer = mountHeat(data);
+    if (spec.kind === 'heat') layer = mountHeat(name, data);
     else if (spec.kind === 'points') layer = mountPoints(spec, data);
     else if (spec.kind === 'lines') layer = mountLines(name, data);
     else if (spec.kind === 'polygons') layer = mountPolygons(spec, name, data);
@@ -302,9 +378,12 @@ const MapLayers = (() => {
     S.leaflet[name] = layer;
   }
 
-  function mountHeat(data) {
+  function mountHeat(name, data) {
+    // During animation, S.animateMax[name] is the viewport-wide max across ALL years — keeps the
+    // colour scale constant so year-over-year density comparisons are visually meaningful.
+    const effectiveMax = S.animateMax[name] ?? Math.max(data.max_weight, 1);
     return L.heatLayer(data.points.map(p => [p[0], p[1], p[2]]), {
-      radius: 18, blur: 22, maxZoom: map.getZoom(), max: Math.max(data.max_weight, 1), gradient: HEAT_GRADIENT,
+      radius: 18, blur: 22, maxZoom: map.getZoom(), max: effectiveMax, gradient: HEAT_GRADIENT,
     });
   }
 
