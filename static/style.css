@@ -248,6 +248,14 @@ input[type="text"] { border: 1px solid #ddd; border-radius: 6px; padding: 6px 8p
 .ml-count { margin-left: auto; font-size: 10px; color: #aaa; }
 .ml-reason { font-size: 10px; color: #b08a00; margin: 0 0 4px 21px; line-height: 1.35; }
 .ml-select { margin: 3px 0 4px 21px; font-size: 11px; padding: 2px 4px; border: 1px solid #ddd; border-radius: 5px; max-width: 170px; }
+.ml-animate-btn {
+  display: block; margin: 0 0 4px 21px; padding: 3px 10px;
+  font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer;
+  border: 1px solid #d1d5db; background: #f8f9fc; color: #374151;
+  transition: background .15s, border-color .15s, color .15s;
+}
+.ml-animate-btn:hover { background: #eef3fb; border-color: #4f8ef7; color: #1d4fae; }
+.ml-animate-btn.running { background: #fee2e2; border-color: #ef4444; color: #b91c1c; }
 .ml-legend { margin-top: 10px; padding-top: 10px; border-top: 1px solid #eee; }
 .ml-legend-title { font-weight: 700; font-size: 10.5px; color: #666; margin-bottom: 6px; }
 .ml-legend-gradient { height: 8px; border-radius: 4px; margin-bottom: 3px; }
