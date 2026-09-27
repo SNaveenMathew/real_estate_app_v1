@@ -393,14 +393,16 @@ def get_heat(table: str, west: float, south: float, east: float, north: float,
         grid_deg = DEFAULT_GRID_DEG
     lat_col, lon_col = spec["lat_col"], spec["lon_col"]
     weight_expr = f"SUM({_q(weight)})" if weight else "COUNT(*)"
-    where, params = _bbox_params(lat_col, lon_col, west, south, east, north)
-    params = [grid_deg, grid_deg, grid_deg, grid_deg, *params]
+    where, bbox_vals = _bbox_params(lat_col, lon_col, west, south, east, north)
+    params = [grid_deg, grid_deg, grid_deg, grid_deg, *bbox_vals]
     city_clause = ""
     if city and _has_columns(table, "city"):
         city_clause = f"AND {_q('city')} = ?"
         params.append(city)
     year_clause = ""
-    if year is not None and _has_columns(table, "year", family="int"):
+    if year is not None:
+        if not _has_columns(table, "year", family="int"):
+            raise LayerError(f"'{table}' does not have an integer year column.")
         year_clause = "AND \"year\" = ?"
         params.append(int(year))
     df = store.query(f"""
@@ -413,14 +415,40 @@ def get_heat(table: str, west: float, south: float, east: float, north: float,
     """, params)
     truncated = len(df) > MAX_GRID_CELLS
     df = df.head(MAX_GRID_CELLS)
+
+    # Compute max_year_weight across all years in this viewport if the layer has a year column.
+    max_year_weight = None
+    if _has_columns(table, "year", family="int"):
+        myw_params = [grid_deg, grid_deg, grid_deg, grid_deg, *bbox_vals]
+        myw_city = ""
+        if city and _has_columns(table, "city"):
+            myw_city = f"AND {_q('city')} = ?"
+            myw_params.append(city)
+        try:
+            myw_row = store.get_conn().execute(f"""
+                SELECT MAX(single_year_weight) FROM (
+                    SELECT ROUND({_q(lat_col)} / ?) * ? AS glat, ROUND({_q(lon_col)} / ?) * ? AS glon,
+                           "year", {weight_expr} AS single_year_weight
+                    FROM {_q(table)}
+                    WHERE {where} {myw_city} AND "year" IS NOT NULL
+                    GROUP BY glat, glon, "year"
+                )
+            """, myw_params).fetchone()
+            if myw_row and myw_row[0] is not None:
+                max_year_weight = round(float(myw_row[0]), 3)
+        except Exception:
+            max_year_weight = None
+
     if df.empty:
-        return {"points": [], "max_weight": 0.0, "incident_count": 0, "cell_count": 0, "truncated": False,
+        return {"points": [], "max_weight": 0.0, "max_year_weight": max_year_weight,
+                "incident_count": 0, "cell_count": 0, "truncated": False,
                 "grid_deg": grid_deg, "weight": weight, "year": year}
     max_weight = float(df["weighted_score"].max())
     points = [[round(float(r.glat), 5), round(float(r.glon), 5), round(float(r.weighted_score), 3)]
              for r in df.itertuples(index=False)]
-    return {"points": points, "max_weight": max_weight, "incident_count": int(df["incident_count"].sum()),
-            "cell_count": len(df), "truncated": truncated, "grid_deg": grid_deg, "weight": weight, "year": year}
+    return {"points": points, "max_weight": max_weight, "max_year_weight": max_year_weight,
+            "incident_count": int(df["incident_count"].sum()), "cell_count": len(df),
+            "truncated": truncated, "grid_deg": grid_deg, "weight": weight, "year": year}
 
 
 def get_lines(table: str, west: float, south: float, east: float, north: float,
