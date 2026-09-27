@@ -2,6 +2,8 @@
 
 A local, AI-powered map app for analyzing houses with FEMA National Risk Index data, Census demographics, Redfin listings, severity-weighted crime data, and an LLM chat interface — all running on your machine.
 
+For a screenshot-led walkthrough of the map and house views, see the [User Guide](USER_GUIDE.md).
+
 ## General Chat: Agent Architecture & Design Philosophy
 
 **The LLM writes text; deterministic code decides what's true and what's allowed.**
@@ -609,7 +611,7 @@ of your file:
 | Houses | markers | — | always available; the only layer on by default |
 | Risk (NRI) | choropleth | **area** (pick one) | 24 hazard/score columns to color by; defaults to `risk_score` |
 | Population | choropleth | **area** (pick one) | shares Risk's tract polygons, so the two are mutually exclusive |
-| Crime | heat | overlay | weighted by `severity_weight` (769,286 rows) |
+| Crime | heat | overlay | weighted by `severity_weight` (769,286 rows); filter by year dropdown or animate across years with a constant density scale |
 | Sold Homes | heat | overlay | uniform count (no weight-like column on this table) |
 | Bike Routes | lines | overlay | its own overlap-resolution logic, unchanged (see below) |
 | Commute time to work | decoration on Houses | overlay | needs a work location set in the Commute tab |

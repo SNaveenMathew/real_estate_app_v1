@@ -273,6 +273,16 @@ def _classify(table: str, meta) -> dict | None:
             weights = _weight_columns(table, hidden | {lat_col, lon_col})
             spec["weight_options"] = weights
             spec["weight"] = weights[0]["column"] if weights and _WEIGHT_HINT.search(weights[0]["column"]) else None
+            # Expose distinct years when the table has an integer 'year' column, so the
+            # frontend can render a year-filter dropdown and an animate control.
+            if _has_columns(table, "year", family="int"):
+                try:
+                    rows = store.get_conn().execute(
+                        f"SELECT DISTINCT year FROM {_q(table)} WHERE year IS NOT NULL ORDER BY year"
+                    ).fetchall()
+                    spec["year_options"] = [r[0] for r in rows]
+                except Exception:
+                    spec["year_options"] = []
         else:
             label_col = next((c for c, t in _columns(table) if t.upper().startswith("VARCHAR") and c not in hidden), None)
             spec["label_col"] = label_col
@@ -371,7 +381,8 @@ def get_points(table: str, west: float, south: float, east: float, north: float,
 
 
 def get_heat(table: str, west: float, south: float, east: float, north: float,
-            weight: str | None = None, grid_deg: float = DEFAULT_GRID_DEG, city: str | None = None) -> dict:
+            weight: str | None = None, grid_deg: float = DEFAULT_GRID_DEG, city: str | None = None,
+            year: int | None = None) -> dict:
     spec = _spec_for(table)
     if spec["kind"] != "heat":
         raise LayerError(f"'{table}' is a {spec['kind']} layer, not heat.")
@@ -382,30 +393,62 @@ def get_heat(table: str, west: float, south: float, east: float, north: float,
         grid_deg = DEFAULT_GRID_DEG
     lat_col, lon_col = spec["lat_col"], spec["lon_col"]
     weight_expr = f"SUM({_q(weight)})" if weight else "COUNT(*)"
-    where, params = _bbox_params(lat_col, lon_col, west, south, east, north)
-    params = [grid_deg, grid_deg, grid_deg, grid_deg, *params]
+    where, bbox_vals = _bbox_params(lat_col, lon_col, west, south, east, north)
+    params = [grid_deg, grid_deg, grid_deg, grid_deg, *bbox_vals]
     city_clause = ""
     if city and _has_columns(table, "city"):
         city_clause = f"AND {_q('city')} = ?"
         params.append(city)
+    year_clause = ""
+    if year is not None:
+        if not _has_columns(table, "year", family="int"):
+            raise LayerError(f"'{table}' does not have an integer year column.")
+        year_clause = "AND \"year\" = ?"
+        params.append(int(year))
     df = store.query(f"""
         SELECT ROUND({_q(lat_col)} / ?) * ? AS glat, ROUND({_q(lon_col)} / ?) * ? AS glon,
                COUNT(*) AS incident_count, {weight_expr} AS weighted_score
         FROM {_q(table)}
-        WHERE {where} {city_clause}
+        WHERE {where} {city_clause} {year_clause}
         GROUP BY glat, glon
         ORDER BY weighted_score DESC
     """, params)
     truncated = len(df) > MAX_GRID_CELLS
     df = df.head(MAX_GRID_CELLS)
+
+    # Compute max_year_weight across all years in this viewport if the layer has a year column.
+    max_year_weight = None
+    if _has_columns(table, "year", family="int"):
+        myw_params = [grid_deg, grid_deg, grid_deg, grid_deg, *bbox_vals]
+        myw_city = ""
+        if city and _has_columns(table, "city"):
+            myw_city = f"AND {_q('city')} = ?"
+            myw_params.append(city)
+        try:
+            myw_row = store.get_conn().execute(f"""
+                SELECT MAX(single_year_weight) FROM (
+                    SELECT ROUND({_q(lat_col)} / ?) * ? AS glat, ROUND({_q(lon_col)} / ?) * ? AS glon,
+                           "year", {weight_expr} AS single_year_weight
+                    FROM {_q(table)}
+                    WHERE {where} {myw_city} AND "year" IS NOT NULL
+                    GROUP BY glat, glon, "year"
+                )
+            """, myw_params).fetchone()
+            if myw_row and myw_row[0] is not None:
+                max_year_weight = round(float(myw_row[0]), 3)
+        except Exception:
+            max_year_weight = None
+
     if df.empty:
-        return {"points": [], "max_weight": 0.0, "incident_count": 0, "cell_count": 0, "truncated": False,
-                "grid_deg": grid_deg, "weight": weight}
+        return {"points": [], "max_weight": 0.0, "max_year_weight": max_year_weight,
+                "incident_count": 0, "cell_count": 0, "truncated": False,
+                "grid_deg": grid_deg, "weight": weight, "year": year}
     max_weight = float(df["weighted_score"].max())
     points = [[round(float(r.glat), 5), round(float(r.glon), 5), round(float(r.weighted_score), 3)]
              for r in df.itertuples(index=False)]
-    return {"points": points, "max_weight": max_weight, "incident_count": int(df["incident_count"].sum()),
-            "cell_count": len(df), "truncated": truncated, "grid_deg": grid_deg, "weight": weight}
+    return {"points": points, "max_weight": max_weight, "max_year_weight": max_year_weight,
+            "incident_count": int(df["incident_count"].sum()), "cell_count": len(df),
+            "truncated": truncated, "grid_deg": grid_deg, "weight": weight, "year": year}
 
 
 def get_lines(table: str, west: float, south: float, east: float, north: float,
@@ -562,7 +605,7 @@ def get_layer_data(name: str, **kwargs) -> dict:
     if kind == "heat":
         return get_heat(name, kwargs["west"], kwargs["south"], kwargs["east"], kwargs["north"],
                         weight=kwargs.get("weight"), grid_deg=kwargs.get("grid_deg", DEFAULT_GRID_DEG),
-                        city=kwargs.get("city"))
+                        city=kwargs.get("city"), year=kwargs.get("year"))
     if kind == "lines":
         return get_lines(name, kwargs["west"], kwargs["south"], kwargs["east"], kwargs["north"],
                          limit=kwargs.get("limit", MAX_LINE_FEATURES))

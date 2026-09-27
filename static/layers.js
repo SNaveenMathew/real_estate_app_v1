@@ -13,6 +13,7 @@ const MapLayers = (() => {
   const S = {
     specs: [], byName: {}, on: new Set(), fill: null, measure: {}, weight: {},
     leaflet: {}, loading: new Set(), error: '', control: null, fetchSeq: {},
+    year: {}, animateMax: {}, animateTimer: {}, animating: {},
   };
 
   const BIKE_COLORS = { protected_bike_lanes: '#0d9488', bike_lanes: '#16a34a', trails: '#65a30d',
@@ -117,6 +118,11 @@ const MapLayers = (() => {
       if (spec.kind === 'heat' && spec.weight_options && spec.weight_options.length > 1) {
         extra.push(weightPicker(spec));
       }
+      if (spec.kind === 'heat' && spec.year_options && spec.year_options.length > 0) {
+        extra.push(yearPicker(spec));
+        const btn = animateButton(spec);
+        if (btn) extra.push(btn);
+      }
       if ((spec.kind === 'choropleth' || spec.kind === 'polygons') && spec.measures && spec.measures.length > 1) {
         extra.push(measurePicker(spec));
       }
@@ -143,6 +149,77 @@ const MapLayers = (() => {
       onchange: (e) => { S.measure[spec.name] = e.target.value; refresh(spec.name); } },
       spec.measures.map(m => el('option', { value: m.column, selected: m.column === current }, m.label)));
     return sel;
+  }
+
+  function yearPicker(spec) {
+    const years = spec.year_options || [];
+    const current = S.year[spec.name] ?? null;
+    const allOpt = el('option', { value: '', selected: current === null }, 'All years');
+    const yearOpts = years.map(y => el('option', { value: String(y), selected: current === y }, String(y)));
+    const sel = el('select', { class: 'ml-select', id: `ml-year-${spec.name}`, 'aria-label': `${spec.title} year`,
+      onchange: (e) => {
+        stopAnimate(spec.name);
+        S.year[spec.name] = e.target.value ? parseInt(e.target.value, 10) : null;
+        refresh(spec.name);
+      } }, allOpt, yearOpts);
+    return sel;
+  }
+
+  function stopAnimate(name) {
+    if (S.animateTimer[name]) {
+      clearInterval(S.animateTimer[name]);
+      delete S.animateTimer[name];
+    }
+    delete S.animateMax[name];
+    delete S.animating[name];
+    render();
+  }
+
+  function startAnimate(name) {
+    const spec = S.byName[name];
+    if (!spec || !spec.year_options || spec.year_options.length < 2) return;
+    if (S.animateTimer[name] || S.animating[name]) {
+      stopAnimate(name);
+      return;
+    }
+
+    const years = spec.year_options;
+    S.animating[name] = true;
+
+    let currentYear = S.year[name];
+    let idx = years.indexOf(currentYear);
+    if (idx === -1) idx = 0;
+
+    async function step() {
+      if (!S.animating[name] || !S.on.has(name)) {
+        stopAnimate(name);
+        return;
+      }
+      S.year[name] = years[idx];
+      idx = (idx + 1) % years.length;
+      render();
+      await refresh(name);
+    }
+
+    step();
+    S.animateTimer[name] = setInterval(step, 1000);
+    render();
+  }
+
+  function animateButton(spec) {
+    const years = spec.year_options || [];
+    if (years.length < 2) return null;
+    const name = spec.name;
+    const isRunning = !!S.animating[name];
+    const label = isRunning ? '\u23F9 Stop' : '\u25B6 Animate';
+    return el('button', {
+      class: 'ml-animate-btn' + (isRunning ? ' running' : ''),
+      id: `ml-animate-${name}`,
+      onclick: () => {
+        if (isRunning) stopAnimate(name);
+        else startAnimate(name);
+      },
+    }, label);
   }
 
   function panelBody() {
@@ -208,7 +285,10 @@ const MapLayers = (() => {
 
   function heatLegend(spec) {
     const gradient = `linear-gradient(90deg, ${Object.entries(HEAT_GRADIENT).map(([p, c]) => `${c} ${p * 100}%`).join(',')})`;
-    return el('div', {}, el('div', { class: 'ml-legend-title' }, `${spec.title} density`),
+    const selectedYear = S.year[spec.name];
+    const yearLabel = selectedYear != null ? ` (${selectedYear})` : '';
+    const scaleNote = S.animating[spec.name] ? ' — scale locked' : '';
+    return el('div', {}, el('div', { class: 'ml-legend-title' }, `${spec.title} density${yearLabel}${scaleNote}`),
       el('div', { class: 'ml-legend-gradient', style: `background:${gradient}` }),
       el('div', { class: 'ml-legend-scale' }, el('span', {}, 'fewer'), el('span', {}, 'more')));
   }
@@ -241,8 +321,14 @@ const MapLayers = (() => {
       return;
     }
     if (isFill) { setFill(S.fill === name ? null : name); return; }
-    if (S.on.has(name)) { S.on.delete(name); removeLeaflet(name); }
-    else { S.on.add(name); refresh(name); }
+    if (S.on.has(name)) {
+      stopAnimate(name);
+      S.on.delete(name);
+      removeLeaflet(name);
+    } else {
+      S.on.add(name);
+      refresh(name);
+    }
     render();
   }
 
@@ -259,6 +345,7 @@ const MapLayers = (() => {
     // layer the user just removed.
     S.fetchSeq[name] = (S.fetchSeq[name] || 0) + 1;
     if (S.leaflet[name]) { map.removeLayer(S.leaflet[name]); delete S.leaflet[name]; }
+    if (S.animating && S.animating[name]) stopAnimate(name);
   }
 
   async function refresh(name) {
@@ -269,7 +356,11 @@ const MapLayers = (() => {
     S.loading.add(name); S.error = ''; render();
     try {
       const params = { ...bbox() };
-      if (spec.kind === 'heat') { params.weight = S.weight[name] || undefined; params.grid_deg = gridDegForZoom(); }
+      if (spec.kind === 'heat') {
+        params.weight = S.weight[name] || undefined;
+        params.grid_deg = gridDegForZoom();
+        if (S.year[name] != null) params.year = S.year[name];
+      }
       if (spec.kind === 'choropleth' || spec.kind === 'polygons') params.measure = S.measure[name] || spec.default_measure;
       const data = await api('/' + encodeURIComponent(name), params);
       if (seq !== S.fetchSeq[name]) return;    // a newer request for this layer has already landed
@@ -292,7 +383,7 @@ const MapLayers = (() => {
   function mount(name, spec, data) {
     removeLeaflet(name);
     let layer;
-    if (spec.kind === 'heat') layer = mountHeat(data);
+    if (spec.kind === 'heat') layer = mountHeat(name, data);
     else if (spec.kind === 'points') layer = mountPoints(spec, data);
     else if (spec.kind === 'lines') layer = mountLines(name, data);
     else if (spec.kind === 'polygons') layer = mountPolygons(spec, name, data);
@@ -302,9 +393,16 @@ const MapLayers = (() => {
     S.leaflet[name] = layer;
   }
 
-  function mountHeat(data) {
+  function mountHeat(name, data) {
+    // When animating, use the viewport-wide max across ALL years (returned directly by the server
+    // as data.max_year_weight). This keeps the colour scale constant so year-over-year density
+    // comparisons are visually consistent and meaningful without needing client-side prefetch loops.
+    if (S.animating[name] && data.max_year_weight) {
+      S.animateMax[name] = data.max_year_weight;
+    }
+    const effectiveMax = (S.animating[name] && S.animateMax[name]) ? S.animateMax[name] : Math.max(data.max_weight, 1);
     return L.heatLayer(data.points.map(p => [p[0], p[1], p[2]]), {
-      radius: 18, blur: 22, maxZoom: map.getZoom(), max: Math.max(data.max_weight, 1), gradient: HEAT_GRADIENT,
+      radius: 18, blur: 22, maxZoom: map.getZoom(), max: effectiveMax, gradient: HEAT_GRADIENT,
     });
   }
 
