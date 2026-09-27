@@ -419,6 +419,9 @@ if _r_year.status_code == 200:
     check("year-filtered response has points list",
           isinstance(_d_year.get("points"), list),
           f"keys={list(_d_year)}")
+    check("year-filtered response includes max_year_weight >= max_weight",
+          _d_year.get("max_year_weight") is not None and _d_year.get("max_year_weight") >= _d_year.get("max_weight", 0),
+          f"max_year_weight={_d_year.get('max_year_weight')!r}, max_weight={_d_year.get('max_weight')!r}")
 
 # Unfiltered call — should return more incidents than the year-filtered one
 _r_all = requests.get(f"{BASE}/api/layers/crime_incidents",
@@ -450,6 +453,13 @@ _r_bad = requests.get(f"{BASE}/api/layers/crime_incidents",
 check("?year=notanumber rejected with 422",
       _r_bad.status_code == 422,
       f"got {_r_bad.status_code}")
+
+# Year query on layer without year column — must be rejected with 422
+_r_no_year = requests.get(f"{BASE}/api/layers/sold_homes",
+                          params={**_bbox, "year": 2020})
+check("?year=2020 on sold_homes (no year col) rejected with 422",
+      _r_no_year.status_code == 422,
+      f"got {_r_no_year.status_code}")
 
 
 

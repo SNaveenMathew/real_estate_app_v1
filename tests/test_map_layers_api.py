@@ -156,3 +156,28 @@ def test_crime_heat_year_param_must_be_integer(client):
     r = client.get("/api/layers/crime_incidents", params={**PGH, "year": "notanumber"})
     assert r.status_code == 422
 
+
+def test_crime_heat_returns_max_year_weight(client):
+    """The API response for crime heat must include max_year_weight."""
+    _seed_crime_years({
+        2019: [(40.44, -80.00, 3.0)],
+        2020: [(40.44, -80.00, 8.0)],
+    })
+    r = client.get("/api/layers/crime_incidents", params={**PGH, "year": 2019, "grid_deg": 0.01})
+    assert r.status_code == 200
+    data = r.json()
+    assert "max_year_weight" in data
+    assert data["max_year_weight"] == pytest.approx(8.0)
+
+
+def test_heat_layer_without_year_column_rejects_year_query(client, reference_data):
+    """Querying a heat layer that lacks a year column (sold_homes) with ?year= must return 422."""
+    from tests.test_map_layers import _insert_sold
+    from services import map_layers as ml
+    import db.schema_catalog as schema
+    _insert_sold(reference_data, ml.HEAT_ROW_THRESHOLD + 10)
+    schema.reload()
+    r = client.get("/api/layers/sold_homes", params={**PGH, "year": 2020})
+    assert r.status_code == 422
+    assert "does not have an integer year column" in r.json()["detail"]
+
