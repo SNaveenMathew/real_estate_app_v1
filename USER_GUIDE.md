@@ -134,6 +134,23 @@ layers, combination rules, and how approved datasets appear automatically, see t
 
 ![Crime heatmap over a city, with a severity legend](screenshots/10-crime-heatmap.png)
 
+### Crime heatmap & year-by-year animation
+
+When the **Crime** layer is turned on, the panel exposes historical filtering controls directly
+inferred from the local crime database:
+
+- **Year dropdown**: Displays all distinct years present in the dataset alongside an **"All years"** default.
+  Selecting a single year scopes the heatmap aggregation strictly to incidents from that year, updating
+  the map cells and the legend title (e.g. `Crime density (2020)`).
+- **▶ Animate button**: Automatically steps forward through all available years at 1 frame per second.
+  - **Constant density legend**: While animating, the color density gradient scale is locked across
+    all years using the peak single-year density within the active viewport (`— scale locked` indicator).
+    This ensures that red, orange, and blue intensities represent the exact same absolute incident
+    densities from year to year, making multi-year trends and hotspots directly comparable without visual distortion.
+  - **Interactive controls**: The year dropdown advances in sync with each frame. Clicking **⏹ Stop**,
+    selecting any year manually from the dropdown, or unchecking the layer immediately halts the animation
+    and returns the scale to standard mode.
+
 ![Bike Routes overlay: several colored facility-type lines with a legend](screenshots/11-bike-routes-layer.png)
 
 To add a dataset that can appear as a layer, see [The Data page](#the-data-page) and the README's
