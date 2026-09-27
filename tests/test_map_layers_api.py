@@ -70,3 +70,114 @@ def test_retiring_a_dataset_removes_it_from_the_api_immediately(client, walk_dat
     out = client.get("/api/layers").json()
     assert "smart_location_database" not in {l["name"] for l in out["layers"]}
     assert client.get("/api/layers/smart_location_database", params=PGH).status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Year filter — API-level (new feature)
+# ---------------------------------------------------------------------------
+
+def _seed_crime_years(rows_by_year):
+    """Insert crime rows via the live DuckDB connection used by the test client."""
+    import db.duckdb_store as store
+    import db.schema_catalog as schema
+    conn = store.get_conn()
+    idx = 0
+    for year, pts in rows_by_year.items():
+        for lat, lon, sev in pts:
+            conn.execute(
+                "INSERT INTO crime_incidents (incident_id, city, lat, lon, category, "
+                "category_label, severity_weight, year, month) VALUES (?,?,?,?,?,?,?,?,1)",
+                [f"api_cy{idx}", "pittsburgh", lat, lon, "theft", "Theft", sev, year],
+            )
+            idx += 1
+    # pad past HEAT_ROW_THRESHOLD so the classifier picks "heat"
+    from services import map_layers as ml
+    filler = [
+        (f"api_cf{j}", "nowhere", 89.0, 179.0, "filler", "Filler", 0.0, 2024, 1)
+        for j in range(ml.HEAT_ROW_THRESHOLD + 1)
+    ]
+    conn.executemany(
+        "INSERT INTO crime_incidents (incident_id, city, lat, lon, category, "
+        "category_label, severity_weight, year, month) VALUES (?,?,?,?,?,?,?,?,?)",
+        filler,
+    )
+    schema.reload()
+
+
+def test_layer_list_includes_year_options_for_crime(client):
+    """GET /api/layers must include a non-empty, sorted year_options list for crime_incidents."""
+    _seed_crime_years({2019: [(40.44, -80.0, 1.0)], 2021: [(40.45, -80.01, 1.0)]})
+    out = client.get("/api/layers").json()
+    crime = next((l for l in out["layers"] if l["name"] == "crime_incidents"), None)
+    assert crime is not None, "crime_incidents must appear in the layer list"
+    years = crime.get("year_options", [])
+    assert 2019 in years and 2021 in years
+    assert years == sorted(years)
+
+
+def test_crime_heat_with_valid_year_returns_filtered_data(client):
+    """?year=2019 must scope the aggregated grid to 2019 incidents only."""
+    _seed_crime_years({
+        2019: [(40.44, -80.00, 3.0)],
+        2021: [(40.45, -80.01, 9.0)],
+    })
+    r = client.get("/api/layers/crime_incidents", params={**PGH, "year": 2019, "grid_deg": 0.01})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["incident_count"] == 1
+    assert data["year"] == 2019
+    assert sum(p[2] for p in data["points"]) == pytest.approx(3.0)
+
+
+def test_crime_heat_with_nonexistent_year_returns_empty(client):
+    """?year=1900 must return an empty points list, not a 4xx/5xx error."""
+    _seed_crime_years({2019: [(40.44, -80.0, 1.0)]})
+    r = client.get("/api/layers/crime_incidents", params={**PGH, "year": 1900, "grid_deg": 0.01})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["points"] == [] and data["incident_count"] == 0
+
+
+def test_crime_heat_without_year_param_returns_all_years(client):
+    """Omitting ?year= must aggregate all years (existing default behaviour preserved)."""
+    _seed_crime_years({
+        2019: [(40.44, -80.00, 3.0)],
+        2021: [(40.45, -80.01, 7.0)],
+    })
+    r = client.get("/api/layers/crime_incidents", params={**PGH, "grid_deg": 0.01})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["incident_count"] == 2
+    assert data["year"] is None
+
+
+def test_crime_heat_year_param_must_be_integer(client):
+    """?year=notanumber must be rejected by FastAPI validation (422)."""
+    r = client.get("/api/layers/crime_incidents", params={**PGH, "year": "notanumber"})
+    assert r.status_code == 422
+
+
+def test_crime_heat_returns_max_year_weight(client):
+    """The API response for crime heat must include max_year_weight."""
+    _seed_crime_years({
+        2019: [(40.44, -80.00, 3.0)],
+        2020: [(40.44, -80.00, 8.0)],
+    })
+    r = client.get("/api/layers/crime_incidents", params={**PGH, "year": 2019, "grid_deg": 0.01})
+    assert r.status_code == 200
+    data = r.json()
+    assert "max_year_weight" in data
+    assert data["max_year_weight"] == pytest.approx(8.0)
+
+
+def test_heat_layer_without_year_column_rejects_year_query(client, reference_data):
+    """Querying a heat layer that lacks a year column (sold_homes) with ?year= must return 422."""
+    from tests.test_map_layers import _insert_sold
+    from services import map_layers as ml
+    import db.schema_catalog as schema
+    _insert_sold(reference_data, ml.HEAT_ROW_THRESHOLD + 10)
+    schema.reload()
+    r = client.get("/api/layers/sold_homes", params={**PGH, "year": 2020})
+    assert r.status_code == 422
+    assert "does not have an integer year column" in r.json()["detail"]
+
