@@ -2,6 +2,8 @@
 
 A local, AI-powered map app for analyzing houses with FEMA National Risk Index data, Census demographics, Redfin listings, severity-weighted crime data, and an LLM chat interface — all running on your machine.
 
+For a screenshot-led walkthrough of the map and house views, see the [User Guide](USER_GUIDE.md).
+
 ## General Chat: Agent Architecture & Design Philosophy
 
 **The LLM writes text; deterministic code decides what's true and what's allowed.**
