@@ -43,6 +43,17 @@ class Settings(BaseSettings):
     code_agent_max_tokens: int = 1500   # SQL Code Agent: raised from 700 — see "Round 2" above
     llm_request_timeout: float = 120.0  # seconds, per HTTP request to llama-server
 
+    # ── Presentation layer (agents/artifacts.py) ────────────────────────────
+    # Caps on how much of an executed result becomes a table/chart/map
+    # artifact in chat, independent of the separate ~50-row cap on the text
+    # evidence shown to the LLM in agents/tools.py::run_code_query. A hinted
+    # chart (the orchestrator read an explicit "chart this" from the user)
+    # gets a slightly larger allowance than the automatic/unhinted case.
+    presentation_table_max_rows: int = 200
+    presentation_chart_max_points: int = 50
+    presentation_chart_max_points_hinted: int = 100
+    presentation_map_max_points: int = 300
+
     # ── Observability / Phoenix ─────────────────────────────────────────────
     # Local Phoenix is open source and runs entirely on the developer machine.
     phoenix_enabled: bool = True
