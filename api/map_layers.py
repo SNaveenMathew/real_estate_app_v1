@@ -41,6 +41,7 @@ async def get_layer(
     measure: str | None = Query(None, description="Choropleth/polygon column to color by"),
     weight: str | None = Query(None, description="Heat-layer column to weight by (omit for a uniform count)"),
     city: str | None = Query(None, description="Restrict a heat layer to one city, if the table has one"),
+    year: int | None = Query(None, description="Restrict a heat layer to one year, if the table has a year column"),
     grid_deg: float | None = Query(None, gt=0, description="Heat-grid cell size in degrees"),
     limit: int | None = Query(None, gt=0, le=20000, description="Row/feature cap for this request"),
 ):
@@ -54,6 +55,8 @@ async def get_layer(
         kwargs["weight"] = weight
     if city is not None:
         kwargs["city"] = city
+    if year is not None:
+        kwargs["year"] = year
     if grid_deg is not None:
         kwargs["grid_deg"] = grid_deg
     if limit is not None:
