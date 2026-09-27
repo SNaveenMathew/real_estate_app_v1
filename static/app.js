@@ -657,7 +657,8 @@ async function sendHouseMessage() {
     });
     const data = await resp.json();
     typing.remove();
-    appendMsg('house', 'assistant', data.reply);
+    const assistantMsg = appendMsg('house', 'assistant', data.reply);
+    renderArtifactsInChat(assistantMsg, data.artifacts);
     state.houseChatHistory[state.selectedHouseId] = data.history;
 
     // Refresh description display if auto-saved
@@ -985,6 +986,215 @@ function renderBikeFinalRouteInChat(messageEl, vis) {
   setTimeout(() => routeMap.invalidateSize(), 100);
 }
 
+/* ── Generic chat artifacts: table / chart / map ─────────────────────────
+   Any approved tool can emit zero or more of these (agents/artifacts.py)
+   as a side effect of doing its normal work — a deterministic classifier
+   decides table vs chart vs map from the actual shape of what the tool
+   returned, optionally steered by a presentation hint the agent passed
+   along. This is the single place that turns that generic contract into
+   pixels; renderBikeCrimeAnalysisInChat/renderBikeFinalRouteInChat above
+   predate this and are reused as-is for map_kind 'bike_crime_analysis'
+   and 'bike_route'. */
+
+const ARTIFACT_CHART_COLORS = ['#2563eb', '#f97316', '#16a34a', '#7c3aed', '#dc2626', '#0891b2'];
+
+function renderArtifactsInChat(messageEl, artifacts) {
+  for (const artifact of (artifacts || [])) {
+    if (!artifact || !artifact.type) continue;
+    try {
+      if (artifact.type === 'map') {
+        if (artifact.map_kind === 'bike_crime_analysis') {
+          renderBikeCrimeAnalysisInChat(messageEl, artifact.analysis);
+        } else if (artifact.map_kind === 'bike_route') {
+          renderBikeFinalRouteInChat(messageEl, artifact);
+        } else if (artifact.map_kind === 'points') {
+          renderPointsMapArtifactInChat(messageEl, artifact);
+        }
+      } else if (artifact.type === 'chart') {
+        renderChartArtifactInChat(messageEl, artifact);
+      } else if (artifact.type === 'table') {
+        renderTableArtifactInChat(messageEl, artifact);
+      }
+    } catch (e) {
+      console.error('Failed to render chat artifact of type', artifact.type, e);
+    }
+  }
+}
+
+function prettifyKey(k) {
+  return String(k).replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function truncateLabel(s, max = 11) {
+  return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
+function formatAxisNumber(v) {
+  const n = Number(v) || 0;
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return (n / 1e9).toFixed(1).replace(/\.0$/, '') + 'B';
+  if (abs >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (abs >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'K';
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+
+function niceAxisMax(maxVal) {
+  if (!Number.isFinite(maxVal) || maxVal <= 0) return 1;
+  const magnitude = Math.pow(10, Math.floor(Math.log10(maxVal)));
+  const norm = maxVal / magnitude;
+  const step = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+  return step * magnitude;
+}
+
+function renderTableArtifactInChat(messageEl, table) {
+  const bubble = messageEl.querySelector('.bubble');
+  const columns = table?.columns || [];
+  if (!bubble || !columns.length) return;
+  const rows = table.rows || [];
+  const formatCell = (v) => {
+    if (v === null || v === undefined || v === '') return '<span class="chat-table-empty">—</span>';
+    if (typeof v === 'number') return escapeHtml(v.toLocaleString(undefined, { maximumFractionDigits: 2 }));
+    return escapeHtml(String(v));
+  };
+  const thead = `<tr>${columns.map(c => `<th>${escapeHtml(c.label || c.key)}</th>`).join('')}</tr>`;
+  const tbody = rows.map(row =>
+    `<tr>${columns.map(c => `<td>${formatCell(row[c.key])}</td>`).join('')}</tr>`
+  ).join('');
+  const note = table.truncated
+    ? `<div class="chat-artifact-note">Showing ${rows.length.toLocaleString()} of ${(table.total_rows || rows.length).toLocaleString()} rows</div>`
+    : '';
+  const wrap = document.createElement('div');
+  wrap.className = 'chat-artifact chat-table-artifact';
+  wrap.innerHTML = `
+    ${table.title ? `<div class="chat-artifact-title">${escapeHtml(table.title)}</div>` : ''}
+    <div class="chat-table-scroll"><table><thead>${thead}</thead><tbody>${tbody}</tbody></table></div>
+    ${note}
+  `;
+  bubble.appendChild(wrap);
+}
+
+function renderChartArtifactInChat(messageEl, chart) {
+  const bubble = messageEl.querySelector('.bubble');
+  const series = (chart?.series || []).filter(s => Array.isArray(s.values) && s.values.length);
+  const categories = chart?.categories || [];
+  if (!bubble || !series.length || !categories.length) return;
+
+  const width = 520, height = 280;
+  const padL = 52, padR = 16, padT = chart.title ? 30 : 14, padB = 40;
+  const plotW = width - padL - padR, plotH = height - padT - padB;
+  const n = categories.length;
+
+  const allValues = series.flatMap(s => s.values).filter(v => Number.isFinite(v));
+  const maxVal = niceAxisMax(Math.max(0, ...allValues, 0));
+  const minVal = Math.min(0, ...allValues, 0);
+  const span = (maxVal - minVal) || 1;
+  const yFor = (v) => padT + plotH - ((Number(v) || 0) - minVal) / span * plotH;
+
+  const gridLines = [];
+  const ticks = 4;
+  for (let i = 0; i <= ticks; i++) {
+    const v = maxVal * i / ticks;
+    const y = yFor(v);
+    gridLines.push(`<line x1="${padL}" y1="${y.toFixed(1)}" x2="${width - padR}" y2="${y.toFixed(1)}" stroke="#e5e7eb" stroke-width="1"/>`);
+    gridLines.push(`<text x="${padL - 8}" y="${(y + 3).toFixed(1)}" font-size="10" fill="#6b7280" text-anchor="end">${escapeHtml(formatAxisNumber(v))}</text>`);
+  }
+
+  let plot = '';
+  const maxLabels = 10;
+  const labelStep = Math.max(1, Math.ceil(n / maxLabels));
+
+  if (chart.chart_kind === 'line') {
+    const xFor = (i) => padL + (n === 1 ? plotW / 2 : i * plotW / (n - 1));
+    series.forEach((s, si) => {
+      const color = s.color || ARTIFACT_CHART_COLORS[si % ARTIFACT_CHART_COLORS.length];
+      const pts = s.values.map((v, i) => Number.isFinite(v) ? `${xFor(i).toFixed(1)},${yFor(v).toFixed(1)}` : null).filter(Boolean);
+      if (pts.length > 1) plot += `<polyline points="${pts.join(' ')}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`;
+      s.values.forEach((v, i) => {
+        if (!Number.isFinite(v)) return;
+        plot += `<circle cx="${xFor(i).toFixed(1)}" cy="${yFor(v).toFixed(1)}" r="3" fill="${color}"><title>${escapeHtml(String(categories[i]))}: ${escapeHtml(String(v))}</title></circle>`;
+      });
+    });
+    categories.forEach((c, i) => {
+      if (i % labelStep !== 0 && i !== n - 1) return;
+      plot += `<text x="${xFor(i).toFixed(1)}" y="${height - padB + 16}" font-size="10" fill="#6b7280" text-anchor="middle">${escapeHtml(truncateLabel(String(c)))}</text>`;
+    });
+  } else {
+    const groupW = plotW / n;
+    const barGap = 0.24;
+    const barW = (groupW * (1 - barGap)) / series.length;
+    series.forEach((s, si) => {
+      const color = s.color || ARTIFACT_CHART_COLORS[si % ARTIFACT_CHART_COLORS.length];
+      s.values.forEach((v, i) => {
+        if (!Number.isFinite(v)) return;
+        const x = padL + i * groupW + (groupW * barGap) / 2 + si * barW;
+        const y0 = yFor(0), y1 = yFor(v);
+        const y = Math.min(y0, y1), h = Math.max(1, Math.abs(y1 - y0));
+        plot += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${Math.max(1, barW - 2).toFixed(1)}" height="${h.toFixed(1)}" fill="${color}" rx="2"><title>${escapeHtml(String(categories[i]))} \u2014 ${escapeHtml(s.name || '')}: ${escapeHtml(String(v))}</title></rect>`;
+      });
+    });
+    categories.forEach((c, i) => {
+      if (i % labelStep !== 0 && i !== n - 1) return;
+      const x = padL + i * groupW + groupW / 2;
+      plot += `<text x="${x.toFixed(1)}" y="${height - padB + 16}" font-size="10" fill="#6b7280" text-anchor="middle">${escapeHtml(truncateLabel(String(c)))}</text>`;
+    });
+  }
+
+  const legend = series.length > 1
+    ? `<div class="chat-chart-legend">${series.map((s, si) =>
+        `<span><i style="background:${s.color || ARTIFACT_CHART_COLORS[si % ARTIFACT_CHART_COLORS.length]}"></i>${escapeHtml(s.name || `Series ${si + 1}`)}</span>`
+      ).join('')}</div>`
+    : '';
+
+  const wrap = document.createElement('div');
+  wrap.className = 'chat-artifact chat-chart-artifact';
+  wrap.innerHTML = `
+    ${chart.title ? `<div class="chat-artifact-title">${escapeHtml(chart.title)}</div>` : ''}
+    <svg viewBox="0 0 ${width} ${height}" class="chat-chart-svg" role="img" aria-label="${escapeHtml(chart.title || 'Chart')}">
+      ${gridLines.join('')}
+      ${plot}
+    </svg>
+    ${legend}
+  `;
+  bubble.appendChild(wrap);
+}
+
+function renderPointsMapArtifactInChat(messageEl, mapArtifact) {
+  injectBikeChatStyles();
+  const bubble = messageEl.querySelector('.bubble');
+  const points = (mapArtifact?.points || [])
+    .map(p => ({ lat: Number(p.lat), lon: Number(p.lon), label: p.label, fields: p.fields || {} }))
+    .filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lon));
+  if (!bubble || !points.length) return;
+
+  const note = mapArtifact.truncated
+    ? `<div class="chat-artifact-note">Showing ${points.length.toLocaleString()} of ${(mapArtifact.total_points || points.length).toLocaleString()} points</div>`
+    : '';
+  const wrap = document.createElement('div');
+  wrap.className = 'chat-artifact chat-map-artifact';
+  wrap.innerHTML = `
+    ${mapArtifact.title ? `<div class="chat-artifact-title">${escapeHtml(mapArtifact.title)}</div>` : ''}
+    <div class="chat-artifact-map"></div>
+    ${note}
+  `;
+  bubble.appendChild(wrap);
+
+  const mapEl = wrap.querySelector('.chat-artifact-map');
+  const pointsMap = makeEmbeddedLeafletMap(mapEl, [points[0].lat, points[0].lon]);
+  const bounds = L.latLngBounds([]);
+  for (const p of points) {
+    const marker = L.marker([p.lat, p.lon]).addTo(pointsMap);
+    const fieldLines = Object.entries(p.fields || {})
+      .filter(([, v]) => v !== null && v !== undefined && v !== '')
+      .slice(0, 6)
+      .map(([k, v]) => `<div><strong>${escapeHtml(prettifyKey(k))}:</strong> ${escapeHtml(String(v))}</div>`)
+      .join('');
+    marker.bindPopup(`${p.label ? `<strong>${escapeHtml(p.label)}</strong>` : ''}${fieldLines}`);
+    bounds.extend([p.lat, p.lon]);
+  }
+  if (bounds.isValid()) pointsMap.fitBounds(bounds, { padding: [24, 24], maxZoom: 15 });
+  setTimeout(() => pointsMap.invalidateSize(), 100);
+}
+
 async function sendGeneralMessage() {
   const input = document.getElementById('general-chat-input');
   const msg = input.value.trim();
@@ -1007,21 +1217,7 @@ async function sendGeneralMessage() {
     typing.remove();
     const assistantTraceUrl = data?.observability?.trace_url || null;
     const assistantMsg = appendMsg('general', 'assistant', data.reply, assistantTraceUrl);
-    const viz = data.visualization;
-    // Crime-aware requests always render the intermediate filtered-network +
-    // crime-density map first. A successful route then gets a second map.
-    // Accept both normalized forms returned by older/newer backend versions.
-    if (viz?.type === 'bike_crime_analysis' || viz?.analysis || viz?.analysis_visualization) {
-      const analysis = viz.analysis || viz.analysis_visualization;
-      renderBikeCrimeAnalysisInChat(assistantMsg, analysis);
-      if (viz.final_route) {
-        renderBikeFinalRouteInChat(assistantMsg, viz.final_route);
-      } else if (viz.type === 'bike_route' && viz.route_shape?.length) {
-        renderBikeFinalRouteInChat(assistantMsg, viz);
-      }
-    } else if (viz?.type === 'bike_route') {
-      renderBikeFinalRouteInChat(assistantMsg, viz);
-    }
+    renderArtifactsInChat(assistantMsg, data.artifacts);
     state.generalChatHistory = data.history;
   } catch (e) {
     typing.remove();
