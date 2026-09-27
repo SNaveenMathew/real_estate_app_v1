@@ -13,7 +13,7 @@ const MapLayers = (() => {
   const S = {
     specs: [], byName: {}, on: new Set(), fill: null, measure: {}, weight: {},
     leaflet: {}, loading: new Set(), error: '', control: null, fetchSeq: {},
-    year: {}, animateMax: {}, animateTimer: {},
+    year: {}, animateMax: {}, animateTimer: {}, animating: {},
   };
 
   const BIKE_COLORS = { protected_bike_lanes: '#0d9488', bike_lanes: '#16a34a', trails: '#65a30d',
@@ -158,59 +158,68 @@ const MapLayers = (() => {
     const yearOpts = years.map(y => el('option', { value: String(y), selected: current === y }, String(y)));
     const sel = el('select', { class: 'ml-select', id: `ml-year-${spec.name}`, 'aria-label': `${spec.title} year`,
       onchange: (e) => {
+        stopAnimate(spec.name);
         S.year[spec.name] = e.target.value ? parseInt(e.target.value, 10) : null;
-        delete S.animateMax[spec.name];
         refresh(spec.name);
       } }, allOpt, yearOpts);
     return sel;
+  }
+
+  function stopAnimate(name) {
+    if (S.animateTimer[name]) {
+      clearInterval(S.animateTimer[name]);
+      delete S.animateTimer[name];
+    }
+    delete S.animateMax[name];
+    delete S.animating[name];
+    render();
+  }
+
+  function startAnimate(name) {
+    const spec = S.byName[name];
+    if (!spec || !spec.year_options || spec.year_options.length < 2) return;
+    if (S.animateTimer[name] || S.animating[name]) {
+      stopAnimate(name);
+      return;
+    }
+
+    const years = spec.year_options;
+    S.animating[name] = true;
+
+    let currentYear = S.year[name];
+    let idx = years.indexOf(currentYear);
+    if (idx === -1) idx = 0;
+
+    async function step() {
+      if (!S.animating[name] || !S.on.has(name)) {
+        stopAnimate(name);
+        return;
+      }
+      S.year[name] = years[idx];
+      idx = (idx + 1) % years.length;
+      render();
+      await refresh(name);
+    }
+
+    step();
+    S.animateTimer[name] = setInterval(step, 1000);
+    render();
   }
 
   function animateButton(spec) {
     const years = spec.year_options || [];
     if (years.length < 2) return null;
     const name = spec.name;
-    const isRunning = () => !!S.animateTimer[name];
-
-    function stopAnimate() {
-      clearInterval(S.animateTimer[name]);
-      delete S.animateTimer[name];
-      delete S.animateMax[name];
-      render();
-    }
-
-    async function startAnimate() {
-      if (isRunning()) { stopAnimate(); return; }
-
-      // Lock the colour scale: find the per-viewport max across ALL years first.
-      // We do a lightweight fetch for each year at current viewport and take the global max.
-      const allMaxes = await Promise.all(years.map(async (y) => {
-        try {
-          const p = { ...bbox(), weight: S.weight[name] || undefined, grid_deg: gridDegForZoom(), year: y };
-          const url = new URL('/api/layers/' + encodeURIComponent(name), location.origin);
-          for (const [k, v] of Object.entries(p)) if (v != null) url.searchParams.set(k, v);
-          const r = await fetch(url);
-          if (!r.ok) return 0;
-          const d = await r.json();
-          return d.max_weight || 0;
-        } catch { return 0; }
-      }));
-      S.animateMax[name] = Math.max(1, ...allMaxes);
-
-      let idx = 0;
-      async function step() {
-        S.year[name] = years[idx];
-        render();   // update year dropdown to show current year
-        await refresh(name);
-        idx = (idx + 1) % years.length;
-      }
-      await step();
-      S.animateTimer[name] = setInterval(step, 1000);
-      render();
-    }
-
-    const label = isRunning() ? '\u23F9 Stop' : '\u25B6 Animate';
-    return el('button', { class: 'ml-animate-btn' + (isRunning() ? ' running' : ''),
-      id: `ml-animate-${name}`, onclick: isRunning() ? stopAnimate : startAnimate }, label);
+    const isRunning = !!S.animating[name];
+    const label = isRunning ? '\u23F9 Stop' : '\u25B6 Animate';
+    return el('button', {
+      class: 'ml-animate-btn' + (isRunning ? ' running' : ''),
+      id: `ml-animate-${name}`,
+      onclick: () => {
+        if (isRunning) stopAnimate(name);
+        else startAnimate(name);
+      },
+    }, label);
   }
 
   function panelBody() {
@@ -278,8 +287,7 @@ const MapLayers = (() => {
     const gradient = `linear-gradient(90deg, ${Object.entries(HEAT_GRADIENT).map(([p, c]) => `${c} ${p * 100}%`).join(',')})`;
     const selectedYear = S.year[spec.name];
     const yearLabel = selectedYear != null ? ` (${selectedYear})` : '';
-    const lockedMax = S.animateMax[spec.name];
-    const scaleNote = lockedMax != null ? ' — scale locked' : '';
+    const scaleNote = S.animating[spec.name] ? ' — scale locked' : '';
     return el('div', {}, el('div', { class: 'ml-legend-title' }, `${spec.title} density${yearLabel}${scaleNote}`),
       el('div', { class: 'ml-legend-gradient', style: `background:${gradient}` }),
       el('div', { class: 'ml-legend-scale' }, el('span', {}, 'fewer'), el('span', {}, 'more')));
@@ -313,8 +321,14 @@ const MapLayers = (() => {
       return;
     }
     if (isFill) { setFill(S.fill === name ? null : name); return; }
-    if (S.on.has(name)) { S.on.delete(name); removeLeaflet(name); }
-    else { S.on.add(name); refresh(name); }
+    if (S.on.has(name)) {
+      stopAnimate(name);
+      S.on.delete(name);
+      removeLeaflet(name);
+    } else {
+      S.on.add(name);
+      refresh(name);
+    }
     render();
   }
 
@@ -331,6 +345,7 @@ const MapLayers = (() => {
     // layer the user just removed.
     S.fetchSeq[name] = (S.fetchSeq[name] || 0) + 1;
     if (S.leaflet[name]) { map.removeLayer(S.leaflet[name]); delete S.leaflet[name]; }
+    if (S.animating && S.animating[name]) stopAnimate(name);
   }
 
   async function refresh(name) {
@@ -379,9 +394,13 @@ const MapLayers = (() => {
   }
 
   function mountHeat(name, data) {
-    // During animation, S.animateMax[name] is the viewport-wide max across ALL years — keeps the
-    // colour scale constant so year-over-year density comparisons are visually meaningful.
-    const effectiveMax = S.animateMax[name] ?? Math.max(data.max_weight, 1);
+    // When animating, use the viewport-wide max across ALL years (returned directly by the server
+    // as data.max_year_weight). This keeps the colour scale constant so year-over-year density
+    // comparisons are visually consistent and meaningful without needing client-side prefetch loops.
+    if (S.animating[name] && data.max_year_weight) {
+      S.animateMax[name] = data.max_year_weight;
+    }
+    const effectiveMax = (S.animating[name] && S.animateMax[name]) ? S.animateMax[name] : Math.max(data.max_weight, 1);
     return L.heatLayer(data.points.map(p => [p[0], p[1], p[2]]), {
       radius: 18, blur: 22, maxZoom: map.getZoom(), max: effectiveMax, gradient: HEAT_GRADIENT,
     });
