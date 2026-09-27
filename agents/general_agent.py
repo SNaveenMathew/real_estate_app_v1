@@ -16,7 +16,6 @@ security; it never regex-classifies the user's intent to choose a tool.
 from __future__ import annotations
 
 import ast
-import json
 import re
 import inspect
 from typing import Any, Sequence
@@ -250,7 +249,20 @@ APPROVED FUNCTIONS
 ==================
 1. check_data_availability() -> str
 2. get_database_schema() -> str
-3. query_database(request: str, requirements: str = "", plan: str = "") -> str
+3. query_database(request: str, requirements: str = "", plan: str = "",
+                  presentation: str = "auto") -> str
+   presentation is an OPTIONAL hint about how the user wants to SEE the
+   result, never about what the result IS:
+     "map"   - the user asked to see this on a map, or asked where
+               something is / how things are distributed geographically.
+     "chart" - the user asked to see a trend, a distribution, or a
+               comparison across categories ("chart"/"plot"/"graph"/
+               "show me the trend of ...").
+     "table" - the user asked for a table or a side-by-side list of rows.
+     "auto"  - anything else (the default; omit the argument entirely).
+   The application decides the ACTUAL presentation from the executed
+   data regardless of this hint -- it will never fabricate a map or
+   chart the data cannot support, so guessing wrong costs nothing.
 4. find_bike_route(start: str, end: str, city: str = "Pittsburgh, PA",
                    avoid_crime_dense_areas: bool = False,
                    crime_density_percentile: float = 90.0) -> str
@@ -273,8 +285,10 @@ RULES
     represented there. Pronouns such as "my" describe the application's relevant
     dataset; they do not create a saved/favorite filter unless the metadata plan
     explicitly contains that semantic scope.
-14. When a request needs multiple independent evidence sources, you may make
+12. When a request needs multiple independent evidence sources, you may make
     multiple approved calls and assign each result to a variable.
+13. Set presentation="map"/"chart"/"table" on query_database only when the
+    user's own words ask to see it that way; otherwise leave it "auto".
 14. Set `final_result` to the most useful result for the final-response model.
 
 Examples
@@ -295,6 +309,24 @@ final_result = query_database(
     requirements="Return house identity/address and walk_score; rank descending; keep the result concise.",
     plan="Use the house/list dataset available to General Chat and return the top-ranked houses."
 )
+
+User: Show me the cheapest houses in Denver on a map
+Code:
+final_result = query_database(
+    request="Cheapest houses in Denver",
+    requirements="Return house identity/address, latitude, longitude, and price; order by price ascending.",
+    plan="Use the house dataset filtered to Denver.",
+    presentation="map",
+)
+
+User: Chart the average NRI risk score by MSA for Pittsburgh, Denver, Miami, and Austin
+Code:
+final_result = query_database(
+    request="Average NRI risk score by MSA for Pittsburgh, Denver, Miami, and Austin",
+    requirements="Return one row per named MSA with its average NRI risk score.",
+    plan="Use the MSA-level NRI rollup filtered to the four named metros.",
+    presentation="chart",
+)
 """
 
 
@@ -312,7 +344,11 @@ For bike routes:
 
 For analytical questions:
 - Answer directly from query_database evidence.
-- Use markdown tables when comparing several rows.
+- When the evidence has several rows, state the key figures and the overall
+  pattern in prose, in the same order the evidence gives them (a requested
+  ranking stays in ranked order). The application renders the full result
+  set as its own table, chart, or map alongside your answer, so you do not
+  need to reproduce one in markdown.
 - Format dollar amounts with commas and scores/percentages to one decimal where appropriate.
 
 Return only the user-facing answer.
@@ -364,52 +400,6 @@ def _tool_messages_from_calls(calls: list[tuple[str, Any]]) -> list[ToolMessage]
             )
         )
     return messages
-
-
-def _parse_bike_payloads(calls: list[tuple[str, Any]]) -> list[dict]:
-    payloads: list[dict] = []
-    for name, result in calls:
-        if name != "find_bike_route" or not isinstance(result, str):
-            continue
-        try:
-            parsed = json.loads(result)
-        except Exception:
-            continue
-        if isinstance(parsed, dict):
-            payloads.append(parsed)
-    return payloads
-
-
-def _extract_bike_visualization(payloads: list[dict]):
-    for payload in reversed(payloads):
-        analysis = payload.get("analysis_visualization")
-        crime = payload.get("crime_avoidance") or {}
-        applied = bool(crime.get("enabled")) and bool(crime.get("applied"))
-        final_route = None
-        if payload.get("presentation") == "route_map" and payload.get("route_shape"):
-            final_route = {
-                "type": "bike_route",
-                "city": payload.get("city") or "Pittsburgh, PA",
-                "start": payload.get("start"),
-                "end": payload.get("end"),
-                "route_shape": payload.get("route_shape") or [],
-                "bbox": payload.get("bbox"),
-                "distance_miles": payload.get("distance_miles"),
-                "duration_minutes": payload.get("duration_minutes"),
-                "turn_by_turn": payload.get("turn_by_turn") or [],
-                "bike_infrastructure_near_route": payload.get("bike_infrastructure_near_route") or [],
-                "used_infrastructure": payload.get("used_infrastructure") or {"type": "FeatureCollection", "features": []},
-                "provider": payload.get("provider"),
-                "attribution": payload.get("attribution"),
-            }
-        if analysis:
-            result = {"type": "bike_crime_analysis", "analysis": analysis}
-            if final_route:
-                result["final_route"] = final_route
-            return result
-        if final_route:
-            return final_route
-    return None
 
 
 def _program_semantic_consistency_errors(source: str, user_message: str, query_plan) -> list[str]:
@@ -586,6 +576,9 @@ def run_general_chat(
     session_id: str | None = None,
 ):
     """Run the General Chat Code Agent and emit one Phoenix trace per answer."""
+    from agents.artifacts import reset_artifacts, collect_artifacts
+    reset_artifacts()  # this turn's table/chart/map artifacts start empty (agents/artifacts.py)
+
     from time import perf_counter
     from observability import (
         start_general_chat,
@@ -620,7 +613,7 @@ def run_general_chat(
             tool_call_count=0,
         )
         if include_metadata:
-            return blocked_reply, updated_history, None, {
+            return blocked_reply, updated_history, [], {
                 "trace_id": trace_id,
                 "trace_url": trace_url,
                 "guardrail": input_guard.to_dict(),
@@ -747,8 +740,7 @@ def run_general_chat(
             },
         ]
 
-        bike_payloads = _parse_bike_payloads(all_calls)
-        visualization = _extract_bike_visualization(bike_payloads)
+        artifacts = collect_artifacts()
 
         end_general_chat(
             root_span,
@@ -766,7 +758,7 @@ def run_general_chat(
         )
 
         if include_metadata:
-            return reply, updated_history, visualization, {
+            return reply, updated_history, artifacts, {
                 "trace_id": trace_id,
                 "trace_url": trace_url,
                 "generated_code": generated_programs,
