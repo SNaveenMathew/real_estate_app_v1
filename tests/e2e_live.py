@@ -376,6 +376,83 @@ check("Crime layer returns 200", r.status_code == 200, f"got {r.status_code}")
 r = requests.get(f"{BASE}/metrics")
 check("GET /metrics (Prometheus) returns 200", r.status_code == 200)
 
+# ─── 19. Crime heat layer — year filter ──────────────────────────────────────
+section("19. Crime heat layer — year filter")
+
+_layers_r = requests.get(f"{BASE}/api/layers")
+check("GET /api/layers returns 200 for year_options check",
+      _layers_r.status_code == 200, f"got {_layers_r.status_code}")
+
+if _layers_r.status_code == 200:
+    _crime_spec = next(
+        (l for l in _layers_r.json().get("layers", []) if l["name"] == "crime_incidents"),
+        None,
+    )
+    check("crime_incidents layer present in layer list", _crime_spec is not None)
+    _year_opts = (_crime_spec or {}).get("year_options", [])
+    check("crime_incidents spec includes year_options list",
+          isinstance(_year_opts, list) and len(_year_opts) > 0,
+          f"year_options={_year_opts!r}")
+    check("year_options is sorted ascending",
+          _year_opts == sorted(_year_opts),
+          f"year_options={_year_opts!r}")
+    check("year_options contains only integers",
+          all(isinstance(y, int) for y in _year_opts),
+          f"types={[type(y).__name__ for y in _year_opts[:5]]!r}")
+    # Pick a middle year that should be well-populated
+    _pick_year = 2019 if 2019 in _year_opts else (_year_opts[len(_year_opts) // 2] if _year_opts else None)
+else:
+    _pick_year = 2019
+
+# Filtered call — should succeed and echo the requested year
+_r_year = requests.get(f"{BASE}/api/layers/crime_incidents",
+                       params={**_bbox, "year": _pick_year, "grid_deg": 0.01})
+check(f"GET /api/layers/crime_incidents?year={_pick_year} returns 200",
+      _r_year.status_code == 200,
+      f"got {_r_year.status_code}: {_r_year.text[:80]}" if _r_year.status_code != 200 else "")
+
+if _r_year.status_code == 200:
+    _d_year = _r_year.json()
+    check("year-filtered response echoes year field",
+          _d_year.get("year") == _pick_year,
+          f"year={_d_year.get('year')!r}")
+    check("year-filtered response has points list",
+          isinstance(_d_year.get("points"), list),
+          f"keys={list(_d_year)}")
+
+# Unfiltered call — should return more incidents than the year-filtered one
+_r_all = requests.get(f"{BASE}/api/layers/crime_incidents",
+                      params={**_bbox, "grid_deg": 0.01})
+if _r_all.status_code == 200 and _r_year.status_code == 200:
+    _cnt_all = _r_all.json().get("incident_count", 0)
+    _cnt_year = _r_year.json().get("incident_count", 0)
+    check("unfiltered call returns more incidents than year-filtered call",
+          _cnt_all > _cnt_year,
+          f"all={_cnt_all}, year={_cnt_year}")
+    check("unfiltered response echoes year=null",
+          _r_all.json().get("year") is None,
+          f"year={_r_all.json().get('year')!r}")
+else:
+    check("both filtered and unfiltered calls succeeded", False,
+          f"all={_r_all.status_code}, year={_r_year.status_code}")
+
+# Non-existent year — must return empty points, not an error
+_r_empty = requests.get(f"{BASE}/api/layers/crime_incidents",
+                        params={**_bbox, "year": 1900, "grid_deg": 0.01})
+check("?year=1900 (no data) returns 200 with empty points",
+      _r_empty.status_code == 200 and _r_empty.json().get("points") == [],
+      f"status={_r_empty.status_code}, points={_r_empty.json().get('points')!r}"
+      if _r_empty.status_code == 200 else f"status={_r_empty.status_code}")
+
+# Non-integer year — must be rejected by API validation
+_r_bad = requests.get(f"{BASE}/api/layers/crime_incidents",
+                      params={**_bbox, "year": "notanumber"})
+check("?year=notanumber rejected with 422",
+      _r_bad.status_code == 422,
+      f"got {_r_bad.status_code}")
+
+
+
 # ─── Summary ─────────────────────────────────────────────────────────────────
 section("SUMMARY")
 passed = sum(1 for _, ok, _ in _results if ok)
