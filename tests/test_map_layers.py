@@ -416,3 +416,200 @@ def test_real_database_bike_routes_render_without_error(against_real_db):
 def test_real_database_crime_heat_renders_without_error(against_real_db):
     data = ml.get_heat("crime_incidents", -80.2, 40.35, -79.8, 40.55, grid_deg=0.01, city="pittsburgh")
     assert data["cell_count"] > 0 and data["incident_count"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Year filter and year_options (new feature)
+# ---------------------------------------------------------------------------
+
+def _insert_crime_years(conn, rows_by_year, start=0):
+    """Insert crime rows with explicit years; still pads to cross HEAT_ROW_THRESHOLD so the
+    classifier lands on 'heat'.  rows_by_year is {year: [(lat, lon, sev), ...]}."""
+    idx = start
+    for year, pts in rows_by_year.items():
+        for lat, lon, sev in pts:
+            conn.execute(
+                "INSERT INTO crime_incidents (incident_id, city, lat, lon, category, "
+                "category_label, severity_weight, year, month) VALUES (?,?,?,?,?,?,?,?,1)",
+                [f"cy{idx}", "pittsburgh", lat, lon, "theft", "Theft", sev, year],
+            )
+            idx += 1
+    # pad to guarantee heat classification
+    filler = [
+        (f"cf{start}_{j}", "nowhere", 89.0, 179.0, "filler", "Filler", 0.0, 2024, 1)
+        for j in range(ml.HEAT_ROW_THRESHOLD + 1)
+    ]
+    conn.executemany(
+        "INSERT INTO crime_incidents (incident_id, city, lat, lon, category, "
+        "category_label, severity_weight, year, month) VALUES (?,?,?,?,?,?,?,?,?)",
+        filler,
+    )
+
+
+def test_crime_spec_exposes_year_options(reference_data):
+    """The crime_incidents layer spec must include a sorted year_options list when
+    the table has a year column, so the frontend can build the year dropdown."""
+    _insert_crime_years(reference_data, {2019: [(40.44, -80.0, 1.0)], 2021: [(40.45, -80.01, 1.0)]})
+    schema.reload()
+    spec = next(s for s in ml.derive_layer_specs() if s["name"] == "crime_incidents")
+    assert spec["kind"] == "heat"
+    assert "year_options" in spec
+    years = spec["year_options"]
+    assert 2019 in years and 2021 in years
+    assert years == sorted(years)                          # must be ascending
+
+
+def test_crime_spec_year_options_excludes_none(reference_data):
+    """year_options must only contain actual integer years, never None."""
+    _insert_crime_years(reference_data, {2020: [(40.44, -80.0, 1.0)]})
+    schema.reload()
+    spec = next(s for s in ml.derive_layer_specs() if s["name"] == "crime_incidents")
+    assert all(y is not None and isinstance(y, int) for y in spec["year_options"])
+
+
+def test_get_heat_year_filter_scopes_to_selected_year(reference_data):
+    """With year=2019 only the 2019 incident falls in the result; the 2021 row is excluded."""
+    _insert_crime_years(reference_data, {
+        2019: [(40.44, -80.00, 3.0)],   # in bbox
+        2021: [(40.45, -80.01, 7.0)],   # in bbox, different year
+    })
+    schema.reload()
+    data_2019 = ml.get_heat("crime_incidents", *PGH_BBOX, grid_deg=0.01, year=2019)
+    assert data_2019["incident_count"] == 1
+    total = sum(p[2] for p in data_2019["points"])
+    assert total == pytest.approx(3.0)                     # only the severity=3 row
+
+    data_2021 = ml.get_heat("crime_incidents", *PGH_BBOX, grid_deg=0.01, year=2021)
+    assert data_2021["incident_count"] == 1
+    assert sum(p[2] for p in data_2021["points"]) == pytest.approx(7.0)
+
+
+def test_get_heat_year_none_returns_all_years(reference_data):
+    """year=None (default) must aggregate across every year — the sum of both years."""
+    _insert_crime_years(reference_data, {
+        2019: [(40.44, -80.00, 3.0)],
+        2021: [(40.45, -80.01, 7.0)],
+    })
+    schema.reload()
+    data_all = ml.get_heat("crime_incidents", *PGH_BBOX, grid_deg=0.01, year=None)
+    assert data_all["incident_count"] == 2
+    assert sum(p[2] for p in data_all["points"]) == pytest.approx(10.0)
+
+
+def test_get_heat_year_with_no_matching_rows_returns_empty(reference_data):
+    """Requesting a year that has no incidents in the viewport returns an empty points list."""
+    _insert_crime_years(reference_data, {2019: [(40.44, -80.00, 1.0)]})
+    schema.reload()
+    data = ml.get_heat("crime_incidents", *PGH_BBOX, grid_deg=0.01, year=2022)
+    assert data["points"] == [] and data["incident_count"] == 0 and data["max_weight"] == 0.0
+
+
+def test_get_heat_year_filter_combined_with_weight(reference_data):
+    """year and weight filters must compose: only 2020 rows, weighted by severity_weight."""
+    _insert_crime_years(reference_data, {
+        2020: [(40.44, -80.00, 4.0), (40.44, -80.00, 6.0)],   # same grid cell
+        2021: [(40.44, -80.00, 99.0)],                          # different year — must be excluded
+    })
+    schema.reload()
+    data = ml.get_heat("crime_incidents", *PGH_BBOX, grid_deg=0.01, weight="severity_weight", year=2020)
+    assert data["incident_count"] == 2
+    assert data["max_weight"] == pytest.approx(10.0)            # 4 + 6, only 2020 rows
+
+
+def test_get_heat_response_includes_year_field(reference_data):
+    """The response dict must echo back the year that was requested (mirrors weight echoing)."""
+    _insert_crime_years(reference_data, {2019: [(40.44, -80.0, 1.0)]})
+    schema.reload()
+    data_year = ml.get_heat("crime_incidents", *PGH_BBOX, year=2019)
+    assert data_year["year"] == 2019
+    data_none = ml.get_heat("crime_incidents", *PGH_BBOX, year=None)
+    assert data_none["year"] is None
+
+
+def test_get_layer_data_passes_year_through_to_get_heat(reference_data):
+    """get_layer_data is the dispatcher used by the API route; confirm year reaches get_heat."""
+    _insert_crime_years(reference_data, {
+        2018: [(40.44, -80.00, 2.0)],
+        2022: [(40.45, -80.01, 5.0)],
+    })
+    schema.reload()
+    data = ml.get_layer_data(
+        "crime_incidents", west=-80.1, south=40.35, east=-79.9, north=40.55,
+        grid_deg=0.01, year=2018,
+    )
+    assert data["incident_count"] == 1
+    assert sum(p[2] for p in data["points"]) == pytest.approx(2.0)
+
+
+def test_heat_layers_without_year_column_have_no_year_options(reference_data):
+    """sold_homes has no year column; its spec must not expose year_options at all, so the
+    frontend never renders a year dropdown for it."""
+    _insert_sold(reference_data, ml.HEAT_ROW_THRESHOLD + 10)
+    schema.reload()
+    spec = next(s for s in ml.derive_layer_specs() if s["name"] == "sold_homes")
+    assert spec["kind"] == "heat"
+    assert "year_options" not in spec or spec.get("year_options") is None or spec.get("year_options") == []
+
+
+# ---------------------------------------------------------------------------
+# Real-database grounded year filter tests (run only when real DB is present)
+# ---------------------------------------------------------------------------
+
+def test_real_database_crime_year_options_match_actual_data(against_real_db):
+    """year_options in the real spec must be a non-empty sorted list covering the years
+    that actually exist in crime_incidents (grounded from the live database)."""
+    spec = next(s for s in ml.derive_layer_specs() if s["name"] == "crime_incidents")
+    years = spec.get("year_options", [])
+    assert len(years) > 0, "crime_incidents must expose at least one year"
+    assert years == sorted(years)
+    # The real database spans 2005–2023 (confirmed at implementation time)
+    assert 2005 in years
+    assert 2023 in years
+    assert all(isinstance(y, int) for y in years)
+
+
+def test_real_database_crime_heat_year_filter_reduces_count(against_real_db):
+    """A year-filtered heat call must return fewer incidents than the unfiltered call
+    (any year from the real data set will achieve this since each year is a strict subset)."""
+    _all = ml.get_heat("crime_incidents", -80.2, 40.35, -79.8, 40.55, grid_deg=0.01)
+    _2019 = ml.get_heat("crime_incidents", -80.2, 40.35, -79.8, 40.55, grid_deg=0.01, year=2019)
+    assert _2019["incident_count"] > 0, "2019 must have incidents in the Pittsburgh bbox"
+    assert _2019["incident_count"] < _all["incident_count"]
+    assert _2019["year"] == 2019
+
+
+def test_real_database_crime_heat_unknown_year_returns_empty(against_real_db):
+    """A year that doesn't exist in the database (e.g. 1900) must return an empty result,
+    not an error."""
+    data = ml.get_heat("crime_incidents", -80.2, 40.35, -79.8, 40.55, grid_deg=0.01, year=1900)
+    assert data["points"] == [] and data["incident_count"] == 0
+
+
+def test_get_heat_rejects_year_for_table_without_year_column(reference_data):
+    """sold_homes has no year column; passing year must raise LayerError."""
+    _insert_sold(reference_data, ml.HEAT_ROW_THRESHOLD + 10)
+    schema.reload()
+    with pytest.raises(ml.LayerError, match="does not have an integer year column"):
+        ml.get_heat("sold_homes", *PGH_BBOX, year=2020)
+
+
+def test_get_heat_includes_max_year_weight_when_year_column_present(reference_data):
+    """When a heat table has a year column, get_heat must return max_year_weight,
+    which represents the maximum single-year cell density across all years."""
+    _insert_crime_years(reference_data, {
+        2019: [(40.44, -80.00, 3.0)],
+        2020: [(40.44, -80.00, 7.0)],
+    })
+    schema.reload()
+    d19 = ml.get_heat("crime_incidents", *PGH_BBOX, grid_deg=0.01, year=2019)
+    assert d19["max_weight"] == pytest.approx(3.0)
+    assert d19["max_year_weight"] == pytest.approx(7.0)
+
+
+def test_real_database_crime_heat_max_year_weight_bounds(against_real_db):
+    """In the real crime database, max_year_weight must be strictly positive and
+    greater than or equal to any individual year's max_weight."""
+    d = ml.get_heat("crime_incidents", -80.2, 40.35, -79.8, 40.55, grid_deg=0.01, year=2019)
+    assert d["max_year_weight"] is not None
+    assert d["max_year_weight"] >= d["max_weight"]
+    assert d["max_year_weight"] > 0
