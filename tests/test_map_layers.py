@@ -583,3 +583,33 @@ def test_real_database_crime_heat_unknown_year_returns_empty(against_real_db):
     not an error."""
     data = ml.get_heat("crime_incidents", -80.2, 40.35, -79.8, 40.55, grid_deg=0.01, year=1900)
     assert data["points"] == [] and data["incident_count"] == 0
+
+
+def test_get_heat_rejects_year_for_table_without_year_column(reference_data):
+    """sold_homes has no year column; passing year must raise LayerError."""
+    _insert_sold(reference_data, ml.HEAT_ROW_THRESHOLD + 10)
+    schema.reload()
+    with pytest.raises(ml.LayerError, match="does not have an integer year column"):
+        ml.get_heat("sold_homes", *PGH_BBOX, year=2020)
+
+
+def test_get_heat_includes_max_year_weight_when_year_column_present(reference_data):
+    """When a heat table has a year column, get_heat must return max_year_weight,
+    which represents the maximum single-year cell density across all years."""
+    _insert_crime_years(reference_data, {
+        2019: [(40.44, -80.00, 3.0)],
+        2020: [(40.44, -80.00, 7.0)],
+    })
+    schema.reload()
+    d19 = ml.get_heat("crime_incidents", *PGH_BBOX, grid_deg=0.01, year=2019)
+    assert d19["max_weight"] == pytest.approx(3.0)
+    assert d19["max_year_weight"] == pytest.approx(7.0)
+
+
+def test_real_database_crime_heat_max_year_weight_bounds(against_real_db):
+    """In the real crime database, max_year_weight must be strictly positive and
+    greater than or equal to any individual year's max_weight."""
+    d = ml.get_heat("crime_incidents", -80.2, 40.35, -79.8, 40.55, grid_deg=0.01, year=2019)
+    assert d["max_year_weight"] is not None
+    assert d["max_year_weight"] >= d["max_weight"]
+    assert d["max_year_weight"] > 0
