@@ -974,6 +974,15 @@ The browser uses these main endpoints:
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /api/houses` | Return saved houses as GeoJSON |
+| `GET /api/house/{id}` | Return details for a single house |
+| `POST /api/house/{id}/favorite` | Toggle favorite status for a house |
+| `GET /api/house/{id}/description` | Get custom description for a house |
+| `PUT /api/house/{id}/description` | Save custom description for a house |
+| `DELETE /api/house/{id}/description` | Delete custom description for a house |
+| `GET /api/house/{id}/documents` | List stored documents and photos for a house |
+| `POST /api/house/{id}/documents` | Upload a document or photo for a house |
+| `GET /api/nri/{tract_fips}` | Return NRI hazard breakdown and scores for a tract |
+| `GET /api/stats` | Application statistics (house count, favorites, data coverage) |
 | `GET /api/layers/crime` | Return the viewport's severity-weighted crime grid |
 | `GET /api/layers/nri` | Return NRI tract geometry and attributes |
 | `GET /api/layers/bike` | Return BikePGH features for the current viewport |
@@ -981,9 +990,6 @@ The browser uses these main endpoints:
 | `POST /api/chat` | Ask the general cross-city agent |
 | `POST /api/house/{id}/chat` | Ask the agent about one house |
 | `GET /metrics` | Expose Prometheus metrics |
-
-The API also supports house document and photo operations; the interactive UI
-is the recommended way to use those endpoints.
 
 ---
 
@@ -1023,6 +1029,16 @@ is the recommended way to use those endpoints.
 | GET | `/api/commute/status` | progress of the running or last job |
 | GET | `/api/commute/house/{house_id}` | one house's estimates and whether they are up to date |
 | GET | `/api/commute/summary` | every up-to-date estimate (drives the map layer) |
+
+---
+
+### Built-in data source endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/data-sources` | List all built-in datasets, coverage, and refresh status |
+| POST | `/api/data-sources/health` | Check upstream download link reachability for configured sources |
+| POST | `/api/data-sources/{key}/refresh` | Upload a new data file or trigger refresh for a built-in source |
 
 ---
 
