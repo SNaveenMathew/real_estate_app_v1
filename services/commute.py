@@ -583,6 +583,15 @@ def _fetch_dicts(sql: str, params: list | None = None) -> list[dict]:
 
 def commute_for_house(house_id: str) -> dict | None:
     place = get_work()
+    if place:
+        current_key = work_key(place, enabled_modes())
+        rows = _fetch_dicts("SELECT * FROM house_commute WHERE house_id = ? AND work_key = ?", [house_id, current_key])
+        if rows:
+            row = rows[0]
+            row["fresh"] = True
+            row.pop("work_key", None)
+            row["computed_at"] = str(row.get("computed_at") or "")
+            return row
     rows = _fetch_dicts("SELECT * FROM house_commute WHERE house_id = ?", [house_id])
     if not rows:
         return None
