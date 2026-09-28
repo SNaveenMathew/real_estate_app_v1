@@ -188,7 +188,7 @@ async def house_chat(house_id: str, req: ChatRequest):
         auto_saved = True
 
     try:
-        reply, updated_history = run_house_chat(house_id, req.message, req.history)
+        reply, updated_history, artifacts = run_house_chat(house_id, req.message, req.history)
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(500, f"Agent error: {e}")
@@ -197,14 +197,14 @@ async def house_chat(house_id: str, req: ChatRequest):
     if auto_saved and "thank" not in reply.lower()[:50]:
         reply = ("Thank you for the property description — it has been saved. " + reply)
 
-    return {"reply": reply, "history": updated_history, "auto_saved": auto_saved}
+    return {"reply": reply, "history": updated_history, "auto_saved": auto_saved, "artifacts": artifacts}
 
 
 @app.post("/api/chat")
 async def general_chat(req: ChatRequest):
     """General chat — cross-house, MSA, national risk questions."""
     try:
-        reply, updated_history, visualization, observability = run_general_chat(
+        reply, updated_history, artifacts, observability = run_general_chat(
             req.message,
             req.history,
             include_metadata=True,
@@ -216,7 +216,7 @@ async def general_chat(req: ChatRequest):
     return {
         "reply": reply,
         "history": updated_history,
-        "visualization": visualization,
+        "artifacts": artifacts,
         "observability": observability,
         "phoenix_enabled": phoenix_enabled(),
     }

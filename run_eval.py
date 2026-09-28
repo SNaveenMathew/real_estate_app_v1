@@ -73,7 +73,7 @@ def run_example(example: GoldenExample, judge, mock: bool):
                 trace_url = metadata.get("trace_url") if metadata else None
             else:
                 from agents.house_agent import run_house_chat
-                reply, _ = run_house_chat(example.house_id, example.question, history=[])
+                reply, _, _ = run_house_chat(example.house_id, example.question, history=[])
         except Exception as e:
             trace_id = None
             try:

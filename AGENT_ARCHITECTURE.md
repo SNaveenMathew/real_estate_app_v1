@@ -10,10 +10,13 @@ reference.
 
 It covers **General Chat** (`agents/general_agent.py` + `agents/tools.py`),
 since that's where the deterministic/LLM split is richest. House Chat
-(`agents/house_agent.py`) is a separate ReAct agent over a smaller,
-house-scoped tool set; it shares the same category of design choices
-(approved-function sandboxing, evidence-grounded final answers) but not the
-query-planning/SQL pipeline described here.
+(`agents/house_agent.py`) mirrors the same Code Agent architecture over a
+smaller, house-scoped approved-function set — see that file's own module
+docstring for the house-specific tool list; it shares the query-planning/
+SQL pipeline described here (its `query_database` delegates straight to
+`agents/tools.py::query_database`) but not every General Chat tool.
+Both agents share one more thing described in §10: how a result, once
+computed, decides whether it's shown as a table, a chart, or a map.
 
 ## Table of contents
 
@@ -36,6 +39,7 @@ query-planning/SQL pipeline described here.
 7. [Extending the agent](#7-extending-the-agent)
 8. [The catalog is a store, and how it changes](#8-the-catalog-is-a-store-and-how-it-changes)
 9. [Commute times](#9-commute-times)
+10. [Presentation layer: tables, charts, and maps](#10-presentation-layer-tables-charts-and-maps)
 
 ---
 
@@ -519,16 +523,21 @@ Total combined guardrail overhead per user turn is $\sim 0.065\ \text{ms}$
 | SQL fallback compilation | `agents/tools.py::_compile_sql_from_plan` | Deterministic |
 | SQL execution | `db/duckdb_store.py::query` | Deterministic (direct DB call) |
 | Zero-rows / error messaging | `agents/tools.py::run_code_query` | Deterministic |
+| Presentation classification (table/chart/map/none) | `agents/artifacts.py::classify_dataframe` | Deterministic, from the executed result's shape |
 | Final answer prose | `agents/general_agent.py::_write_final_answer` | LLM |
 | Reply-vs-evidence check & score bounds | `services/guardrails.py::OutputGroundingGuardrail`, `agents/response_validator.py` | Deterministic |
 
-The only two LLM-driven steps in the entire pipeline are **SQL text
-generation** and **final-answer prose**. Both are genuinely open-ended
-generation tasks with no single correct output — which is exactly the shape
-of problem an LLM should own. Everything else is either a lookup (does this
-table/relationship/entity exist, per the catalog) or a check (does this
-match what was already decided) — tasks with one correct answer, decided by
-code.
+The only two LLM-driven *generation* steps in the entire pipeline are **SQL
+text generation** and **final-answer prose** — genuinely open-ended tasks
+with no single correct output, which is exactly the shape of problem an
+LLM should own. The orchestration program the LLM writes may also set a
+`presentation` hint on `query_database` (§10), but that's a bounded choice
+among four fixed strings, not open-ended generation, and — like every other
+LLM output in this pipeline — it never gets the final word: `classify_
+dataframe` decides the actual shape from the data regardless of the hint.
+Everything else is either a lookup (does this table/relationship/entity
+exist, per the catalog) or a check (does this match what was already
+decided) — tasks with one correct answer, decided by code.
 
 ---
 
@@ -671,6 +680,16 @@ For extending the *agent's* behavior specifically:
   belongs in `_validate_sql_against_plan` or `_validate_program` — both
   already-existing, already-tested deterministic gates — not a new prompt
   asking the model to review its own output. §5 covers why.
+- **A new approved function that should be able to produce a table, chart,
+  or map** — see §10. In short: once you have a `pandas.DataFrame` (or can
+  build a small one from whatever structured payload the function already
+  returns), call `agents.artifacts.classify_dataframe(df, title=..., presentation=...)`
+  and `agents.artifacts.emit_artifact(...)` with the result. Both agents
+  already `reset_artifacts()`/`collect_artifacts()` once per turn, so a
+  new tool needs no other wiring. Don't hand-write a bespoke map/chart
+  payload shape for a new tool the way `find_bike_route` predates this and
+  still does (§10) — `classify_dataframe` is the general path now, and a
+  one-off shape only benefits the one tool you're looking at.
 
 ---
 
@@ -795,3 +814,161 @@ The work location and house coordinates go to the configured routing servers; th
 (`is_public_url`) so the UI can say so, and self-hosting OSRM keeps everything local. Drive, bike and walk are
 free-flow estimates and are labeled as such everywhere they appear. Transit needs a self-hosted OpenTripPlanner and is
 tested only against a mock.
+
+---
+
+## 10. Presentation layer: tables, charts, and maps
+
+### 10.1 What problem this solves
+
+Before this, exactly one tool produced anything other than reply text:
+`find_bike_route`, whose route/crime-density payload was fished out of the
+tool-call trace by two bike-specific functions
+(`_parse_bike_payloads`/`_extract_bike_visualization`, since removed) and
+handed to the frontend as a single `visualization` object. Every other
+analytical answer — `query_database`'s result set included — only ever
+became prose, and a multi-row result relied on the *LLM* hand-formatting a
+markdown table into that prose: exactly the class of task §1 says has one
+correct shape and so belongs to code, not the model.
+
+`agents/artifacts.py` generalizes the one working case into a contract any
+approved function can use, on the same LLM/code boundary as the rest of
+this document: the LLM may *hint* how a result should be shown; code
+decides what it actually *is*.
+
+### 10.2 The contract
+
+```
+approved function executes                          [LLM decided to call it]
+  -> a DataFrame (or small structured payload) is on hand   [deterministic]
+  -> classify_dataframe() looks at its actual shape --
+     row/column counts, dtypes -- and returns one of
+     {table, chart, map, None}, optionally steered by a
+     `presentation` hint ("map"/"chart"/"table"/"auto")      [deterministic]
+  -> emit_artifact() appends it to this turn's list          [deterministic]
+  -> collect_artifacts() hands the whole list to main.py
+     once the turn is done, as `artifacts` in the API
+     response (POST /api/chat, POST /api/house/{id}/chat)    [deterministic]
+```
+
+`reset_artifacts()`/`collect_artifacts()` are called once per turn, in
+`run_general_chat` and `run_house_chat` respectively — the same functions
+that already reset/read their per-turn `all_calls` trace. In between, any
+approved function may call `emit_artifact()` zero or more times as a side
+effect of its normal work; most turns emit nothing, some emit one artifact,
+and a crime-aware bike route emits two (the crime-density map, then the
+route map — the same order the original bike-specific code produced).
+
+### 10.3 The classifier (`classify_dataframe`)
+
+Given a `DataFrame`, in order:
+
+1. **Map** — if the result has a recognizable latitude/longitude column
+   pair (by name: `lat`/`latitude` × `lon`/`lng`/`longitude`, etc.), it's a
+   map, regardless of hint. Rows with a null coordinate are dropped; a
+   label column is picked by name priority (`address`, `name`, `city`, …,
+   falling back to the first remaining column); every other column becomes
+   a popup field.
+2. **Chart** — one non-numeric "dimension" column (two, folded into a
+   combined category label, if `presentation="chart"` was hinted) plus one
+   to four numeric "measure" columns (six if hinted), with the row count
+   under a cap (`config.py::presentation_chart_max_points[_hinted]`),
+   becomes a chart: `line` if the dimension is a datetime column or named
+   like one (`year`, `month`, `quarter`, …), `bar` otherwise. A
+   numeric-*dtype* column named like a time period (an integer `year`
+   column, say) is still treated as a dimension, not a measure — nobody
+   wants a bar chart averaging years.
+3. **Table** — anything else with more than one row.
+4. **None** — an empty result, or a single summary row/value (reads better
+   as prose than a one-row table) — *unless* `presentation="table"` was
+   explicitly hinted, which always wins, including for one row.
+
+A `presentation` hint never fabricates a shape the data can't support: a
+`"map"` hint with no coordinate columns anywhere in the result falls
+through to chart, then table, exactly as `"auto"` would
+(`tests/test_artifacts.py::test_classify_dataframe_map_hint_falls_back_
+when_no_coordinates`). Every call is wrapped in a bare
+`except Exception: return None` — a bug in this layer degrades to "no
+artifact" for that turn, never a broken reply.
+
+### 10.4 Where it's wired in today
+
+| Function | What it emits |
+|---|---|
+| `agents/tools.py::query_database` (shared by both agents — House Chat's own `query_database` closure delegates straight to it) | `classify_dataframe` on the executed result, honoring an optional `presentation` kwarg the orchestrating LLM may pass |
+| `agents/tools.py::find_bike_route` | Its existing route/crime-density payload, normalized into `{"type": "map", "map_kind": "bike_route" \| "bike_crime_analysis", ...}` — the routing/crime logic in `services/bike_routing.py` is untouched; only the outer envelope is new |
+| `agents/tools.py::check_data_availability` | A small table of table names and row counts, from the same `counts` dict `schema.availability_report()` already computed and previously discarded |
+| `agents/tools.py::search_all_house_descriptions` | A table of vector-search matches (house, doc type, excerpt) |
+| `agents/house_agent.py::get_nri_risk_data` | A bar chart of the top hazards by risk score |
+| `agents/house_agent.py::get_nearby_sold_homes`, `::estimate_price_with_code` | Table(s) from the same comparable-sales DataFrames already built for the prose answer |
+
+`query_database` is the one to reach for when adding a new source of
+table/chart/map output: it's already wired into both agents, so a new
+built-in dataset or catalog entry gets the presentation layer for free,
+with nothing in `agents/artifacts.py` to touch.
+
+### 10.5 The `presentation` hint, and why final-answer prose stopped asking for markdown tables
+
+`query_database(request, requirements="", plan="", presentation="auto")`'s
+new parameter is documented in `CODE_AGENT_PROMPT` (General Chat) and the
+house-scoped equivalent as a plain instruction: set it to
+`"map"`/`"chart"`/`"table"` only when the user's own words ask to see the
+result that way, leave it `"auto"` otherwise. Getting it wrong costs
+nothing (§10.3) — this is a hint, not a decision, the same relationship
+the rest of this document draws between every other LLM output and the
+deterministic check downstream of it (§5).
+
+Both final-answer prompts (`FINAL_RESPONSE_PROMPT` in `general_agent.py`,
+`_HOUSE_FINAL_RESPONSE_PROMPT` in `house_agent.py`) previously asked the
+model to format a markdown table itself when comparing several rows. That
+instruction is gone: the application now renders the full result set as
+its own artifact next to the reply, so the model just states the key
+figures in prose, in the order the evidence gives them (a requested
+ranking stays in ranked order — `eval/golden_set.py`'s `order_matters`
+cases only ever check for a ranked list of *names*, never markdown table
+syntax, so this doesn't weaken that scoring). This removes a case where
+the small local model was trusted to transcribe numbers into correct
+pipe/dash syntax with no downstream check on whether it did, replacing it
+with a deterministic table built directly from the same DataFrame the
+prose is describing.
+
+### 10.6 Frontend
+
+`static/app.js`'s `renderArtifactsInChat(messageEl, artifacts)` is the one
+dispatcher, keyed on `artifact.type`/`map_kind`: `renderTableArtifactInChat`
+and `renderChartArtifactInChat` (bar/line as inline SVG — no charting
+library, consistent with the rest of the frontend's minimal-dependency
+approach) are new; `renderPointsMapArtifactInChat` is new and handles a
+generic `query_database` map result (a small embedded Leaflet map per
+`makeEmbeddedLeafletMap`, one marker per point, a popup per row);
+`renderBikeCrimeAnalysisInChat`/`renderBikeFinalRouteInChat` predate this
+work and are unchanged — they're reached through the generic dispatcher
+now instead of bike-specific logic living in `sendGeneralMessage`.
+`sendHouseMessage` calls the same dispatcher, so a table/chart artifact
+from a house-scoped tool renders exactly the way a General Chat one does.
+
+### 10.7 Known boundaries and sharp edges
+
+- **Name-based heuristics, not semantic ones.** A numeric column whose
+  name doesn't contain a temporal hint (`year_built`, say, rather than
+  `year`) is treated as a measure even where a person might read it as a
+  dimension; a column genuinely named like a time period but semantically
+  a duration (`years_on_market`) is treated as a dimension it isn't. Both
+  degrade to a safe, if unexciting, table rather than a wrong chart — never
+  the reverse.
+- **One dimension in `"auto"` mode, two if `presentation="chart"` is
+  hinted.** `{city, avg_price}` charts automatically; `{city, year,
+  avg_price}` only charts (folding `year` into the category label as
+  `"Pittsburgh / 2023"`) if the agent set the hint. This mirrors §6's
+  general stance: the automatic path stays conservative, and an explicit
+  ask unlocks more.
+- **A single-row, many-column result never becomes a small key/value
+  table** (§10.3, point 4). `get_house_details`-shaped answers — "every
+  fact about this one house" — still rely on prose, same as before this
+  work. Worth revisiting if that shape becomes a common ask.
+- **The size caps** (`config.py`: `presentation_table_max_rows`,
+  `presentation_chart_max_points[_hinted]`, `presentation_map_max_points`)
+  are independent of the ~50-row cap on the text evidence shown to the
+  final-answer LLM in `run_code_query` — an artifact can show more rows
+  than the model ever reads, since the model only needs enough evidence to
+  describe the pattern, not to enumerate a table it isn't drawing anymore.
