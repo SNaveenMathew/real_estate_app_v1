@@ -90,7 +90,7 @@ check("GET /api/data-sources returns 200", r.status_code == 200,
 sources = r.json().get("sources", []) if r.status_code == 200 else []
 source_keys = {s.get("key") for s in sources}
 check("data-source registry includes core sources",
-      {"redfin", "nri", "census_tracts", "sold", "bike"} <= source_keys,
+      {"redfin", "nri", "census_tracts", "sold", "bike", "zhvi", "market_heat_index"} <= source_keys,
       f"keys={sorted(k for k in source_keys if k)}")
 check("registered sources expose public links",
       bool(sources) and all(s.get("source_url") for s in sources))

@@ -378,3 +378,56 @@ def test_zhvi_and_heat_index_in_catalog(fresh_db):
 
     matches = schema.semantic_matches("what is the zhvi home value index trend")
     assert any(m["key"] == "zhvi" for m in matches)
+
+
+# ─── 8. Data Sources Registry & Refresh Orchestration Tests ──────────────────
+
+def test_zhvi_and_heat_index_in_data_sources_registry():
+    from services import data_sources as ds
+
+    assert "zhvi" in ds.REGISTRY
+    assert "market_heat_index" in ds.REGISTRY
+
+    zhvi_ds = ds.REGISTRY["zhvi"]
+    assert zhvi_ds.table == "zhvi"
+    assert zhvi_ds.placement == "append"
+    assert zhvi_ds.accept == ".csv"
+    assert callable(zhvi_ds.precheck)
+    assert ds.sources_for_table("zhvi") == ["zhvi"]
+
+    heat_ds = ds.REGISTRY["market_heat_index"]
+    assert heat_ds.table == "market_heat_index"
+    assert heat_ds.placement == "append"
+    assert callable(heat_ds.precheck)
+    assert ds.sources_for_table("market_heat_index") == ["market_heat_index"]
+
+
+def test_zhvi_refresh_orchestration_and_precheck(fresh_db, tmp_path, monkeypatch):
+    from services import data_sources as ds
+    from dataclasses import replace
+
+    from config import settings
+
+    zhvi_dir = tmp_path / "zhvi"
+    zhvi_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(settings, "zhvi_dir", zhvi_dir)
+    monkeypatch.setitem(ds.REGISTRY, "zhvi", replace(ds.REGISTRY["zhvi"], dest_dir=zhvi_dir))
+
+    # 1. Reject invalid file via precheck
+    bad_file = tmp_path / "bad.csv"
+    bad_file.write_text("Col1,Col2\n1,2\n", encoding="utf-8")
+    result = ds.refresh_source("zhvi", bad_file, "bad.csv")
+    assert result["ok"] is False
+    assert "Missing required Zillow column" in result["error"] or "No date columns" in result["error"]
+
+    # 2. Accept and load valid wide CSV
+    good_file = tmp_path / "good.csv"
+    good_file.write_text(textwrap.dedent("""\
+        RegionID,RegionName,RegionType,StateName,2024-01-31
+        999,15213,zip,PA,320000
+    """), encoding="utf-8")
+    res = ds.refresh_source("zhvi", good_file, "good.csv")
+    assert res["ok"] is True
+    assert res["rows_after"] >= 1
+    assert fresh_db.get_conn().execute("SELECT COUNT(*) FROM zhvi").fetchone()[0] == 1
+
