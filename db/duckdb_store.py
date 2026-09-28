@@ -421,10 +421,11 @@ def _ensure_schema(conn: duckdb.DuckDBPyConnection):
         )
     """)
     try:
-        cols = [c[1] for c in conn.execute("PRAGMA table_info(app_settings)").fetchall()]
-        if "value_json" not in cols and "value" in cols:
+        cols = [c[1].lower() for c in conn.execute("PRAGMA table_info(app_settings)").fetchall()]
+        if "value_json" not in cols:
             conn.execute("ALTER TABLE app_settings ADD COLUMN value_json VARCHAR")
-            conn.execute("UPDATE app_settings SET value_json = value WHERE value_json IS NULL")
+        if "value" in cols:
+            conn.execute("UPDATE app_settings SET value_json = value WHERE value_json IS NULL AND value IS NOT NULL")
     except Exception:
         pass
 
@@ -481,23 +482,77 @@ def _json_safe_record(record: dict) -> dict:
 
 def get_setting(key: str, default: Any = None) -> Any:
     """Return one application setting decoded from JSON, or ``default`` when unset."""
-    row = get_conn().execute(
-        "SELECT value_json FROM app_settings WHERE key = ?", [key]
-    ).fetchone()
-    if row is None:
+    conn = get_conn()
+    row = None
+    try:
+        row = conn.execute(
+            "SELECT value_json FROM app_settings WHERE key = ?", [key]
+        ).fetchone()
+    except Exception:
+        try:
+            row = conn.execute(
+                "SELECT value FROM app_settings WHERE key = ?", [key]
+            ).fetchone()
+        except Exception:
+            return default
+
+    # If row was found but value_json was NULL, attempt falling back to value column if it exists
+    if row is not None and row[0] is None:
+        try:
+            row_legacy = conn.execute(
+                "SELECT value FROM app_settings WHERE key = ?", [key]
+            ).fetchone()
+            if row_legacy and row_legacy[0] is not None:
+                row = row_legacy
+        except Exception:
+            pass
+
+    if row is None or row[0] is None:
         return default
-    return json.loads(row[0])
+    try:
+        return json.loads(row[0])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return default
 
 
 def set_setting(key: str, value: Any) -> None:
     """Persist one JSON-serializable application setting."""
-    get_conn().execute(
-        """
-        INSERT OR REPLACE INTO app_settings (key, value_json, updated_at)
-        VALUES (?, ?, CURRENT_TIMESTAMP)
-        """,
-        [key, json.dumps(value, ensure_ascii=False)],
-    )
+    conn = get_conn()
+    val_str = json.dumps(value, ensure_ascii=False)
+    try:
+        cols = [c[1].lower() for c in conn.execute("PRAGMA table_info(app_settings)").fetchall()]
+        if "value" in cols and "value_json" in cols:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO app_settings (key, value, value_json, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                [key, val_str, val_str],
+            )
+        elif "value_json" in cols:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO app_settings (key, value_json, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                """,
+                [key, val_str],
+            )
+        else:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO app_settings (key, value, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                """,
+                [key, val_str],
+            )
+    except Exception:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO app_settings (key, value_json, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            """,
+            [key, val_str],
+        )
 
 
 def delete_setting(key: str) -> None:
