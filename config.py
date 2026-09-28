@@ -87,6 +87,10 @@ class Settings(BaseSettings):
     # Sold homes data
     # Allegheny County, PA: https://data.wprdc.org/dataset/real-estate-sales
     sold_dir: Path = BASE_DIR / "data" / "sold"
+    # Zillow Research data — https://www.zillow.com/research/data/
+    # Drop any number/geography-level of files into each folder (see services/zillow_sources.py)
+    zhvi_dir: Path = BASE_DIR / "data" / "zhvi"                        # ZHVI ("Home Values" -> ZHVI)
+    market_heat_dir: Path = BASE_DIR / "data" / "market_heat_index"    # Market Heat Index
     shapefile_dir: Path = BASE_DIR / "data" / "shapefiles"
     uploads_dir: Path = BASE_DIR / "uploads"
 
