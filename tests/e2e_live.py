@@ -115,9 +115,14 @@ tables_before = {t["name"]: t for t in cat.get("tables", [])}
 check("built-in 'houses' table present", "houses" in tables_before)
 check("built-in 'nri_tracts' table present", "nri_tracts" in tables_before)
 check("built-in 'census_tracts' table present", "census_tracts" in tables_before)
+check("built-in 'zhvi' table present", "zhvi" in tables_before)
+check("built-in 'market_heat_index' table present", "market_heat_index" in tables_before)
 check("catalog has 'relationships' key", "relationships" in cat)
 rels_before = cat.get("relationships", [])
 check("at least one built-in relationship", len(rels_before) > 0)
+rel_keys_before = {f"{r.get('left_table')}:{r.get('left_expr')}={r.get('right_table')}:{r.get('right_expr')}" for r in rels_before}
+check("zhvi relationships registered", "houses:zip=zhvi:region_name" in rel_keys_before)
+check("market_heat_index relationships registered", "houses:zip=market_heat_index:region_name" in rel_keys_before)
 check("catalog has 'domains' key", "domains" in cat)
 
 # ─── 3. Dataset upload ────────────────────────────────────────────────────────
@@ -548,6 +553,34 @@ if _r_gen.status_code == 200:
     check("general chat response has 'observability' field",
           "observability" in _gen_body,
           f"keys={list(_gen_body)}")
+
+# ─── 22. Zillow Data (ZHVI & Market Heat Index) contract ─────────────────────
+section("22. Zillow Data (ZHVI & Market Heat Index) contract")
+
+r_cat = requests.get(f"{BASE}/api/onboarding/catalog")
+if r_cat.status_code == 200:
+    _cat_tables = {t["name"]: t for t in r_cat.json().get("tables", [])}
+    check("catalog contains zhvi table", "zhvi" in _cat_tables)
+    check("catalog contains market_heat_index table", "market_heat_index" in _cat_tables)
+    if "zhvi" in _cat_tables:
+        _zhvi_notes = {c.get("column") for c in _cat_tables["zhvi"].get("column_notes", [])}
+        check("zhvi has home_value note", "home_value" in _zhvi_notes)
+        check("zhvi has msa_code note", "msa_code" in _zhvi_notes)
+    if "market_heat_index" in _cat_tables:
+        _mhi_notes = {c.get("column") for c in _cat_tables["market_heat_index"].get("column_notes", [])}
+        check("market_heat_index has heat_index note", "heat_index" in _mhi_notes)
+
+if _house_id:
+    _r_est = requests.post(
+        f"{BASE}/api/house/{_house_id}/chat",
+        json={"message": "Can you estimate the price of this house using sales and ZHVI data?", "history": []},
+    )
+    check("POST /api/house/{id}/chat (price estimation) returns 200",
+          _r_est.status_code == 200,
+          f"got {_r_est.status_code}: {_r_est.text[:80]}" if _r_est.status_code != 200 else "")
+    if _r_est.status_code == 200:
+        _est_body = _r_est.json()
+        check("price estimation reply is non-empty", bool(_est_body.get("reply")))
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
 section("SUMMARY")
