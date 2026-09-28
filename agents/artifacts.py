@@ -310,7 +310,7 @@ def classify_dataframe(
             if artifact:
                 return artifact
 
-        if len(df) <= 1:
+        if len(df) <= 1 and presentation != "chart":
             return None  # a single summary value reads better as prose
 
         # A numeric-dtype column named like a time period (year, month, ...)

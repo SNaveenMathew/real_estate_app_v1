@@ -43,8 +43,8 @@ def reference_data(fresh_db):
         conn.execute("INSERT INTO houses (house_id,address,city,state,zip,tract_fips,lat,lon,status,price) "
                      "VALUES (?,?,?,?,?,?,40.44,-80.0,'Active',250000)", list(h))
     for t, county, st in TRACTS:
-        conn.execute("INSERT INTO nri_tracts (tract_fips,county_fips,state_fips,county_name,state_name,risk_score,rfld_risks) "
-                     "VALUES (?,?,?,?,?,50.0,10.0)", [t, t[:5], t[:2], county, st])
+        conn.execute("INSERT INTO nri_tracts (tract_fips,county_fips,state_fips,county_name,state_name,risk_score,rfld_risks,hwav_risks,wfir_risks) "
+                     "VALUES (?,?,?,?,?,50.0,10.0,15.0,8.0)", [t, t[:5], t[:2], county, st])
         conn.execute("INSERT INTO census_tracts (tract_fips,geo_id,name,population) VALUES (?,?,?,4000)", [t, "1400000US" + t, "Tract"])
     conn.execute("INSERT INTO sold_homes (sale_id,address,city,tract_fips,sold_price) VALUES ('S1','123 Main Street','PITTSBURGH','42003040100',300000)")
     import db.schema_catalog as schema

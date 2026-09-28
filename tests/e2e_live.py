@@ -367,10 +367,10 @@ check("GET /api/houses returns 200", r.status_code == 200,
 
 # Layer endpoints use west/south/east/north bbox params
 _bbox = {"west": -80.5, "south": 40.0, "east": -79.5, "north": 41.0}
-r = requests.get(f"{BASE}/api/layers/nri", params=_bbox)
+r = requests.get(f"{BASE}/api/layers/nri_tracts", params=_bbox)
 check("NRI layer returns 200", r.status_code == 200, f"got {r.status_code}")
 
-r = requests.get(f"{BASE}/api/layers/crime", params=_bbox)
+r = requests.get(f"{BASE}/api/layers/crime_incidents", params=_bbox)
 check("Crime layer returns 200", r.status_code == 200, f"got {r.status_code}")
 
 r = requests.get(f"{BASE}/metrics")
@@ -462,6 +462,92 @@ check("?year=2020 on sold_homes (no year col) rejected with 422",
       f"got {_r_no_year.status_code}")
 
 
+
+# ─── 20. House Chat — artifact contract ──────────────────────────────────────
+section("20. House Chat — artifact contract (issue #5)")
+
+# Fetch any real house_id from the live server
+_r_houses = requests.get(f"{BASE}/api/houses")
+_house_id = None
+if _r_houses.status_code == 200:
+    _features = _r_houses.json().get("features", [])
+    if _features:
+        _house_id = _features[0]["properties"].get("house_id")
+
+check("house list available for chat test", _house_id is not None,
+      f"status={_r_houses.status_code}")
+
+if _house_id:
+    # Ask for NRI risk — get_nri_risk_data() always emits a chart artifact
+    _r_chat = requests.post(
+        f"{BASE}/api/house/{_house_id}/chat",
+        json={"message": "What is the FEMA risk rating for this home?", "history": []},
+    )
+    check("POST /api/house/{id}/chat returns 200",
+          _r_chat.status_code == 200,
+          f"got {_r_chat.status_code}: {_r_chat.text[:80]}" if _r_chat.status_code != 200 else "")
+
+    if _r_chat.status_code == 200:
+        _chat_body = _r_chat.json()
+        check("house chat response has 'reply' field",
+              bool(_chat_body.get("reply")))
+        check("house chat response has 'history' list",
+              isinstance(_chat_body.get("history"), list))
+        check("house chat response has 'artifacts' key",
+              "artifacts" in _chat_body,
+              f"keys={list(_chat_body)}")
+        _arts = _chat_body.get("artifacts", [])
+        check("house chat 'artifacts' is a list",
+              isinstance(_arts, list),
+              f"type={type(_arts).__name__}")
+        # NRI query should produce at least one artifact (a chart of top hazards)
+        check("house chat NRI query produces at least one artifact",
+              len(_arts) >= 1,
+              f"got {len(_arts)} artifact(s): {[a.get('type') for a in _arts]}")
+        if _arts:
+            _first = _arts[0]
+            check("artifact has a 'type' field",
+                  _first.get("type") in ("chart", "table", "map"),
+                  f"type={_first.get('type')!r}")
+
+# ─── 21. General Chat — artifact contract ────────────────────────────────────
+section("21. General Chat — artifact contract (issue #5)")
+
+_r_gen = requests.post(
+    f"{BASE}/api/chat",
+    json={"message": "Show me the average house price by city", "history": []},
+)
+check("POST /api/chat returns 200",
+      _r_gen.status_code == 200,
+      f"got {_r_gen.status_code}: {_r_gen.text[:80]}" if _r_gen.status_code != 200 else "")
+
+if _r_gen.status_code == 200:
+    _gen_body = _r_gen.json()
+    check("general chat response has 'reply' field",
+          bool(_gen_body.get("reply")))
+    check("general chat response has 'artifacts' key",
+          "artifacts" in _gen_body,
+          f"keys={list(_gen_body)}")
+    _gen_arts = _gen_body.get("artifacts", [])
+    check("general chat 'artifacts' is a list",
+          isinstance(_gen_arts, list),
+          f"type={type(_gen_arts).__name__}")
+    check("general chat aggregation query produces at least one artifact",
+          len(_gen_arts) >= 1,
+          f"got {len(_gen_arts)} artifact(s): {[a.get('type') for a in _gen_arts]}")
+    if _gen_arts:
+        _gen_first = _gen_arts[0]
+        check("general chat artifact has valid 'type'",
+              _gen_first.get("type") in ("chart", "table", "map"),
+              f"type={_gen_first.get('type')!r}")
+        # avg-by-city is a 1-dimension / 1-measure query → should be a chart
+        check("avg-price-by-city produces chart or table artifact",
+              _gen_first.get("type") in ("chart", "table"),
+              f"type={_gen_first.get('type')!r}")
+
+    check("general chat response has 'observability' field",
+          "observability" in _gen_body,
+          f"keys={list(_gen_body)}")
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
 section("SUMMARY")
