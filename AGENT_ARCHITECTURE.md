@@ -28,7 +28,7 @@ computed, decides whether it's shown as a table, a chart, or a map.
    - 3.2 [Query planning (routing) — deterministic](#32-query-planning-routing--deterministic)
    - 3.3 [Data-model retrieval — deterministic](#33-data-model-retrieval--deterministic-two-distinct-steps)
    - 3.4 [SQL generation — LLM](#34-sql-generation--llm)
-   - 3.5 [SQL validation — deterministic, three layers](#35-sql-validation--deterministic-three-layers)
+   - 3.5 [SQL validation — deterministic, two layers](#35-sql-validation--deterministic-two-layers)
    - 3.6 [Deterministic fallback compilation](#36-deterministic-fallback-compilation)
    - 3.7 [Execution](#37-execution)
    - 3.8 [Final answer + response validation](#38-final-answer--response-validation)
