@@ -5,9 +5,10 @@ overview and complete technical and setup documentation, see the [README](README
 
 > **About the screenshots in this guide.** These were captured from the local application
 > and database on September 27, 2026. At capture time the database contained 1,778 houses,
-> 85,154 NRI records, and 450 bike routes. Your screens will vary with the data loaded in
-> your own database. Some views below reflect data or services that were unavailable in
-> this local run; those states are called out where they appear.
+> 85,154 NRI records, 450 bike routes, ~5.9 M ZHVI rows, and ~80 K Market Heat Index rows.
+> Your screens will vary with the data loaded in your own database. Some views below
+> reflect data or services that were unavailable in this local run; those states are called
+> out where they appear.
 
 ---
 
@@ -201,6 +202,8 @@ python setup_data.py --only sold      # just sold homes
 python setup_data.py --only crime     # just crime data
 python setup_data.py --only bike      # just BikePGH route data
 python setup_data.py --only census    # CBSA crosswalk + tract/MSA populations
+python setup_data.py --only zhvi      # just Zillow Home Value Index
+python setup_data.py --only market_heat_index  # just Zillow Market Heat Index
 python setup_data.py --only geocode   # retry pending sold-home geocodes
 python setup_data.py --only match     # link sold records to houses
 python setup_data.py --resolve-tracts # resolve missing house tract FIPS values
