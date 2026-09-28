@@ -185,6 +185,31 @@ def _run_crime() -> int:
 def _run_bike() -> int:
     return data_loader.load_bike_routes()
 
+def _run_zhvi() -> int:
+    return data_loader.load_zhvi()
+
+def _run_market_heat_index() -> int:
+    return data_loader.load_market_heat_index()
+
+
+def _precheck_zillow_file(path: Path) -> tuple[bool, str]:
+    """Re-check whether this staged file looks like a valid Zillow wide CSV."""
+    from services.zillow_sources import _peek_header, _REQUIRED, _find_col, _ID_COLUMNS, _DATE_COL_RE
+    try:
+        header_cols = _peek_header(path)
+    except Exception as e:
+        return False, f"Could not read this file as CSV: {e}"
+    if not header_cols:
+        return False, "This file is empty."
+    resolved = {logical: _find_col(header_cols, cands) for logical, cands in _ID_COLUMNS.items()}
+    missing_required = [f for f in _REQUIRED if not resolved.get(f)]
+    if missing_required:
+        return False, f"Missing required Zillow column(s) {missing_required}."
+    date_cols = [c for c in header_cols if _DATE_COL_RE.match(str(c).strip())]
+    if not date_cols:
+        return False, "No date columns found (expected headers like 'YYYY-MM-DD')."
+    return True, ""
+
 
 @dataclass(frozen=True)
 class DataSource:
@@ -364,6 +389,33 @@ _STATIC_SOURCES: list[DataSource] = [
         detect=_detect_sold_allegheny,
         direct_download=False,
         precheck=_precheck_sold_file,
+    ),
+    DataSource(
+        key="zhvi", label="Zillow Home Value Index (ZHVI)", category="Housing market",
+        table="zhvi", dest_dir=settings.zhvi_dir, placement="append",
+        accept=".csv",
+        source_url="https://www.zillow.com/research/data/",
+        instructions="This is Zillow Research's download page, not a direct file — under Data Type "
+                      "select \u201cZHVI\u201d, pick any geography level (Zip, Neighborhood, City, Metro, "
+                      "County, State) and download the Smoothed, Seasonally Adjusted ($) CSV.",
+        loader=_run_zhvi,
+        row_count_sql="SELECT COUNT(*) FROM zhvi",
+        detect=None,
+        direct_download=False,
+        precheck=_precheck_zillow_file,
+    ),
+    DataSource(
+        key="market_heat_index", label="Zillow Market Heat Index", category="Housing market",
+        table="market_heat_index", dest_dir=settings.market_heat_dir, placement="append",
+        accept=".csv",
+        source_url="https://www.zillow.com/research/data/",
+        instructions="This is Zillow Research's download page, not a direct file — under Data Type "
+                      "select \u201cMarket Heat Index\u201d, pick any geography level, and download the CSV.",
+        loader=_run_market_heat_index,
+        row_count_sql="SELECT COUNT(*) FROM market_heat_index",
+        detect=None,
+        direct_download=False,
+        precheck=_precheck_zillow_file,
     ),
 ]
 

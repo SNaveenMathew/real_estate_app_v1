@@ -270,6 +270,62 @@ def _ensure_schema(conn: duckdb.DuckDBPyConnection):
         )
     """)
 
+    # zhvi / market_heat_index — Zillow Research time series (https://www.zillow.com/research/data/).
+    # Both share one long schema: one row per region per month, across whichever
+    # geography levels (state/metro/county/city/zip/neighborhood) were dropped
+    # into data/zhvi/ or data/market_heat_index/. Populated by
+    # services/zillow_sources.py (parsing) + services/data_loader.py::load_zhvi()
+    # / load_market_heat_index() (dedup + upsert). region_id is Zillow's own
+    # identifier; it's paired with region_type in the key because a raw
+    # region_id is not documented as unique *across* geography levels.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS zhvi (
+            region_id       VARCHAR,
+            region_type     VARCHAR,    -- country | state | metro | county | city | zip | neighborhood
+            region_name     VARCHAR,
+            size_rank       INTEGER,    -- Zillow popularity/size ranking; 0 = largest
+            state_name      VARCHAR,
+            state           VARCHAR,
+            city            VARCHAR,
+            metro           VARCHAR,
+            county_name     VARCHAR,
+            msa_code        VARCHAR,    -- CBSA code, resolved at load time from region_name (metro rows)
+                                        -- or the metro column (zip/neighborhood/city rows) via the same
+                                        -- CBSA-name matcher census_msa uses (services/data_loader.py).
+                                        -- NULL for state/country rows or an unmatched metro name.
+            date            DATE,
+            home_value      DOUBLE,     -- ZHVI: smoothed, seasonally-adjusted typical home value ($)
+            source_file     VARCHAR,
+            PRIMARY KEY (region_id, region_type, date)
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS market_heat_index (
+            region_id       VARCHAR,
+            region_type     VARCHAR,
+            region_name     VARCHAR,
+            size_rank       INTEGER,
+            state_name      VARCHAR,
+            state           VARCHAR,
+            city            VARCHAR,
+            metro           VARCHAR,
+            county_name     VARCHAR,
+            msa_code        VARCHAR,    -- see zhvi.msa_code above
+            date            DATE,
+            heat_index      DOUBLE,     -- ~0-100+; higher = hotter / more seller-favorable market
+            source_file     VARCHAR,
+            PRIMARY KEY (region_id, region_type, date)
+        )
+    """)
+    # Add msa_code if upgrading a zhvi/market_heat_index table created before
+    # this column existed (CREATE TABLE IF NOT EXISTS above is a no-op then).
+    for _tbl in ("zhvi", "market_heat_index"):
+        try:
+            conn.execute(f"ALTER TABLE {_tbl} ADD COLUMN IF NOT EXISTS msa_code VARCHAR")
+        except Exception:
+            pass
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS sold_homes (
             -- Identity
@@ -1031,6 +1087,121 @@ def get_price_stats_in_tract(tract_fips: str) -> dict:
     if len(sold_df) > 0:
         row.update({f"sold_{k}": v for k, v in sold_df.iloc[0].to_dict().items()})
     return row
+
+
+# ── ZHVI-adjusted price estimate ─────────────────────────────────────────────
+# Deterministic (no LLM / no free-form SQL agent involved) so it isn't subject
+# to the schema-catalog query planner's table/relationship coverage — see the
+# House Chat "estimate the price using ZHVI growth" design discussion. Reuses
+# the same 3-tier geography fallback for every consumer instead of each
+# caller reimplementing its own join.
+
+def get_last_sold_snapshot(house_id: str) -> Optional[dict]:
+    """
+    This specific house's own most recently recorded SALE — distinct from its
+    current list price, and distinct from the county-wide `sold_homes` table
+    (which isn't scoped to a particular favorited house). Populated by the
+    "Matching Sold Records -> Houses" step, which writes a source_type='sold'
+    row into house_snapshots when a county sold-homes record is matched to a
+    house. Returns None if this house has no matched sale on record.
+    """
+    rows = query_json("""
+        SELECT price AS sold_price, snapshot_date AS sold_date
+        FROM house_snapshots
+        WHERE house_id = ? AND source_type = 'sold'
+          AND price IS NOT NULL AND price > 0 AND snapshot_date IS NOT NULL
+        ORDER BY snapshot_date DESC
+        LIMIT 1
+    """, [house_id])
+    return rows[0] if rows else None
+
+
+def _zillow_series_snapshot(table: str, value_col: str, region_type: str,
+                             key_col: str, key_value, as_of_date) -> Optional[dict]:
+    """
+    For one (table, region_type, key) time series: the latest available value
+    and the value nearest `as_of_date` (nearest by absolute day count, not
+    strictly on-or-before — ZHVI series can start after a house's sale date,
+    and this keeps the tier usable near either edge of its coverage rather
+    than failing outright). Returns None if the key is missing or the series
+    has no rows at all for this region_type — the caller falls through to the
+    next geography tier in that case, not on a merely-distant nearest month.
+    """
+    if key_value is None or str(key_value).strip() == "":
+        return None
+    df = query(f"""
+        WITH series AS (
+            SELECT date, {value_col} AS value
+            FROM {table}
+            WHERE region_type = ? AND {key_col} = ? AND {value_col} IS NOT NULL
+        )
+        SELECT
+            (SELECT value FROM series ORDER BY date DESC LIMIT 1) AS latest_value,
+            (SELECT date  FROM series ORDER BY date DESC LIMIT 1) AS latest_date,
+            (SELECT value FROM series ORDER BY ABS(date - CAST(? AS DATE)) ASC, date DESC LIMIT 1) AS value_at_sale,
+            (SELECT date  FROM series ORDER BY ABS(date - CAST(? AS DATE)) ASC, date DESC LIMIT 1) AS date_at_sale
+    """, [region_type, key_value, as_of_date, as_of_date])
+    if df.empty:
+        return None
+    row = df.iloc[0]
+    if pd.isna(row["latest_value"]) or pd.isna(row["value_at_sale"]):
+        return None
+    return {
+        "latest_value": float(row["latest_value"]), "latest_date": str(row["latest_date"]),
+        "value_at_sale": float(row["value_at_sale"]), "date_at_sale": str(row["date_at_sale"]),
+    }
+
+
+# Most to least granular. Each tuple: (label, house column, zhvi/heat_index
+# region_type, zhvi/heat_index column matched against the house column).
+# zip and metro are exact, load-time-normalized keys (see
+# services/zillow_sources.py::normalize_zip5 and
+# services/data_loader.py::_compute_zillow_msa_codes) — no fuzzy matching
+# happens at query time. state is a plain 2-letter-code equality.
+_ZHVI_GEOGRAPHY_TIERS = (
+    ("zip",   "zip",      "zip",   "region_name"),
+    ("metro", "msa_code", "metro", "msa_code"),
+    ("state", "state",    "state", "state_name"),
+)
+
+
+def get_zhvi_price_estimate(house_id: str, table: str = "zhvi", value_col: str = "home_value") -> Optional[dict]:
+    """
+    Estimate a house's current value as:
+        last recorded sold price x (latest ZHVI / ZHVI at time of that sale)
+    using the most granular ZHVI geography available for the house — falling
+    back zip -> metro -> state only when a tier has no coverage at all (not
+    merely a distant nearest-month match; see _zillow_series_snapshot).
+
+    Returns None when there's no recorded sale for this house (see
+    get_last_sold_snapshot) or no ZHVI coverage at any tier for its location —
+    never raises for missing/sparse data, since both are expected and common
+    (many favorited houses won't have a matched sale; small zips may not have
+    zip-level Zillow coverage).
+    """
+    house = get_house(house_id)
+    if not house:
+        return None
+    sale = get_last_sold_snapshot(house_id)
+    if not sale:
+        return None
+
+    for tier_name, house_col, region_type, zhvi_col in _ZHVI_GEOGRAPHY_TIERS:
+        key_value = house.get(house_col)
+        result = _zillow_series_snapshot(table, value_col, region_type, zhvi_col, key_value, sale["sold_date"])
+        if not result or not result["value_at_sale"]:
+            continue
+        growth = result["latest_value"] / result["value_at_sale"]
+        return {
+            "sold_price": sale["sold_price"],
+            "sold_date": str(sale["sold_date"]),
+            "geography_level": tier_name,
+            "geography_key": key_value,
+            **result,
+            "growth_multiple": growth,
+            "estimated_value": sale["sold_price"] * growth,
+        }
+    return None
 
 
 def get_geocode_stats() -> dict:

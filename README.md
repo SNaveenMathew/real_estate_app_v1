@@ -133,6 +133,8 @@ architecture; the SQL agent queries physical tables only.
 │  ├─ sold_homes               │      └──────────────────────────────────┘
 │  ├─ crime_incidents          │
 │  ├─ bike_routes              │
+│  ├─ zhvi                     │
+│  ├─ market_heat_index        │
 │  ├─ cbsa_*                   │
 │  └─ geocode_cache            │
 └───────────────┬──────────────┘
@@ -332,6 +334,26 @@ No external road-routing engine is used for the route graph itself; the service 
 - Required columns: `address`, `lat`, `lon`, `sold_price`, `sqft`, `sold_date`
 - Optional: `list_price`, `beds`, `baths`
 
+### Zillow Home Value Index — ZHVI (optional)
+
+1. Go to: https://www.zillow.com/research/data/
+2. Data Type: **ZHVI** → pick any geography (Zip, Neighborhood, City, Metro, County, or State) and a home type/tier — **Smoothed, Seasonally Adjusted ($)** is the typical choice
+3. Drop the CSV into **`data/zhvi/`**
+
+You can drop more than one geography-level file at once (e.g. a Zip-level export alongside a Metro-level one) — they all load into the same `zhvi` table, distinguished by `region_type`.
+
+Every row also gets an `msa_code` (CBSA code) resolved at load time — from `region_name` for metro-level rows, or from the row's own `metro` column otherwise — using the same CBSA-name matcher `census_msa` is built from (see **CBSA Crosswalk** above; load that first if you want metro-level matching to work). Zip-level `region_name` is normalized to a clean 5-digit zip, matching how `houses.zip` is normalized on load, so a house always joins to its ZHVI series with a plain equality — no fuzzy string matching at query time.
+
+This is what backs the **ZHVI-Adjusted Estimate** in House Chat's price-estimate tool: last recorded sale price × ZHVI growth since that sale, using the most granular geography with coverage — ZIP first, falling back to metro (via `msa_code`), then state, only when a tier has no data at all for that house's location (see `db/duckdb_store.py::get_zhvi_price_estimate`).
+
+### Zillow Market Heat Index (optional)
+
+1. Go to: https://www.zillow.com/research/data/
+2. Data Type: **Market Heat Index** → pick any geography
+3. Drop the CSV into **`data/market_heat_index/`**
+
+Same multi-file/multi-geography handling, zip normalization, and `msa_code` resolution as ZHVI above. Higher `heat_index` values indicate a hotter, more seller-favorable market.
+
 ### Crime Data (optional, powers the "Crime" map layer)
 
 Every city publishes crime data differently — different columns, different
@@ -401,7 +423,9 @@ User: <pastes Redfin/Zillow description>
 Agent: Thanks — I've saved that to the knowledge base. How can I help?
 
 User: Estimate a fair price for this house
-Agent: [runs price estimator, checks comparables, sold homes in tract]
+Agent: [runs price estimator: active/sold comps in the tract, nearby listings, and — if this
+        house has a recorded sale and ZHVI data is loaded — its last sold price grown forward
+        by ZIP/metro/state ZHVI appreciation since that sale]
 
 User: How bad is the flood risk here?
 Agent: [fetches NRI, explains RFLD_RISKS score and EAL in plain language]
@@ -431,6 +455,8 @@ After adding new CSV files, re-run:
 python setup_data.py --only redfin    # just Redfin
 python setup_data.py --only sold      # just sold homes
 python setup_data.py --only crime     # just crime data
+python setup_data.py --only zhvi              # just Zillow Home Value Index
+python setup_data.py --only market_heat_index # just Zillow Market Heat Index
 python setup_data.py --only bike      # just BikePGH route data
 python setup_data.py --only census    # CBSA crosswalk + tract/MSA populations
 python setup_data.py --only geocode   # retry pending sold-home geocodes
@@ -456,6 +482,7 @@ The vector database (ChromaDB) grows automatically as you paste descriptions in 
 | Embedding errors | If using Ollama embeddings: pull `nomic-embed-text` with `ollama pull nomic-embed-text`. If using another embedding provider, configure accordingly. |
 | Slow tract resolution | Add TIGER/Line shapefiles to `data/shapefiles/` |
 | "Crime" layer is empty | Confirm `data/crime/<city>/` has files for a city your map view overlaps, then `python setup_data.py --only crime` |
+| Asking about home values or market temperature gets no data | Confirm `data/zhvi/` / `data/market_heat_index/` have Zillow CSVs, then `python setup_data.py --only zhvi` / `--only market_heat_index` |
 | "NRI" layer is empty / shows a warning | It needs both tract *geometry* (from the NRI shapefile, or TIGER/Line shapefiles in `data/shapefiles/`) and tract *attributes* (`python setup_data.py --only nri`) — the layer's warning message says which is missing |
 | Phoenix is unavailable | Set `PHOENIX_ENABLED=false` to run without tracing, or start it manually with `python -m phoenix.server.main serve` |
 | Bike route returns no route | Confirm BikePGH layers were loaded with `python setup_data.py --only bike`; the router does not fall back to an external road-routing service |

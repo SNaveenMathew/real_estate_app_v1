@@ -116,6 +116,29 @@ TABLES = {
     ),
     "crime_incidents": TableMeta("crime_incidents", "Standardized crime incidents.", grain="one row per incident"),
     "bike_routes": TableMeta("bike_routes", "BikePGH-style line features.", grain="one row per line feature"),
+    "zhvi": TableMeta(
+        "zhvi", "Zillow Home Value Index (ZHVI) — smoothed, seasonally-adjusted typical home value, by region and month.",
+        grain="one row per region per month",
+        column_notes=(
+            ColumnNote("region_id", "Zillow's own region identifier; not documented as unique across region_type values, so treat (region_id, region_type) as the region key."),
+            ColumnNote("region_type", "Geography level of this row: country, state, metro, county, city, zip, or neighborhood — a single query may mix levels unless filtered."),
+            ColumnNote("region_name", "Display name. For region_type='zip' this is a clean 5-digit zip (normalized at load time — see services/zillow_sources.py::normalize_zip5 — so it always equality-joins cleanly against houses.zip, which is normalized the same way). For metro rows this is Zillow's short 'City, ST' form, e.g. 'New York, NY'."),
+            ColumnNote("home_value", "ZHVI dollar value for that region and month; NULL months are dropped, not zero."),
+            ColumnNote("metro", "Containing metro area name; only populated for zip/neighborhood/city-level rows."),
+            ColumnNote("msa_code", "CBSA code, resolved at load time (services/data_loader.py::_compute_zillow_msa_codes) from region_name (metro rows) or the metro column (zip/neighborhood/city rows), reusing the same CBSA-name matcher census_msa is built from. NULL for state/country rows or an unmatched metro name. Join houses.msa_code = zhvi.msa_code (with region_type='metro') for a metro-level fallback when a house's own zip has no zip-level row."),
+        ),
+    ),
+    "market_heat_index": TableMeta(
+        "market_heat_index", "Zillow Market Heat Index — buyer/seller market temperature (~0-100+), by region and month.",
+        grain="one row per region per month",
+        column_notes=(
+            ColumnNote("region_id", "Zillow's own region identifier; not documented as unique across region_type values, so treat (region_id, region_type) as the region key."),
+            ColumnNote("region_type", "Geography level of this row: country, state, metro, county, city, zip, or neighborhood."),
+            ColumnNote("region_name", "For region_type='zip' this is a clean 5-digit zip, normalized the same way as houses.zip (see zhvi.region_name note)."),
+            ColumnNote("heat_index", "Higher values indicate a hotter, more seller-favorable market; lower values a more buyer-favorable one. Not strictly capped at 100."),
+            ColumnNote("msa_code", "CBSA code; same resolution and join pattern as zhvi.msa_code (see that note)."),
+        ),
+    ),
     "geocode_cache": TableMeta("geocode_cache", "Internal geocoding cache.", agent_visible=False),
     "data_source_log": TableMeta(
         "data_source_log", "Tracks when each built-in data source was last refreshed from the Data page.",
@@ -139,6 +162,19 @@ RELATIONSHIPS = [
     Relationship("house_snapshots", "house_id", "houses", "house_id", "Historical observation to current house.", "many-to-one", grain_effect="snapshot -> house"),
     Relationship("houses", "crime_city", "crime_incidents", "city", "City-level contextual relationship; not spatial.", "many-to-many", confidence="medium", preferred=False),
     Relationship("house_commute", "house_id", "houses", "house_id", "Commute estimate for the current work location, one row per house.", "many-to-one", grain_effect="house -> house (current work location)"),
+    # ZHVI / Market Heat Index — see zhvi.msa_code / zhvi.region_name column notes above for how
+    # each side is normalized so these are plain equality joins, not fuzzy string matching.
+    # Two tiers per dataset (zip and metro); prefer zip when it has coverage, fall back to metro
+    # (and further to a plain houses.state = zhvi.state_name equality, which needs no relationship
+    # entry since both sides are already bare 2-letter codes). db.duckdb_store.get_zhvi_price_estimate
+    # implements this same 3-tier fallback in code for House Chat's price-estimate tool; these
+    # relationships are what let the general schema-driven agent do the equivalent in SQL.
+    Relationship("houses", "zip", "zhvi", "region_name", "House ZIP to zip-level ZHVI (filter zhvi.region_type = 'zip'). Both sides are normalized to a clean 5-digit zip at load time.", "one-to-many", grain_effect="house -> zip-month series"),
+    Relationship("houses", "msa_code", "zhvi", "msa_code", "House metro to metro-level ZHVI (filter zhvi.region_type = 'metro'), for when the house's own zip has no zip-level ZHVI row.", "one-to-many", grain_effect="house -> metro-month series"),
+    Relationship("census_msa", "msa_code", "zhvi", "msa_code", "MSA to metro-level ZHVI (filter zhvi.region_type = 'metro').", "one-to-many", grain_effect="MSA -> metro-month series"),
+    Relationship("houses", "zip", "market_heat_index", "region_name", "House ZIP to zip-level Market Heat Index (filter market_heat_index.region_type = 'zip').", "one-to-many", grain_effect="house -> zip-month series"),
+    Relationship("houses", "msa_code", "market_heat_index", "msa_code", "House metro to metro-level Market Heat Index (filter market_heat_index.region_type = 'metro').", "one-to-many", grain_effect="house -> metro-month series"),
+    Relationship("census_msa", "msa_code", "market_heat_index", "msa_code", "MSA to metro-level Market Heat Index (filter market_heat_index.region_type = 'metro').", "one-to-many", grain_effect="MSA -> metro-month series"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -191,6 +227,8 @@ SEMANTIC_GLOSSARY.update({
     "sold_price": _concept("sold_price", ["sold_homes"], ["sold price", "sale price", "sales price", "sold-home records", "sold home records"], "Recorded sold-home transaction price.", columns=("sold_homes.sold_price",), operations=(AVG("sold_homes.sold_price"), MAX("sold_homes.sold_price"), RANK_DESC("sold_homes.sold_price", group_by="sold_homes.city")), filters=("(sold_homes.is_arms_length IS NULL OR sold_homes.is_arms_length = TRUE)", "sold_homes.sold_price > 1000"), grain="sale", groupings=("sold_homes.city",)),
     "arms_length_sale": _concept("arms_length_sale", ["sold_homes"], ["arm's length", "arms length", "arms-length", "market sale", "market-rate sale"], "Market-comparable sale scope.", columns=("sold_homes.is_arms_length",), filters=("(sold_homes.is_arms_length IS NULL OR sold_homes.is_arms_length = TRUE)", "sold_homes.sold_price > 1000"), grain="sale"),
     "history": _concept("history", ["house_snapshots"], ["price history", "listing history", "historical price", "price changes", "price cuts"], "Historical listing/sale observations.", columns=("house_snapshots.snapshot_date", "house_snapshots.price"), grain="snapshot"),
+    "zhvi": _concept("zhvi", ["zhvi"], ["zhvi", "home value index", "zillow home value index", "home value trend", "typical home value"], "Zillow Home Value Index (ZHVI): smoothed, seasonally-adjusted typical home value by region and month, at whichever geography level (zip/metro/state/etc.) is loaded — filter region_type for a single level.", columns=("zhvi.home_value",), operations=(AVG("zhvi.home_value"), MEDIAN("zhvi.home_value"), MIN("zhvi.home_value"), MAX("zhvi.home_value"), RANK_DESC("zhvi.home_value"), RANK_ASC("zhvi.home_value")), grain="region-month"),
+    "market_heat_index": _concept("market_heat_index", ["market_heat_index"], ["market heat index", "zillow heat index", "buyer's market", "seller's market", "market temperature"], "Zillow Market Heat Index: buyer/seller market temperature (~0-100+) by region and month; higher is more seller-favorable. Mixed geography levels — filter region_type for a single level.", columns=("market_heat_index.heat_index",), operations=(AVG("market_heat_index.heat_index"), MEDIAN("market_heat_index.heat_index"), MIN("market_heat_index.heat_index"), MAX("market_heat_index.heat_index"), RANK_DESC("market_heat_index.heat_index"), RANK_ASC("market_heat_index.heat_index")), grain="region-month"),
 })
 
 # Commute concepts. Each mode phrase (e.g. "bike commute") textually contains the generic
@@ -293,6 +331,8 @@ SEED_DOMAINS = {
     "sold_homes": "sales",
     "crime_incidents": "safety",
     "bike_routes": "mobility",
+    "zhvi": "housing",
+    "market_heat_index": "housing",
     "geocode_cache": "system",
     "data_source_log": "system",
     "house_commute": "housing",
