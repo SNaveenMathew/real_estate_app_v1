@@ -413,8 +413,10 @@ routing. Nothing to download: set the address in the sidebar's **Commute** tab. 
 |-----|----------|
 | **Details** | Price, beds/baths/sqft, livability scores, NRI summary |
 | **Risk** | Full NRI breakdown — 18 hazards, composite score, percentile, EAL |
+| **Commute** | Commute profiles, destination routes (bike, transit, walk, drive), elevation profiles, and commute scores |
 | **Chat** | AI agent for this house — pricing, risk Q&A, description analysis |
 | **Docs** | All stored text/photos; upload new photos |
+| **💬 General** | Opens the app-wide General Chat agent in the sidebar (cross-city queries, comps, market data, routing) |
 
 ### House Chat — Example Conversations
 
