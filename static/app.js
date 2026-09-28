@@ -1270,7 +1270,7 @@ function BikeRouteControl() {
         <button id="bike-route-submit" type="button">Find Route</button>
         <div id="bike-route-status" class="route-status"></div>
         <div id="bike-route-result" class="route-status"></div>
-        <div class="route-attribution">Uses OpenStreetMap, Nominatim, and Valhalla. Endpoints can be place names or addresses.</div>
+        <div class="route-attribution">Uses OpenStreetMap, Nominatim, and local BikePGH network. Endpoints can be place names or addresses.</div>
       `;
       L.DomEvent.disableClickPropagation(div);
       L.DomEvent.disableScrollPropagation(div);
