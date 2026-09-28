@@ -9,6 +9,8 @@ Usage:
     python setup_data.py --only sold        # load only Sold
     python setup_data.py --only bike        # load only Bike Lanes
     python setup_data.py --only crime       # load only Crime (data/crime/<city>/)
+    python setup_data.py --only zhvi        # load only Zillow Home Value Index
+    python setup_data.py --only market_heat_index  # load only Zillow Market Heat Index
     python setup_data.py --resolve-tracts   # re-run tract FIPS resolution
 """
 import sys
@@ -69,6 +71,7 @@ def run_all(only: str = None, resolve_tracts: bool = False,
     for d in [settings.data_dir / "nri", settings.data_dir / "census",
               settings.data_dir / "redfin", settings.data_dir / "sold",
               settings.data_dir / "crime", settings.data_dir / "shapefiles",
+              settings.zhvi_dir, settings.market_heat_dir,
               settings.uploads_dir]:
         d.mkdir(parents=True, exist_ok=True)
 
@@ -196,6 +199,37 @@ def run_all(only: str = None, resolve_tracts: bool = False,
             n = data_loader.load_census_msa()
             if n:
                 print(f"  ✓ {n:,} MSAs loaded")
+
+    # ── Zillow Home Value Index (ZHVI) ──────────────────────────────────────
+    if only in (None, "zhvi"):
+        banner("Zillow Home Value Index (ZHVI)")
+        csv_files = list(settings.zhvi_dir.glob("*.csv")) if settings.zhvi_dir.exists() else []
+        if not csv_files:
+            print(f"  ✗ ZHVI data not found in {settings.zhvi_dir}/")
+            print("  Download from: https://www.zillow.com/research/data/")
+            print("  → Data Type: 'ZHVI' → pick any geography (Zip/Neighborhood/City/Metro/")
+            print("    County/State) and home type/tier — 'Smoothed, Seasonally Adjusted ($)'")
+            print(f"    is the typical choice → save the CSV(s) into {settings.zhvi_dir}/")
+        else:
+            print(f"  Found {len(csv_files)} file(s): {[f.name for f in csv_files]}")
+            n = data_loader.load_zhvi()
+            if n:
+                print(f"  ✓ {n:,} ZHVI rows loaded")
+
+    # ── Zillow Market Heat Index ─────────────────────────────────────────────
+    if only in (None, "market_heat_index"):
+        banner("Zillow Market Heat Index")
+        csv_files = list(settings.market_heat_dir.glob("*.csv")) if settings.market_heat_dir.exists() else []
+        if not csv_files:
+            print(f"  ✗ Market Heat Index data not found in {settings.market_heat_dir}/")
+            print("  Download from: https://www.zillow.com/research/data/")
+            print("  → Data Type: 'Market Heat Index' → pick any geography")
+            print(f"    → save the CSV(s) into {settings.market_heat_dir}/")
+        else:
+            print(f"  Found {len(csv_files)} file(s): {[f.name for f in csv_files]}")
+            n = data_loader.load_market_heat_index()
+            if n:
+                print(f"  ✓ {n:,} Market Heat Index rows loaded")
 
     # ── Redfin ────────────────────────────────────────────────────────────
     if only in (None, "redfin"):
@@ -327,18 +361,21 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Load data into DuckDB")
     parser.add_argument(
         "--only",
-        choices=["nri", "census", "redfin", "sold", "crime", "geocode", "repair", "match", "bike", "bike_lanes", "commute"],
+        choices=["nri", "census", "redfin", "sold", "crime", "zhvi", "market_heat_index",
+                 "geocode", "repair", "match", "bike", "bike_lanes", "commute"],
         help=(
             "Load only a specific dataset, or run a maintenance task:\n"
-            "  nri      — FEMA National Risk Index\n"
-            "  census   — CBSA crosswalk + tract + MSA populations (in correct order)\n"
-            "  redfin   — Redfin favorites CSVs\n"
-            "  sold     — County sold-homes CSVs\n"
-            "  crime    — Per-city crime data (data/crime/<city>/)\n"
-            "  bike     — Bike Lanes (BikePGH active transportation network)\n"
-            "  geocode  — Retry pending geocodes for sold homes\n"
-            "  commute  — Commute times to your saved work location (see the Commute tab)\n"
-            "  repair   — Fix X-coded msa_codes in census_msa (no data reload needed)"
+            "  nri               — FEMA National Risk Index\n"
+            "  census            — CBSA crosswalk + tract + MSA populations (in correct order)\n"
+            "  redfin            — Redfin favorites CSVs\n"
+            "  sold              — County sold-homes CSVs\n"
+            "  crime             — Per-city crime data (data/crime/<city>/)\n"
+            "  zhvi              — Zillow Home Value Index (data/zhvi/)\n"
+            "  market_heat_index — Zillow Market Heat Index (data/market_heat_index/)\n"
+            "  bike              — Bike Lanes (BikePGH active transportation network)\n"
+            "  geocode           — Retry pending geocodes for sold homes\n"
+            "  commute           — Commute times to your saved work location (see the Commute tab)\n"
+            "  repair            — Fix X-coded msa_codes in census_msa (no data reload needed)"
         ),
     )
     parser.add_argument(
