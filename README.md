@@ -877,6 +877,7 @@ api/
   onboarding.py       Data page HTTP API (/api/onboarding/*)
   commute.py          Commute tab HTTP API (/api/commute/*)
   map_layers.py       Map layer panel HTTP API (/api/layers/*)
+  data_sources.py     Built-in dataset registry and refresh API (/api/data-sources/*)
 
 agents/
   tools.py            LangChain tools (SQL, vector search, price estimation, bike routing)
@@ -896,6 +897,10 @@ db/
 
 services/
   data_loader.py      Parsers for Redfin, NRI, Census, Sold, Crime
+  data_sources.py     Built-in dataset registry, health check, and refresh orchestrator
+  zillow_sources.py   Parsers for Zillow Home Value Index (ZHVI) and Market Heat Index datasets
+  geocoder.py         Address geocoding and caching for sold homes
+  guardrails.py       Prompt injection detection, query complexity limits, and SQL allowlist guardrails
   crime_sources.py    Per-city crime file parsers (one class per city)
   crime_taxonomy.py   Standardized crime categories + severity weights
   layers.py           Viewport-scoped queries behind the Crime/NRI map layers
@@ -930,6 +935,8 @@ observability.py      Phoenix tracing + Prometheus metrics helper
 data/
   redfin/             Drop Redfin CSVs here
   sold/               Drop sold-homes CSVs here
+  zhvi/               Drop Zillow Home Value Index CSVs here
+  market_heat_index/  Drop Zillow Market Heat Index CSVs here
   nri/                FEMA NRI shapefile or CSV
   census/             Census P1 tables + CBSA crosswalk
   crime/<city>/       Drop each city's raw crime export here
