@@ -17,6 +17,7 @@ import db.vector_store as vs
 import db.schema_catalog as schema
 import services.bike_routing as bike_routing
 from agents.query_planner import build_query_plan
+from agents.artifacts import classify_dataframe, emit_artifact
 import asyncio
 import threading
 
@@ -607,8 +608,17 @@ def _compile_sql_from_plan(query_plan) -> str:
     return f"SELECT {select_sql} FROM {from_sql}{where_sql}{group_clause}{order_clause}"
 
 
-def run_code_query(request: str, requirements: str = "", plan: str = "") -> tuple[str, str]:
-    """Generate, validate, execute and generically repair one analytical query."""
+def run_code_query(
+    request: str, requirements: str = "", plan: str = "", presentation: str = "auto",
+) -> tuple[str, str]:
+    """Generate, validate, execute and generically repair one analytical query.
+
+    `presentation` is passed straight through to
+    agents.artifacts.classify_dataframe as a hint only — see that
+    function's docstring for what it does and does not control. The text
+    returned here (the evidence the final-answer LLM reads) is completely
+    unaffected by it; only the emitted artifact, if any, changes shape.
+    """
     query_plan = build_query_plan(request)
     base_plan = query_plan.render()
     repair_note = ""
@@ -689,6 +699,10 @@ def run_code_query(request: str, requirements: str = "", plan: str = "") -> tupl
                 )
             repair_note = f"The query returned 0 rows. Diagnostic context: {diagnosis}. Correct join/entity/filter mistakes without changing scope."
             continue
+        try:
+            emit_artifact(classify_dataframe(df, request=request, presentation=presentation))
+        except Exception:
+            pass  # a presentation-layer problem must never break an otherwise-successful query
         if len(df) > 50:
             return sql, df.head(50).to_string(index=False) + f"\n... ({len(df)} total rows, showing 50)"
         return sql, df.to_string(index=False)
@@ -706,7 +720,12 @@ def check_data_availability(_: str = "") -> str:
     If a table has 0 rows, you CANNOT answer questions that depend on it —
     tell the user which files need to be loaded instead.
     """
-    report, _ = schema.availability_report()
+    report, counts = schema.availability_report()
+    try:
+        counts_df = pd.DataFrame(sorted(counts.items()), columns=["table", "rows"])
+        emit_artifact(classify_dataframe(counts_df, title="Data availability", presentation="table"))
+    except Exception:
+        pass
     return report
 
 
@@ -733,7 +752,9 @@ def retrieve_data_model_context(query: str) -> str:
     return "\n\n".join(p for p in parts if p)
 
 @tool
-def query_database(request: str, requirements: str = "", plan: str = "") -> str:
+def query_database(
+    request: str, requirements: str = "", plan: str = "", presentation: str = "auto",
+) -> str:
     """
     Use the shared SQL Code Agent to answer analytical questions from any
     agent-visible DuckDB dataset.
@@ -744,10 +765,18 @@ def query_database(request: str, requirements: str = "", plan: str = "") -> str:
     executes it, and returns both the generated SQL and live result so General
     Chat can inspect the evidence and continue thinking/planning before it
     answers the user.
+
+    `presentation` is an OPTIONAL hint: "map" if the user asked to see this
+    on a map or asked where something is; "chart"/"plot"/"graph" if they
+    asked to see a trend or a comparison across categories; "table" if they
+    asked for a table or a side-by-side list; "auto" (the default)
+    otherwise. This never overrides what the executed data can actually
+    support — a "map" hint with no place/coordinate data in the result
+    still renders as a chart or table, never a fabricated map.
     """
     structured_plan = build_query_plan(request)
     try:
-        sql, result = run_code_query(request)
+        sql, result = run_code_query(request, presentation=presentation)
     except Exception as exc:
         sql, result = "", f"Code Agent error: {exc}"
 
@@ -831,6 +860,13 @@ def find_bike_route(
                 message = f"No — Not possible: {note}"
             else:
                 message = f"No — Not possible: no continuous bike path exists using the filtered BikePGH network. {note}"
+            if result.get("analysis_visualization"):
+                emit_artifact({
+                    "type": "map",
+                    "map_kind": "bike_crime_analysis",
+                    "title": "Crime-aware route filtering",
+                    "analysis": result.get("analysis_visualization"),
+                })
             return json.dumps({
                 "status": "analysis",
                 "kind": "no_route",
@@ -848,6 +884,31 @@ def find_bike_route(
             if bool(crime_meta.get("enabled")) and bool(crime_meta.get("applied"))
             else "Yes — a continuous BikePGH route was found."
         )
+        if result.get("analysis_visualization"):
+            emit_artifact({
+                "type": "map",
+                "map_kind": "bike_crime_analysis",
+                "title": "Crime-aware route filtering",
+                "analysis": result.get("analysis_visualization"),
+            })
+        if route_data.get("shape"):
+            emit_artifact({
+                "type": "map",
+                "map_kind": "bike_route",
+                "title": f"Bike route: {result.get('start')} \u2192 {result.get('end')}",
+                "city": result.get("city") or city or "Pittsburgh, PA",
+                "start": result.get("start"),
+                "end": result.get("end"),
+                "route_shape": route_data.get("shape", []) or [],
+                "bbox": route_data.get("bbox"),
+                "distance_miles": round(float(summary.get("length", 0) or 0), 2),
+                "duration_minutes": round(float(summary.get("time", 0) or 0) / 60.0, 1),
+                "turn_by_turn": instructions,
+                "bike_infrastructure_near_route": facilities.get("facility_segments", []),
+                "used_infrastructure": route_data.get("used_infrastructure") or {"type": "FeatureCollection", "features": []},
+                "provider": result.get("provider"),
+                "attribution": result.get("attribution"),
+            })
         return json.dumps({
             "status": "ok",
             "kind": "route_found",
@@ -898,6 +959,18 @@ def search_all_house_descriptions(query: str) -> str:
     docs = vs.search_all(query, n_results=6)
     if not docs:
         return "No documents found in the knowledge base yet."
+    try:
+        matches_df = pd.DataFrame([
+            {
+                "house_id": d["metadata"].get("house_id", "?"),
+                "doc_type": d["metadata"].get("doc_type", "text"),
+                "excerpt": d["text"][:200],
+            }
+            for d in docs
+        ])
+        emit_artifact(classify_dataframe(matches_df, title=f'Matches for "{query}"', presentation="table"))
+    except Exception:
+        pass
     return "\n\n".join(
         f"[House {d['metadata'].get('house_id','?')} | {d['metadata'].get('doc_type','text')}]\n{d['text'][:300]}"
         for d in docs

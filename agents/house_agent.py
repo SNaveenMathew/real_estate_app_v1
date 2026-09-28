@@ -28,6 +28,7 @@ from langchain_openai import ChatOpenAI
 
 from config import settings, LLM_STOP_SEQUENCES
 from agents.response_validator import validate_response
+from agents.artifacts import classify_dataframe, emit_artifact, reset_artifacts, collect_artifacts
 
 
 # -- Constants ----------------------------------------------------------------
@@ -70,6 +71,12 @@ def make_house_approved_functions(house_id: str) -> dict:
             [(k, v) for k, v in hazards.items() if v and v > 0],
             key=lambda x: x[1], reverse=True
         )[:5]
+        try:
+            import pandas as pd
+            hazards_df = pd.DataFrame(top, columns=["hazard", "risk_score"])
+            emit_artifact(classify_dataframe(hazards_df, title="Top hazards by risk score", presentation="chart"))
+        except Exception:
+            pass
         return json.dumps({
             "tract_fips": nri.get("tract_fips"),
             "county": nri.get("county_name"),
@@ -128,6 +135,12 @@ def make_house_approved_functions(house_id: str) -> dict:
             if len(nearby) > 0:
                 lines.append(f"\n### Similar Active Listings in {city}")
                 lines.append(nearby.to_string(index=False))
+                try:
+                    emit_artifact(classify_dataframe(
+                        nearby, title=f"Similar active listings in {city}", presentation="table",
+                    ))
+                except Exception:
+                    pass
         if tract:
             county_comps = store.query("""
                 SELECT address, city, sold_price, sqft, sold_date,
@@ -143,6 +156,12 @@ def make_house_approved_functions(house_id: str) -> dict:
             if len(county_comps) > 0:
                 lines.append("\n### County-recorded Arm's-Length Sales (same tract)")
                 lines.append(county_comps.to_string(index=False))
+                try:
+                    emit_artifact(classify_dataframe(
+                        county_comps, title="County-recorded arm's-length sales (same tract)", presentation="table",
+                    ))
+                except Exception:
+                    pass
         return "\n".join(lines) if lines else "Insufficient data for price estimation."
 
     def get_nearby_sold_homes() -> str:
@@ -156,7 +175,12 @@ def make_house_approved_functions(house_id: str) -> dict:
             return "No sold homes found in this census tract yet."
         df = pd.DataFrame(sold[:10])
         cols = [c for c in ["address", "sold_price", "sqft", "beds", "baths", "sold_date", "arms_length_flag"] if c in df.columns]
-        return df[cols].to_string(index=False)
+        view = df[cols]
+        try:
+            emit_artifact(classify_dataframe(view, title="Nearby sold homes", presentation="table"))
+        except Exception:
+            pass
+        return view.to_string(index=False)
 
     def search_house_documents(query: str) -> str:
         """Search stored descriptions and documents for this house."""
@@ -168,7 +192,7 @@ def make_house_approved_functions(house_id: str) -> dict:
             for d in docs
         )
 
-    def query_database(request: str) -> str:
+    def query_database(request: str, presentation: str = "auto") -> str:
         """Run a read-only analytical query scoped to this house."""
         scoped_request = (
             f"{request}\n\nThis is House Chat for house_id={house_id!r}. "
@@ -177,6 +201,7 @@ def make_house_approved_functions(house_id: str) -> dict:
         return general_query_database.invoke({
             "request": scoped_request,
             "requirements": f"Keep the result scoped to house_id={house_id!r}.",
+            "presentation": presentation,
         })
 
     def get_commute_info() -> str:
@@ -336,9 +361,12 @@ APPROVED FUNCTIONS
    -> Search stored descriptions, inspection notes, and Redfin/Zillow
      text for this house.
 
-6. query_database(request: str)
+6. query_database(request: str, presentation: str = "auto")
     -> Run a read-only analytical query scoped to this house when the other
-        functions do not provide the requested computation.
+        functions do not provide the requested computation. presentation is
+        an OPTIONAL hint -- "map"/"chart"/"table" when the user's own words
+        ask to see the result that way, "auto" otherwise -- and the
+        application still decides the actual shape from the data.
 
 7. get_commute_info()
    -> Estimated commute from this house to the user\'s saved work location:
@@ -404,7 +432,10 @@ KEY RULES
   explicitly returned a non-NULL numeric value for that field.
 - Format prices with commas and dollar signs (e.g. $450,000).
 - When discussing NRI risk, explain what the scores mean in plain language.
-- Be concise and direct. Use markdown tables when comparing multiple values.
+- Be concise and direct. State the key figures in prose, in the order the
+  evidence gives them -- the application renders comparable results (sold
+  comps, hazard scores, similar listings) as their own table or chart
+  alongside your answer, so you do not need to reproduce one in markdown.
 
 Return only the user-facing answer.
 """
@@ -657,9 +688,12 @@ def run_house_chat(
 ) -> tuple:
     """
     Run one turn of house-specific chat using the Code Agent architecture.
-    Returns (response_text, updated_history).
+    Returns (response_text, updated_history, artifacts).
     history is a list of {"role": "user"|"assistant", "content": "..."}.
+    artifacts is a list of table/chart/map dicts (agents/artifacts.py) --
+    usually empty; see run_general_chat for the same contract.
     """
+    reset_artifacts()
     from observability import (
         start_house_chat,
         trace_span,
@@ -690,7 +724,7 @@ def run_house_chat(
             root_span, trace_id=trace_id, reply=blocked_reply,
             started_at=started_at, tool_call_count=0,
         )
-        return blocked_reply, updated_history
+        return blocked_reply, updated_history, []
 
     # 2. Build approved function set bound to this house_id
     approved_functions = make_house_approved_functions(house_id)
@@ -815,6 +849,8 @@ def run_house_chat(
             },
         ]
 
+        artifacts = collect_artifacts()
+
         end_house_chat(
             root_span, trace_id=trace_id, reply=reply,
             started_at=started_at, tool_call_count=len(all_calls),
@@ -826,7 +862,7 @@ def run_house_chat(
             reply_chars=len(reply),
             validation_changed=(reply != raw_reply),
         )
-        return reply, updated_history
+        return reply, updated_history, artifacts
 
     except Exception as exc:
         mark_span_error(root_span, exc)

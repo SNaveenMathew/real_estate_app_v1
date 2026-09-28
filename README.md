@@ -46,6 +46,7 @@ request text
 | Fallback SQL compilation | Deterministic (`_compile_sql_from_plan`) |
 | Final answer prose | LLM |
 | Reply-vs-evidence check & score bounding | Deterministic (`OutputGroundingGuardrail`) |
+| Presentation classification (table/chart/map) | Deterministic (`classify_dataframe`) |
 
 The split holds because every LLM call on this path — SQL generation,
 orchestration, and the final answer — runs through the same local, quantized
@@ -57,6 +58,17 @@ answer, so every "is this correct/safe" check is code, never a second model
 call. **See [`AGENT_ARCHITECTURE.md`](AGENT_ARCHITECTURE.md) for the full
 pipeline mechanics, every validation rule, and the reasoning behind where each
 line is drawn.**
+
+The same split extends one step further, into how a result is *shown*.
+`query_database` and a handful of other approved functions (`agents/
+artifacts.py`) hand back a `pandas.DataFrame` or small structured payload
+whose actual shape — not an LLM's opinion of it — deterministically decides
+whether the chat renders it as a table, a chart, or a map alongside the
+prose reply; the orchestrating model may pass an optional `presentation`
+hint read from the user's own phrasing ("show me on a map"), but a hint the
+data can't support is never forced into existence. See **[`AGENT_
+ARCHITECTURE.md` §10](AGENT_ARCHITECTURE.md#10-presentation-layer-tables-charts-and-maps)**
+for the full contract.
 
 ### Data-model retrieval
 
@@ -96,8 +108,8 @@ architecture; the SQL agent queries physical tables only.
 │  ├─ House markers + sidebar                                                │
 │  ├─ Layer control: None / Crime / NRI / Bike Lanes                         │
 │  ├─ Bike route planner (start/end inputs with local BikePGH route map)     │
-│  ├─ House Chat (per-property LangGraph agent)                              │
-│  └─ General Chat (cross-city LangGraph agent)                              │
+│  ├─ House Chat (per-property Code Agent)                                   │
+│  └─ General Chat (cross-city Code Agent)                                   │
 └──────────────────────────────┬─────────────────────────────────────────────┘
                                │ HTTP (FastAPI)
 ┌──────────────────────────────▼─────────────────────────────────────────────┐
@@ -838,10 +850,11 @@ api/
   map_layers.py       Map layer panel HTTP API (/api/layers/*)
 
 agents/
-  tools.py            LangChain tools (SQL, vector search, price estimation)
+  tools.py            LangChain tools (SQL, vector search, price estimation, bike routing)
   query_planner.py    Deterministic analytical query planning and semantic mappings
-  house_agent.py      Per-house ReAct agent (LangGraph)
-  general_agent.py    General ReAct agent (LangGraph)
+  house_agent.py      Per-house Code Agent
+  general_agent.py    General Code Agent
+  artifacts.py        Deterministic table/chart/map classifier + per-turn artifact bus (§10 of AGENT_ARCHITECTURE.md)
   response_validator.py  Post-hoc check that replies are grounded in real tool output
 
 db/
@@ -877,8 +890,8 @@ eval/
 
 static/
   index.html          Leaflet map + sidebar + chat UI
-  style.css            App styles, BikePGH route visuals, route planner UI
-  app.js              Frontend logic, layer toggles, bike route rendering
+  style.css            App styles, BikePGH route visuals, route planner UI, chat table/chart/map artifacts
+  app.js              Frontend logic, layer toggles, bike route rendering, chat artifact rendering (table/chart/map)
   data.html/.css/.js  The Data page: catalog map + dataset workbench
   commute.js          The Commute tab and the commute-minutes map layer
   layers.js           The Map Layers panel: builds the toggle list from /api/layers and renders every kind

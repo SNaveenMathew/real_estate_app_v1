@@ -356,6 +356,82 @@ input[type="text"] { border: 1px solid #ddd; border-radius: 6px; padding: 6px 8p
   text-shadow: 0 0 2px #fff, 0 0 2px #fff;
 }
 
+/* Chat artifacts: table / chart / map rendered from tool results
+   (agents/artifacts.py). Same "divider, not a card" treatment as
+   .bike-route-result above, since a chat turn can carry either kind. */
+.chat-artifact {
+  margin-top: 10px;
+  border-top: 1px solid #e5e7eb;
+  padding-top: 10px;
+}
+.chat-artifact-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #374151;
+  margin-bottom: 7px;
+}
+.chat-artifact-note {
+  margin-top: 6px;
+  font-size: 10px;
+  color: #6b7280;
+}
+
+.chat-table-scroll {
+  overflow-x: auto;
+  overflow-y: auto;
+  max-height: 320px;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+}
+.chat-table-artifact table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.chat-table-artifact thead th {
+  position: sticky;
+  top: 0;
+  background: #f9fafb;
+  text-align: left;
+  padding: 6px 10px;
+  color: #374151;
+  font-weight: 700;
+  border-bottom: 1px solid #e5e7eb;
+}
+.chat-table-artifact tbody td {
+  padding: 5px 10px;
+  border-bottom: 1px solid #f3f4f6;
+  color: #1f2937;
+}
+.chat-table-artifact tbody tr:last-child td { border-bottom: none; }
+.chat-table-artifact tbody tr:nth-child(even) { background: #fafafa; }
+.chat-table-empty { color: #9ca3af; }
+
+.chat-chart-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.chat-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 9px;
+  margin-top: 7px;
+  font-size: 10px;
+  color: #4b5563;
+}
+.chat-chart-legend span { display: inline-flex; align-items: center; gap: 3px; }
+.chat-chart-legend i { width: 15px; height: 7px; border-radius: 2px; display: inline-block; }
+
+.chat-map-artifact .chat-artifact-map {
+  height: 300px;
+  width: 100%;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid #dbe3ee;
+}
+
 /* Data model link (top bar) */
 .btn-data {
   display: inline-flex; align-items: center; gap: 6px; margin-right: 10px;

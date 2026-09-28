@@ -364,6 +364,13 @@ def _ensure_schema(conn: duckdb.DuckDBPyConnection):
             updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    try:
+        cols = [c[1] for c in conn.execute("PRAGMA table_info(app_settings)").fetchall()]
+        if "value_json" not in cols and "value" in cols:
+            conn.execute("ALTER TABLE app_settings ADD COLUMN value_json VARCHAR")
+            conn.execute("UPDATE app_settings SET value_json = value WHERE value_json IS NULL")
+    except Exception:
+        pass
 
     # Unified data-model catalog (tables, relationships, concepts, entity domains) plus the
     # workflow tables behind the Data page. Built-in rows are seeded here; see db/catalog_store.py.
