@@ -567,11 +567,14 @@ def _crime_incident_id(city: str, source_file: str, natural_id, row_pos: int) ->
     open-data crime exports, which are typically wholesale replacements rather
     than incremental diffs.
     """
-    has_natural = natural_id is not None and not (
-        isinstance(natural_id, float) and pd.isna(natural_id)
-    ) and str(natural_id).strip().lower() not in ("", "nan", "none")
+    natural_text = "" if natural_id is None or pd.isna(natural_id) else str(natural_id).strip()
+    has_natural = natural_text.lower() not in ("", "nan", "none")
     if has_natural:
-        key = f"{city}:{str(natural_id).strip()}"
+        if isinstance(natural_id, (int, np.integer)):
+            natural_text = str(int(natural_id))
+        elif isinstance(natural_id, (float, np.floating)) and np.isfinite(natural_id) and natural_id.is_integer():
+            natural_text = str(int(natural_id))
+        key = f"{city}:{natural_text}"
     else:
         key = f"{city}:{source_file}:row{row_pos}"
     return hashlib.md5(key.encode()).hexdigest()[:16]
@@ -711,7 +714,19 @@ def load_crime() -> int:
     if len(combined) != before:
         print(f"  Deduplicated {before - len(combined):,} row(s) with a repeated incident_id")
 
-    store.upsert_df("crime_incidents", combined)
+    cities = combined["city"].dropna().unique().tolist()
+    conn = store.get_conn()
+    placeholders = ", ".join("?" for _ in cities)
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        conn.execute(
+            f"DELETE FROM crime_incidents WHERE city IN ({placeholders})", cities
+        )
+        store.upsert_df("crime_incidents", combined)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
     print(f"  ✓ {len(combined):,} total crime incidents loaded "
           f"across {combined['city'].nunique()} cities")
     return len(combined)
