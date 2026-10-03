@@ -128,6 +128,8 @@ async def data_page():
 @app.get("/", response_class=HTMLResponse)
 async def root():
     html = Path("static/index.html").read_text(encoding="utf-8")
+    client_config = json.dumps({"cartoApiKey": settings.carto_api_key}).replace("</", "<\\/")
+    html = html.replace("</head>", f"<script>window.APP_CONFIG={client_config};</script>\n</head>", 1)
     # Replace any existing ?v=... or inject fresh version into static asset URLs
     import re
     html = re.sub(r'(/static/[^"\']+\.(?:js|css))(\?v=[^"\']*)?',

@@ -9,7 +9,13 @@ const state = {
 /* ── Map init ────────────────────────────────────────────────────────── */
 const map = L.map('map', { zoomControl: true }).setView([37.09, -95.71], 5);
 
-L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+function cartoTileUrl() {
+  const url = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
+  const apiKey = window.APP_CONFIG?.cartoApiKey;
+  return apiKey ? `${url}?key=${encodeURIComponent(apiKey)}` : url;
+}
+
+L.tileLayer(cartoTileUrl(), {
   attribution: '© OpenStreetMap contributors © CARTO',
   subdomains: 'abcd', maxZoom: 19,
 }).addTo(map);
@@ -777,7 +783,7 @@ function makeEmbeddedLeafletMap(container, center = [40.4406, -80.0018]) {
     attributionControl: true,
     scrollWheelZoom: false,
   }).setView(center, 13);
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+  L.tileLayer(cartoTileUrl(), {
     attribution: '© OpenStreetMap contributors © CARTO',
     subdomains: 'abcd',
     maxZoom: 19,

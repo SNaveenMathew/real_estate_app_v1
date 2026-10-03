@@ -158,6 +158,7 @@ class Settings(BaseSettings):
     map_default_lat: float = 37.0902
     map_default_lon: float = -95.7129
     map_default_zoom: int = 5
+    carto_api_key: str = ""
 
 
 settings = Settings()
