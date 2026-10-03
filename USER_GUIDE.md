@@ -133,7 +133,7 @@ layers, combination rules, and how approved datasets appear automatically, see t
 
 ![Map Layers panel showing that NRI and population map fills are unavailable without cached tract geometry](screenshots/09-nri-risk-choropleth.png)
 
-![Crime heatmap over a city, with a severity legend](screenshots/10-crime-heatmap.png)
+![Crime heatmap animation across Pittsburgh's available data years, with a constant density scale](screenshots/10-crime-heatmap.gif)
 
 ### Crime heatmap & year-by-year animation
 
