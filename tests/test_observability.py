@@ -6,6 +6,30 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 import observability
 
 
+def test_initialize_observability_preserves_phoenix_exporter(monkeypatch):
+    from phoenix import otel
+
+    class Provider:
+        def __init__(self):
+            self.replace_default_flags = []
+
+        def add_span_processor(self, processor, *, replace_default_processor=True):
+            self.replace_default_flags.append(replace_default_processor)
+
+        def get_tracer(self, *args):
+            return object()
+
+    provider = Provider()
+    monkeypatch.setattr(otel, "register", lambda **kwargs: provider)
+    monkeypatch.setattr(observability, "_tracer_provider", None)
+    monkeypatch.setattr(observability, "_tracer", None)
+    monkeypatch.setattr(observability, "_local_trace_exporter", None)
+
+    observability.initialize_observability()
+
+    assert provider.replace_default_flags == [False]
+
+
 @pytest.mark.parametrize(
     ("start_chat", "end_chat", "start_args", "chat_name"),
     [

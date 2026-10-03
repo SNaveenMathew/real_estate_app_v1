@@ -313,7 +313,10 @@ def initialize_observability() -> None:
             try:
                 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
                 _local_trace_exporter = EvaluationTraceExporter()
-                _tracer_provider.add_span_processor(SimpleSpanProcessor(_local_trace_exporter))
+                _tracer_provider.add_span_processor(
+                    SimpleSpanProcessor(_local_trace_exporter),
+                    replace_default_processor=False,
+                )
             except Exception:
                 _local_trace_exporter = None
                 logger.exception("Unable to install local evaluation trace exporter")
