@@ -70,6 +70,23 @@ def test_population_choropleth_serializes_missing_values_as_null(client, tracts_
     assert data["min"] == data["max"] == 4000
 
 
+def test_population_density_uses_equal_area_tract_area(client, tracts_gdf):
+    import geopandas as gpd
+    from services import map_layers as ml
+
+    response = client.get("/api/layers/census_tracts", params={**PGH, "measure": "population_density"})
+
+    assert response.status_code == 200
+    data = response.json()
+    feature = next(f for f in data["features"] if f["properties"]["tract_fips"] == "42003040100")
+    geometry = tracts_gdf.loc[tracts_gdf["tract_fips"] == "42003040100", "geometry"]
+    area_sq_mi = gpd.GeoSeries(geometry, crs="EPSG:4326").to_crs("EPSG:5070").area.iloc[0] / ml.SQUARE_METER_PER_SQUARE_MILE
+
+    assert feature["properties"]["value"] == pytest.approx(4000 / area_sq_mi)
+    assert data["measure_label"] == "Density"
+    assert data["measure_unit"] == "people/sq mi"
+
+
 def test_a_dataset_approved_through_the_data_page_is_immediately_servable_here(client, walk_dataset, tracts_gdf):
     """No restart, no code change: the same catalog change General/House Chat pick up immediately (see
     tests/test_agent_integration.py) also reaches the map layer API on the very next request."""

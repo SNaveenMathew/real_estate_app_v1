@@ -107,7 +107,10 @@ def test_nri_and_census_tracts_are_the_only_fill_layers_and_risk_score_ranks_fir
     assert {"tract_fips", "county_fips", "state_fips"} & cols == set()    # keys are never offered as a measure
     assert nri["measures"][0]["label"].lower().startswith("composite")   # the curated note, not a prettified name
     census = next(l for l in out["layers"] if l["name"] == "census_tracts")
-    assert census["measures"] == [{"column": "population", "label": "Census total population.", "unit": ""}]
+    assert census["measures"] == [
+        {"column": "population", "label": "Total", "unit": "people"},
+        {"column": "population_density", "label": "Density", "unit": "people/sq mi"},
+    ]
 
 
 def test_choropleth_reports_unavailable_without_tract_geometry(reference_data):

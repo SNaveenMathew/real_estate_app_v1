@@ -275,7 +275,8 @@ const MapLayers = (() => {
 
   function fillLegend(spec) {
     const cached = S.leaflet[spec.name] && S.leaflet[spec.name]._mlRange;
-    const label = (spec.measures.find(m => m.column === (S.measure[spec.name] || spec.default_measure)) || {}).label || spec.title;
+    const selected = spec.measures.find(m => m.column === (S.measure[spec.name] || spec.default_measure));
+    const label = selected ? `${selected.label}${selected.unit ? ` (${selected.unit})` : ''}` : spec.title;
     const gradient = `linear-gradient(90deg, ${RAMP.join(',')})`;
     return el('div', {},
       el('div', { class: 'ml-legend-title' }, label),
@@ -456,7 +457,7 @@ const MapLayers = (() => {
     if (data.warning) S.error = data.warning;
     const layer = L.geoJSON(data, {
       style: (f) => ({ color: '#fff', weight: 0.6, fillOpacity: 0.55, fillColor: numericColor(f.properties.value, range[0], range[1]) }),
-      onEachFeature: (f, l) => l.bindTooltip(`${data.measure_label || data.measure}: ${fmtNum(f.properties.value)}`),
+      onEachFeature: (f, l) => l.bindTooltip(`${data.measure_label || data.measure}${data.measure_unit ? ` (${data.measure_unit})` : ''}: ${fmtNum(f.properties.value)}`),
     });
     layer._mlRange = range;
     return layer;

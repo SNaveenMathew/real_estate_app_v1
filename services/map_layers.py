@@ -71,6 +71,7 @@ MAX_LINE_FEATURES = 5000
 MAX_POLYGON_FEATURES = 1500
 MAX_TRACTS = 2500
 SIMPLIFY_TOLERANCE_DEG = 0.0004    # ~40m — trims polygon vertex count without visible distortion at map scale
+SQUARE_METER_PER_SQUARE_MILE = 2_589_988.110336
 
 TITLE_OVERRIDES = {   # cosmetic only; every one of these is also reachable through the generic prettifier
     "houses": "Houses", "crime_incidents": "Crime", "sold_homes": "Sold Homes",
@@ -294,6 +295,11 @@ def _classify(table: str, meta) -> dict | None:
         measures = numeric_columns(table, hidden)
         if not measures:
             return None    # nothing to color a choropleth by
+        if table == "census_tracts" and any(m["column"] == "population" for m in measures):
+            measures = [
+                {"column": "population", "label": "Total", "unit": "people"},
+                {"column": "population_density", "label": "Density", "unit": "people/sq mi"},
+            ]
         return {"kind": "choropleth", "group": "fill", "row_count": schema._row_count(table),
                 "measures": measures, "default_measure": measures[0]["column"],
                 "anchor": join["anchor"], "available": available, "reason": None if available else reason}
@@ -548,6 +554,8 @@ def get_tract_choropleth(table: str, measure: str | None, west: float, south: fl
     if measure is not None and measure not in valid:
         raise LayerError(f"'{measure}' is not a valid measure for '{table}'.")
     measure = measure if measure is not None else spec["default_measure"]
+    density_measure = table == "census_tracts" and measure == "population_density"
+    query_measure = "population" if density_measure else measure
 
     tracts_gdf = geo_utils._load_tracts_gdf()
     if tracts_gdf is None or tracts_gdf.empty:
@@ -570,16 +578,19 @@ def get_tract_choropleth(table: str, measure: str | None, west: float, south: fl
     fips_list = [str(f) for f in subset["tract_fips"].tolist()]
     placeholders = ",".join("?" for _ in fips_list)
     if table == join["anchor"]:
-        attrs = store.query(f'SELECT tract_fips, {_q(measure)} AS value FROM {_q(table)} '
+        attrs = store.query(f'SELECT tract_fips, {_q(query_measure)} AS value FROM {_q(table)} '
                             f"WHERE tract_fips IN ({placeholders})", fips_list)
     else:
         attrs = store.query(
-            f'SELECT {join["anchor"]}.tract_fips AS tract_fips, AVG({_q(table)}.{_q(measure)}) AS value '
+            f'SELECT {join["anchor"]}.tract_fips AS tract_fips, AVG({_q(table)}.{_q(query_measure)}) AS value '
             f'FROM {_q(table)} {join["join_sql"]} '
             f'WHERE {join["anchor"]}.tract_fips IN ({placeholders}) '
             f'GROUP BY {join["anchor"]}.tract_fips', fips_list)
 
     merged = subset.merge(attrs, on="tract_fips", how="left")
+    if density_measure:
+        area_sq_mi = merged.to_crs("EPSG:5070").geometry.area / SQUARE_METER_PER_SQUARE_MILE
+        merged["value"] = pd.to_numeric(merged["value"], errors="coerce") / area_sq_mi
     merged["geometry"] = merged["geometry"].simplify(SIMPLIFY_TOLERANCE_DEG, preserve_topology=True)
     merged = gpd.GeoDataFrame(merged, geometry="geometry", crs="EPSG:4326")
     merged["value"] = merged["value"].astype(object)
@@ -589,7 +600,9 @@ def get_tract_choropleth(table: str, measure: str | None, west: float, south: fl
     result["truncated"] = truncated
     result["tract_count"] = len(merged)
     result["measure"] = measure
-    result["measure_label"] = next((m["label"] for m in spec["measures"] if m["column"] == measure), measure)
+    selected_measure = next((m for m in spec["measures"] if m["column"] == measure), None)
+    result["measure_label"] = selected_measure["label"] if selected_measure else measure
+    result["measure_unit"] = selected_measure.get("unit", "") if selected_measure else ""
     vals = [v for v in merged["value"].tolist() if v is not None]
     result["min"], result["max"] = (min(vals), max(vals)) if vals else (None, None)
     if attrs.empty:
