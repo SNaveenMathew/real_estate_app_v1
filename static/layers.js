@@ -22,6 +22,7 @@ const MapLayers = (() => {
     bikeable_sidewalks: 'Bikeable sidewalk', sharrows: 'Sharrows', cautionary_bike_route: 'Cautionary route',
     on_street_bike_route: 'On-street route' };
   const HEAT_GRADIENT = { 0.2: '#3b82f6', 0.4: '#eab308', 0.65: '#f97316', 1.0: '#ef4444' };
+  const CRIME_HEAT_GRADIENT = { 0.06: '#2563eb', 0.18: '#eab308', 0.3: '#f97316', 0.52: '#ef4444', 1.0: '#b91c1c' };
   const RAMP = ['#3b82f6', '#eab308', '#f97316', '#ef4444'];   // the same 4-stop feel as the heat gradient, for choropleth/polygon fills
 
   function el(tag, props, ...kids) {
@@ -284,7 +285,8 @@ const MapLayers = (() => {
   }
 
   function heatLegend(spec) {
-    const gradient = `linear-gradient(90deg, ${Object.entries(HEAT_GRADIENT).map(([p, c]) => `${c} ${p * 100}%`).join(',')})`;
+    const colors = spec.name === 'crime_incidents' ? CRIME_HEAT_GRADIENT : HEAT_GRADIENT;
+    const gradient = `linear-gradient(90deg, ${Object.entries(colors).map(([p, c]) => `${c} ${p * 100}%`).join(',')})`;
     const selectedYear = S.year[spec.name];
     const yearLabel = selectedYear != null ? ` (${selectedYear})` : '';
     const scaleNote = S.animating[spec.name] ? ' — scale locked' : '';
@@ -368,8 +370,10 @@ const MapLayers = (() => {
     } catch (e) {
       if (seq === S.fetchSeq[name]) S.error = e.message;
     } finally {
-      S.loading.delete(name);
-      if (seq === S.fetchSeq[name]) render();
+      if (seq === S.fetchSeq[name]) {
+        S.loading.delete(name);
+        render();
+      }
     }
   }
 
@@ -381,7 +385,7 @@ const MapLayers = (() => {
 
   /* ------------------------------------------------------------------ mounting each kind onto Leaflet */
   function mount(name, spec, data) {
-    removeLeaflet(name);
+    if (S.leaflet[name]) map.removeLayer(S.leaflet[name]);
     let layer;
     if (spec.kind === 'heat') layer = mountHeat(name, data);
     else if (spec.kind === 'points') layer = mountPoints(spec, data);
@@ -401,8 +405,10 @@ const MapLayers = (() => {
       S.animateMax[name] = data.max_year_weight;
     }
     const effectiveMax = (S.animating[name] && S.animateMax[name]) ? S.animateMax[name] : Math.max(data.max_weight, 1);
+    const gradient = name === 'crime_incidents' ? CRIME_HEAT_GRADIENT : HEAT_GRADIENT;
     return L.heatLayer(data.points.map(p => [p[0], p[1], p[2]]), {
-      radius: 18, blur: 22, maxZoom: map.getZoom(), max: effectiveMax, gradient: HEAT_GRADIENT,
+      radius: 18, blur: 22, maxZoom: map.getZoom(), max: effectiveMax,
+      minOpacity: name === 'crime_incidents' ? 0.35 : 0.05, gradient,
     });
   }
 
