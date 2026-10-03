@@ -56,6 +56,20 @@ def test_choropleth_measure_selection_over_http(client, tracts_gdf):
     assert bad.status_code == 422
 
 
+def test_population_choropleth_serializes_missing_values_as_null(client, tracts_gdf):
+    import db.duckdb_store as store
+    store.get_conn().execute(
+        "UPDATE census_tracts SET population = NULL WHERE tract_fips = '42003040100'")
+
+    response = client.get("/api/layers/census_tracts", params={**PGH, "measure": "population"})
+
+    assert response.status_code == 200
+    data = response.json()
+    missing = next(f for f in data["features"] if f["properties"]["tract_fips"] == "42003040100")
+    assert missing["properties"]["value"] is None
+    assert data["min"] == data["max"] == 4000
+
+
 def test_a_dataset_approved_through_the_data_page_is_immediately_servable_here(client, walk_dataset, tracts_gdf):
     """No restart, no code change: the same catalog change General/House Chat pick up immediately (see
     tests/test_agent_integration.py) also reaches the map layer API on the very next request."""

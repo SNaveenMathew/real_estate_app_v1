@@ -582,7 +582,8 @@ def get_tract_choropleth(table: str, measure: str | None, west: float, south: fl
     merged = subset.merge(attrs, on="tract_fips", how="left")
     merged["geometry"] = merged["geometry"].simplify(SIMPLIFY_TOLERANCE_DEG, preserve_topology=True)
     merged = gpd.GeoDataFrame(merged, geometry="geometry", crs="EPSG:4326")
-    merged["value"] = merged["value"].where(pd.notnull(merged["value"]), None)
+    merged["value"] = merged["value"].astype(object)
+    merged.loc[pd.isna(merged["value"]), "value"] = None
 
     result = json.loads(merged[["tract_fips", "value", "geometry"]].to_json())
     result["truncated"] = truncated
