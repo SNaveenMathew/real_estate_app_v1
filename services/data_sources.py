@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import filecmp
 import io
 import re
 import shutil
@@ -781,7 +782,13 @@ def _place_single(source: DataSource, tmp_path: Path, orig_filename: str
     is every file this call wrote, so a caller can clean all of them up on
     failure (matters for NRI, which writes a whole shapefile's worth)."""
     source.dest_dir.mkdir(parents=True, exist_ok=True)
-    backups = _backup_aside(_single_source_matches(source))
+    matches = _single_source_matches(source)
+    if (source.key == "census_tracts" and len(matches) == 1
+            and matches[0].stat().st_size == tmp_path.stat().st_size
+            and filecmp.cmp(matches[0], tmp_path, shallow=False)):
+        return matches[0], {}, []
+
+    backups = _backup_aside(matches)
     try:
         if source.key == "nri":
             shp_path, written = _extract_nri_zip(tmp_path, source.dest_dir)
@@ -932,7 +939,7 @@ def refresh_source(key: str, tmp_path: Path, orig_filename: str) -> dict:
     try:
         if source.placement == "single":
             dest, backups, new_files = _place_single(source, tmp_path, orig_filename)
-            saved_files = [p.name for p in new_files]
+            saved_files = [p.name for p in new_files] or [dest.name]
             dest_name = None
         elif source.key == "bike":
             new_files, backups = _extract_bike_zip(tmp_path, source.dest_dir)

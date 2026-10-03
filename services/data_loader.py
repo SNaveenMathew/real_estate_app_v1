@@ -816,15 +816,23 @@ def load_census_tracts() -> int:
     name_col = next((c for c in data.columns if c.upper() == "NAME"), None)
 
     out = pd.DataFrame({
-        "geo_id":     data[geo_col],
         "tract_fips": data[geo_col].str.replace("1400000US", "", regex=False).str.zfill(11),
+        "geo_id":     data[geo_col],
         "name":       data[name_col] if name_col else None,
         "population": pd.to_numeric(data[pop_col], errors="coerce").astype("Int64"),
     })
     out = out.dropna(subset=["tract_fips"])
     out = out.drop_duplicates(subset=["tract_fips"])
 
-    store.upsert_df("census_tracts", out)
+    conn = store.get_conn()
+    conn.execute("BEGIN")
+    try:
+        conn.execute("DELETE FROM census_tracts")
+        store.upsert_df("census_tracts", out)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
     print(f"  ✓ Loaded {len(out):,} census tract populations")
     return len(out)
 

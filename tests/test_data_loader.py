@@ -72,3 +72,42 @@ def test_load_crime_replaces_stale_rows_for_loaded_cities(tmp_path, monkeypatch)
     assert conn.execute("SELECT count(*) FROM crime_incidents WHERE city = 'pittsburgh'").fetchone()[0] == 1
     assert conn.execute("SELECT count(*) FROM crime_incidents WHERE city = 'boston'").fetchone()[0] == 1
     conn.close()
+
+
+def test_load_census_tracts_stores_join_key_in_schema_column_and_replaces_old_rows(tmp_path, monkeypatch):
+    census_dir = tmp_path / "census"
+    census_dir.mkdir()
+    census_csv = census_dir / "DECENNIALPL2020.P1-Data.csv"
+    census_csv.write_text(
+        "GEO_ID,NAME,P1_001N\n"
+        "Geography,Geographic Area Name,!!Total:\n"
+        "1400000US01001020100,Census Tract 201,1775\n"
+        "1400000US42003140100,Census Tract 1401,3456\n",
+        encoding="utf-8",
+    )
+
+    conn = duckdb.connect(":memory:")
+    conn.execute("""
+        CREATE TABLE census_tracts (
+            tract_fips VARCHAR PRIMARY KEY,
+            geo_id VARCHAR,
+            name VARCHAR,
+            population INTEGER
+        )
+    """)
+    conn.execute(
+        "INSERT INTO census_tracts VALUES (?, ?, ?, ?)",
+        ["1400000US01001020100", "01001020100", "Old swapped row", 1775],
+    )
+    monkeypatch.setattr(data_loader.settings, "census_tract_csv", census_csv)
+    monkeypatch.setattr(data_loader.store, "get_conn", lambda: conn)
+
+    assert data_loader.load_census_tracts() == 2
+    rows = conn.execute(
+        "SELECT tract_fips, geo_id, population FROM census_tracts ORDER BY tract_fips"
+    ).fetchall()
+    assert rows == [
+        ("01001020100", "1400000US01001020100", 1775),
+        ("42003140100", "1400000US42003140100", 3456),
+    ]
+    conn.close()

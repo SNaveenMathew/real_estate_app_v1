@@ -106,6 +106,43 @@ def test_census_tracts_source_refresh_rejects_bad_replacement_without_losing_dat
     assert _source_row_count(client, "census_tracts") == rows_after_good   # nothing lost
 
 
+def test_uploading_existing_census_file_does_not_rename_the_open_source(client, tmp_path, monkeypatch):
+    from dataclasses import replace
+    from pathlib import Path
+    from config import settings
+    from services import data_sources
+
+    census_dir = tmp_path / "census"
+    census_dir.mkdir()
+    canonical = census_dir / "DECENNIALPL2020.P1-Data.csv"
+    csv_bytes = (
+        "GEO_ID,NAME,P1_001N\n"
+        "1400000US42003140100,Test tract,3456\n"
+    ).encode()
+    canonical.write_bytes(csv_bytes)
+    monkeypatch.setattr(settings, "census_tract_csv", canonical)
+    monkeypatch.setattr(settings, "census_msa_csv", census_dir / "DECENNIALPL2020.P1-msa.csv")
+    monkeypatch.setattr(settings, "cbsa_xlsx", census_dir / "list1.xlsx")
+    monkeypatch.setitem(data_sources.REGISTRY, "census_tracts",
+                        replace(data_sources.REGISTRY["census_tracts"], dest_dir=census_dir))
+
+    original_rename = Path.rename
+
+    def fail_if_source_is_renamed(path, target):
+        if path == canonical:
+            raise PermissionError("simulated browser upload handle")
+        return original_rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", fail_if_source_is_renamed)
+    response = client.post("/api/onboarding/datasets",
+                           files={"file": (canonical.name, csv_bytes, "text/csv")})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["matched_source"] == "census_tracts"
+    assert canonical.read_bytes() == csv_bytes
+    assert _source_row_count(client, "census_tracts") >= 1
+
+
 def test_nri_source_refresh_rejects_corrupt_shapefile_without_losing_data(client, tmp_path, monkeypatch):
     """Rollback coverage for the shapefile-zip single-file source (Copilot review gap).
     Exercises the "precheck passes structurally (a .shp is present), the real read fails"
