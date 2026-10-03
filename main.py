@@ -199,7 +199,14 @@ async def house_chat(house_id: str, req: ChatRequest):
     if auto_saved and "thank" not in reply.lower()[:50]:
         reply = ("Thank you for the property description — it has been saved. " + reply)
 
-    return {"reply": reply, "history": updated_history, "auto_saved": auto_saved, "artifacts": artifacts}
+    trace_url = updated_history[-1].get("trace_url") if updated_history else None
+    return {
+        "reply": reply,
+        "history": updated_history,
+        "auto_saved": auto_saved,
+        "artifacts": artifacts,
+        "trace_url": trace_url,
+    }
 
 
 @app.post("/api/chat")

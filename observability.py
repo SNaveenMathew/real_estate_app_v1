@@ -470,9 +470,33 @@ def start_general_chat(message: str, session_id: str | None, history_length: int
     return context, span, get_trace_id(span), get_trace_url(get_trace_id(span))
 
 
+def _finish_root_span_context(
+    root_span: Any,
+    root_context: Any | None,
+    error: BaseException | None,
+    chat_type: str,
+) -> None:
+    if root_context is None:
+        if root_span is not None:
+            try:
+                root_span.end()
+            except Exception:
+                logger.debug("Unable to end Phoenix %s span", chat_type, exc_info=True)
+        return
+
+    try:
+        if error is None:
+            root_context.__exit__(None, None, None)
+        else:
+            root_context.__exit__(type(error), error, error.__traceback__)
+    except Exception:
+        logger.debug("Unable to close Phoenix %s span context", chat_type, exc_info=True)
+
+
 def end_general_chat(
-    root_span,
+    root_span: Any,
     *,
+    root_context: Any | None = None,
     trace_id: str | None = None,
     reply: str | None = None,
     started_at: float | None = None,
@@ -499,6 +523,7 @@ def end_general_chat(
                 mark_span_error(root_span, error)
         except Exception:
             logger.debug("Unable to finalize Phoenix General Chat span", exc_info=True)
+    _finish_root_span_context(root_span, root_context, error, "General Chat")
     if started_at is not None:
         if error is None:
             GENERAL_CHAT_REQUESTS.inc()
@@ -552,8 +577,9 @@ def start_house_chat(message: str, house_id: str, history_length: int):
 
 
 def end_house_chat(
-    root_span,
+    root_span: Any,
     *,
+    root_context: Any | None = None,
     trace_id: str | None = None,
     reply: str | None = None,
     started_at: float | None = None,
@@ -575,6 +601,7 @@ def end_house_chat(
                 mark_span_error(root_span, error)
         except Exception:
             logger.debug("Unable to finalize Phoenix House Chat span", exc_info=True)
+    _finish_root_span_context(root_span, root_context, error, "House Chat")
     if started_at is not None:
         if error is None:
             HOUSE_CHAT_REQUESTS.inc()

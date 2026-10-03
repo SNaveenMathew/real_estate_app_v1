@@ -707,10 +707,23 @@ def run_house_chat(
     from services.guardrails import GuardrailManager, OutputGroundingGuardrail
 
     started_at = perf_counter()
-    _, root_span, trace_id, trace_url = start_house_chat(message, house_id, len(history or []))
+    root_context, root_span, trace_id, trace_url = start_house_chat(message, house_id, len(history or []))
 
     # 1. Input Guardrail
-    input_guard = GuardrailManager.inspect_turn_input(message)
+    try:
+        input_guard = GuardrailManager.inspect_turn_input(message)
+    except Exception as exc:
+        mark_span_error(root_span, exc)
+        end_house_chat(
+            root_span,
+            root_context=root_context,
+            trace_id=trace_id,
+            started_at=started_at,
+            error=exc,
+        )
+        record_house_chat_error(perf_counter() - started_at)
+        raise
+
     if not input_guard.passed:
         blocked_reply = (
             "I'm sorry, but I cannot process this request because it violates "
@@ -718,10 +731,15 @@ def run_house_chat(
         )
         updated_history = list(history or []) + [
             {"role": "user", "content": message},
-            {"role": "assistant", "content": blocked_reply},
+            {
+                "role": "assistant",
+                "content": blocked_reply,
+                "trace_id": trace_id,
+                "trace_url": trace_url,
+            },
         ]
         end_house_chat(
-            root_span, trace_id=trace_id, reply=blocked_reply,
+            root_span, root_context=root_context, trace_id=trace_id, reply=blocked_reply,
             started_at=started_at, tool_call_count=0,
         )
         return blocked_reply, updated_history, []
@@ -852,7 +870,7 @@ def run_house_chat(
         artifacts = collect_artifacts()
 
         end_house_chat(
-            root_span, trace_id=trace_id, reply=reply,
+            root_span, root_context=root_context, trace_id=trace_id, reply=reply,
             started_at=started_at, tool_call_count=len(all_calls),
         )
         record_house_chat_success(
@@ -867,7 +885,7 @@ def run_house_chat(
     except Exception as exc:
         mark_span_error(root_span, exc)
         end_house_chat(
-            root_span, trace_id=trace_id, reply=None,
+            root_span, root_context=root_context, trace_id=trace_id, reply=None,
             started_at=started_at, tool_call_count=len(all_calls), error=exc,
         )
         record_house_chat_error(perf_counter() - started_at)

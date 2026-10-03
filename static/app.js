@@ -663,7 +663,7 @@ async function sendHouseMessage() {
     });
     const data = await resp.json();
     typing.remove();
-    const assistantMsg = appendMsg('house', 'assistant', data.reply);
+    const assistantMsg = appendMsg('house', 'assistant', data.reply, data.trace_url || null);
     renderArtifactsInChat(assistantMsg, data.artifacts);
     state.houseChatHistory[state.selectedHouseId] = data.history;
 

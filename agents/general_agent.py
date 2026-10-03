@@ -592,10 +592,23 @@ def run_general_chat(
     )
 
     started_at = perf_counter()
-    _, root_span, trace_id, trace_url = start_general_chat(message, session_id, len(history or []))
+    root_context, root_span, trace_id, trace_url = start_general_chat(message, session_id, len(history or []))
 
     from services.guardrails import GuardrailManager
-    input_guard = GuardrailManager.inspect_turn_input(message)
+    try:
+        input_guard = GuardrailManager.inspect_turn_input(message)
+    except Exception as exc:
+        mark_span_error(root_span, exc)
+        end_general_chat(
+            root_span,
+            root_context=root_context,
+            trace_id=trace_id,
+            started_at=started_at,
+            error=exc,
+        )
+        record_general_chat_error(perf_counter() - started_at)
+        raise
+
     if not input_guard.passed:
         blocked_reply = (
             "I'm sorry, but I cannot process this request because it violates "
@@ -603,10 +616,16 @@ def run_general_chat(
         )
         updated_history = list(history or []) + [
             {"role": "user", "content": message},
-            {"role": "assistant", "content": blocked_reply},
+            {
+                "role": "assistant",
+                "content": blocked_reply,
+                "trace_id": trace_id,
+                "trace_url": trace_url,
+            },
         ]
         end_general_chat(
             root_span,
+            root_context=root_context,
             trace_id=trace_id,
             reply=blocked_reply,
             started_at=started_at,
@@ -744,6 +763,7 @@ def run_general_chat(
 
         end_general_chat(
             root_span,
+            root_context=root_context,
             trace_id=trace_id,
             reply=reply,
             started_at=started_at,
@@ -768,6 +788,7 @@ def run_general_chat(
         mark_span_error(root_span, exc)
         end_general_chat(
             root_span,
+            root_context=root_context,
             trace_id=trace_id,
             reply=None,
             started_at=started_at,
