@@ -800,6 +800,39 @@ def query_database(
     still renders as a chart or table, never a fabricated map.
     """
     structured_plan = build_query_plan(request)
+    if "census_tract_population_density" in structured_plan.semantic_keys:
+        msa_names = [
+            entity["value"] for entity in structured_plan.resolved_entities
+            if entity["entity_type"] == "MSA"
+        ]
+        if not msa_names:
+            return (
+                "[GENERATED SQL]\nDerived tract-area aggregation\n[RESULT]\n"
+                "Population density requires a named metropolitan area that matches the Census MSA catalog."
+            )
+        try:
+            from services import map_layers
+
+            with trace_span("population_density_aggregation", attributes={"population_density.msa_count": len(msa_names)}) as span:
+                try:
+                    frame = map_layers.get_msa_population_density(msa_names, request=request)
+                    if span is not None:
+                        set_span_output(span, frame.to_dict(orient="records"), mime_type="application/json")
+                except Exception as exc:
+                    mark_span_error(span, exc)
+                    raise
+            try:
+                emit_artifact(classify_dataframe(frame, request=request, presentation=presentation))
+            except Exception:
+                pass
+            result = (
+                "Density is total tract population divided by total tract polygon area in square miles; "
+                "it is not the average of tract densities.\n" + frame.to_string(index=False)
+            )
+        except Exception as exc:
+            result = f"Code Agent error: {exc}"
+        return f"[GENERATED SQL]\nDerived tract-area aggregation\n[RESULT]\n{result}"
+
     try:
         sql, result = run_code_query(request, presentation=presentation)
     except Exception as exc:

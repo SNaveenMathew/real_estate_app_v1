@@ -343,6 +343,58 @@ def test_get_tract_choropleth_direct_and_joined(walk_dataset, tracts_gdf):
         assert f["properties"]["value"] == pytest.approx(expected)
 
 
+def test_msa_population_density_uses_total_population_over_total_land_area(reference_data, monkeypatch):
+    import geopandas as gpd
+    from shapely.geometry import box
+    from services import geo_utils
+
+    tracts = gpd.GeoDataFrame(
+        {"tract_fips": ["42003040100", "42003050100", "18097010100"]},
+        geometry=[
+            box(-80.01, 40.43, -79.99, 40.45),
+            box(-79.99, 40.43, -79.95, 40.45),
+            box(-86.20, 39.70, -86.17, 39.72),
+        ],
+        crs="EPSG:4326",
+    )
+    monkeypatch.setattr(geo_utils, "_load_tracts_gdf", lambda: tracts)
+    reference_data.execute("INSERT INTO census_tracts VALUES ('18097010100', '1400000US18097010100', 'Marion', 2000)")
+    reference_data.executemany(
+        "INSERT INTO census_msa VALUES (?, NULL, ?, NULL)",
+        [("38300", "Pittsburgh, PA Metro Area")],
+    )
+    reference_data.executemany(
+        "INSERT INTO cbsa_counties VALUES (?, ?, 'Metro', ?, ?, ?, ?)",
+        [
+            ("38300", "Pittsburgh, PA Metro Area", "42", "003", "Allegheny", "Pennsylvania"),
+            ("26900", "Indianapolis, IN Metro Area", "18", "097", "Marion", "Indiana"),
+        ],
+    )
+
+    names = ["Pittsburgh, PA Metro Area"]
+    request = "Compare the total population density (sum(population)/sum(land area)) of Indianapolis vs Pittsburgh"
+    result = ml.get_msa_population_density(names, request=request)
+    pittsburgh_area_sq_mi = tracts.iloc[:2].to_crs("EPSG:5070").geometry.area.sum() / ml.SQUARE_METER_PER_SQUARE_MILE
+    indianapolis_area_sq_mi = tracts.iloc[2:].to_crs("EPSG:5070").geometry.area.sum() / ml.SQUARE_METER_PER_SQUARE_MILE
+
+    assert result["msa_name"].tolist() == ["Indianapolis, IN Metro Area", "Pittsburgh, PA Metro Area"]
+    assert result.iloc[0]["population"] == 2000
+    assert result.iloc[0]["land_area_sq_mi"] == pytest.approx(indianapolis_area_sq_mi)
+    assert result.iloc[0]["population_density"] == pytest.approx(2000 / indianapolis_area_sq_mi)
+    assert result.iloc[1]["population"] == 8000
+    assert result.iloc[1]["land_area_sq_mi"] == pytest.approx(pittsburgh_area_sq_mi)
+    assert result.iloc[1]["population_density"] == pytest.approx(8000 / pittsburgh_area_sq_mi)
+
+    from agents.tools import query_database
+    response = query_database.invoke({
+        "request": request
+    })
+    assert "Pittsburgh, PA Metro Area" in response
+    assert "Indianapolis, IN Metro Area" in response
+    assert "population_density" in response
+    assert "Code Agent error:" not in response
+
+
 def test_get_tract_choropleth_measure_validation_and_missing_geometry(reference_data, tracts_gdf):
     with pytest.raises(ml.LayerError):
         ml.get_tract_choropleth("nri_tracts", "not_a_column", *PGH_BBOX)

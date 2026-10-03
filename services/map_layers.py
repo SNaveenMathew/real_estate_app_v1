@@ -537,6 +537,104 @@ def _get_vector_features(table: str, west: float, south: float, east: float, nor
     return {"type": "FeatureCollection", "features": features, "feature_count": len(features), "truncated": truncated}
 
 
+def get_msa_population_density(msa_names: list[str], request: str = "") -> pd.DataFrame:
+    """Calculate population divided by total tract area for each named MSA."""
+    columns = ["msa_name", "population", "land_area_sq_mi", "population_density"]
+    resolved_names = list(dict.fromkeys(name.strip() for name in msa_names if name and name.strip()))
+    request_normalized = re.sub(r"[^a-z0-9]+", " ", request.lower()).strip()
+    resolved_normalized = {
+        re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+        for name in resolved_names
+    }
+    titles = store.query(
+        "SELECT DISTINCT cbsa_title FROM cbsa_counties WHERE cbsa_title IS NOT NULL ORDER BY cbsa_title"
+    )
+    matches = []
+    exact_cities = set()
+    fallback_matches = {}
+    for title in titles["cbsa_title"].astype(str):
+        normalized_title = re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
+        city = title.split(",", 1)[0].split("-", 1)[0].strip()
+        normalized_city = re.sub(r"[^a-z0-9]+", " ", city.lower()).strip()
+        city_match = re.search(rf"(?<!\w){re.escape(normalized_city)}(?!\w)", request_normalized) if normalized_city else None
+        if normalized_title in resolved_normalized:
+            exact_cities.add(normalized_city)
+            position = city_match.start() if city_match else len(request_normalized) + resolved_names.index(next(
+                name for name in resolved_names
+                if re.sub(r"[^a-z0-9]+", " ", name.lower()).strip() == normalized_title
+            ))
+            matches.append((position, title))
+        elif city_match:
+            fallback_matches.setdefault(normalized_city, []).append((city_match.start(), title))
+    for city, candidates in fallback_matches.items():
+        if city in exact_cities:
+            continue
+        if len(candidates) > 1:
+            raise LayerError(f"Multiple CBSA metros match '{city}'; specify a state or metro name.")
+        matches.extend(candidates)
+    names = [title for _, title in sorted(matches)]
+    if not names:
+        raise LayerError("No named CBSA metro matches the population-density request.")
+
+    placeholders = ",".join("?" for _ in names)
+    membership = store.query(
+        f"""
+        SELECT DISTINCT cb.cbsa_title AS msa_name,
+               cb.state_fips || cb.county_fips AS county_fips,
+               ct.tract_fips, ct.population
+        FROM cbsa_counties cb
+        LEFT JOIN census_tracts ct ON LEFT(ct.tract_fips, 5) = cb.state_fips || cb.county_fips
+        WHERE cb.cbsa_title IN ({placeholders})
+        """,
+        names,
+    )
+    found = set(membership["msa_name"].dropna().astype(str)) if not membership.empty else set()
+    missing_names = [name for name in names if name not in found]
+    if missing_names:
+        raise LayerError("No CBSA county/tract population data found for: " + ", ".join(missing_names))
+
+    tracts_gdf = geo_utils._load_tracts_gdf()
+    if tracts_gdf is None or tracts_gdf.empty:
+        _, reason = _geometry_status()
+        raise LayerError("Tract geometry is required for population density. " + reason)
+
+    geometries = tracts_gdf[["tract_fips", "geometry"]].copy()
+    geometries["tract_fips"] = geometries["tract_fips"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(11)
+    geometries = geometries.dropna(subset=["geometry"]).drop_duplicates("tract_fips")
+
+    rows = []
+    for name in names:
+        msa = membership[membership["msa_name"] == name]
+        counties = set(msa["county_fips"].dropna().astype(str))
+        msa_geometries = geometries[geometries["tract_fips"].str[:5].isin(counties)]
+        if msa_geometries.empty:
+            raise LayerError(f"No tract geometry found for {name}.")
+
+        msa_population = msa.dropna(subset=["tract_fips"])[["tract_fips", "population"]].copy()
+        msa_population["tract_fips"] = msa_population["tract_fips"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(11)
+        msa_population = msa_population.drop_duplicates("tract_fips")
+        missing_geometry = set(msa_population["tract_fips"]) - set(msa_geometries["tract_fips"])
+        if missing_geometry:
+            raise LayerError(f"Tract geometry is missing for {len(missing_geometry)} Census tract(s) in {name}.")
+        joined = msa_geometries.merge(msa_population, on="tract_fips", how="left")
+        if joined["population"].isna().any():
+            count = int(joined["population"].isna().sum())
+            raise LayerError(f"Census population is missing for {count} tract(s) in {name}.")
+
+        land_area_sq_mi = joined.to_crs("EPSG:5070").geometry.area.sum() / SQUARE_METER_PER_SQUARE_MILE
+        population = pd.to_numeric(joined["population"], errors="coerce").sum()
+        if not land_area_sq_mi or pd.isna(population):
+            raise LayerError(f"Population density could not be calculated for {name}.")
+        rows.append({
+            "msa_name": name,
+            "population": int(population),
+            "land_area_sq_mi": land_area_sq_mi,
+            "population_density": population / land_area_sq_mi,
+        })
+
+    return pd.DataFrame(rows, columns=columns)
+
+
 def get_tract_choropleth(table: str, measure: str | None, west: float, south: float, east: float, north: float,
                          max_tracts: int = MAX_TRACTS) -> dict:
     """Tract polygons intersecting the bbox, colored by ``measure`` from ``table``.
