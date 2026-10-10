@@ -1,0 +1,18 @@
+{
+ "_note": "Findings that existed before the census hardening; a NEW finding fails tests/test_catalog_contract.py. Fix it, or add it here deliberately in the same change.",
+ "accepted": [
+  "warning:duplicate_alias:arms_length_sale",
+  "warning:duplicate_alias:house_missing_walk",
+  "warning:duplicate_alias:nri_hrcn_risk",
+  "warning:duplicate_alias:nri_wfir_risk",
+  "warning:duplicate_alias:sold_price",
+  "warning:generic_alias:house_inventory:home",
+  "warning:generic_alias:house_inventory:homes",
+  "warning:generic_alias:house_inventory:house",
+  "warning:generic_alias:house_inventory:houses",
+  "warning:generic_alias:house_list_price:list price",
+  "warning:generic_alias:nri_hail_risk:hail",
+  "warning:generic_alias:zhvi:home value index",
+  "warning:generic_alias:zhvi:zhvi"
+ ]
+}
