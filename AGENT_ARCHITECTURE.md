@@ -40,6 +40,7 @@ computed, decides whether it's shown as a table, a chart, or a map.
 8. [The catalog is a store, and how it changes](#8-the-catalog-is-a-store-and-how-it-changes)
 9. [Commute times](#9-commute-times)
 10. [Presentation layer: tables, charts, and maps](#10-presentation-layer-tables-charts-and-maps)
+11. [Answer routing, derived measures, and non-answers](#11-answer-routing-derived-measures-and-non-answers)
 
 ---
 
@@ -163,6 +164,7 @@ if step == 0:
             or "Code Agent error:" in result
             or "does not match" in result.lower()
             or ("join" in result.lower() and "likely" in result.lower())
+            or answer_status.is_retryable(result)       # NOT_ANSWERED[unplannable | place_missing], see §11.5
         )
         for _, result in calls
     )
@@ -172,7 +174,8 @@ break
 ```
 
 If step 0 produced no relevant data-fetching call, or one of those four
-hardcoded phrases appears in a result, the loop retries once (step 1).
+hardcoded phrases - or a *retryable* `NOT_ANSWERED[...]` status (§11.5) - appears in a result, the loop retries once
+(step 1). Non-retryable statuses (an ambiguous place, an unloaded topic) are final: only the user can fix them.
 **Every other case — including step 1 itself, whatever its outcome — falls
 straight through to `break`.** There is no branch for `step == 1`. So a turn
 makes **at most two** orchestration passes in practice, never three, despite
@@ -465,6 +468,9 @@ neither requiring another model call to detect:
   the tool output text.
 - Tools returned real, successful data, but the reply doesn't reflect it.
 
+A `NOT_ANSWERED[...]` status (§11.5) is never counted as data, and a reply that presents a table or many numbers after one
+is replaced by the tool's own stated reason - not the generic "tables not loaded" message.
+
 ### 3.9 Guardrails & Security Framework (Outlines + Pydantic)
 
 The application incorporates a centralized open-source guardrail layer
@@ -625,10 +631,10 @@ Honest limitations of the current design, not open bugs:
   the LLM path is handed the same catalog-derived plan text and inherits the
   same dependency. Catalog correctness is the one thing neither path can
   verify on its own.
-- **A few checks are coupled to exact evidence wording.** The orchestration
-  `step_failed` check (§3.1) and `response_validator.py`'s failure-phrase
-  lists (§3.8) pattern-match specific substrings rather than a structured
-  status field. Changing how a tool phrases a result elsewhere in the
+- **A few checks are still coupled to exact evidence wording.** Non-answers now carry a structured
+  `NOT_ANSWERED[code]` status (§11.5) that the orchestration `step_failed` check (§3.1) and
+  `response_validator.py` (§3.8) read directly; but SQL errors, zero-row results and the rest of the
+  failure-phrase lists still pattern-match specific substrings rather than a structured status field. Changing how a tool phrases a result elsewhere in the
   codebase should be checked against both of these, or a message that used
   to correctly signal "this needs a retry" (or "this is a real failure") can
   silently stop being recognized as one.
@@ -680,6 +686,9 @@ For extending the *agent's* behavior specifically:
   belongs in `_validate_sql_against_plan` or `_validate_program` — both
   already-existing, already-tested deterministic gates — not a new prompt
   asking the model to review its own output. §5 covers why.
+- **A measure SQL cannot compute, a known-missing topic, or place-like labels** - declare it in catalog metadata
+  (`derived`, `gap`, `requires_entity`, `match_mode="components"`) and, for a derived measure, register a provider. See
+  §11.3-§11.8 for the knobs, the provider protocol and the checklist; none of it needs a change to the planner or tool layer.
 - **A new approved function that should be able to produce a table, chart,
   or map** — see §10. In short: once you have a `pandas.DataFrame` (or can
   build a small one from whatever structured payload the function already
@@ -972,3 +981,188 @@ from a house-scoped tool renders exactly the way a General Chat one does.
   final-answer LLM in `run_code_query` — an artifact can show more rows
   than the model ever reads, since the model only needs enough evidence to
   describe the pattern, not to enumerate a table it isn't drawing anymore.
+
+
+---
+
+## 11. Answer routing, derived measures, and non-answers
+
+### 11.1 What problem this solves
+
+"Verify the land areas of Pittsburgh and Indianapolis" used to fail three ways at once. The catalog had no concept for
+land area, so the plan was empty. An empty plan can never succeed - `_validate_sql_against_plan` rejects every statement
+that does not use a planned table - yet `run_code_query` still asked the SQL model three times. And the final text
+(`Code Agent error: Cannot compile SQL: plan selected no tables.`) was summarised by the answer model as "the database
+query encountered an error", although nothing was ever sent to the database.
+
+The fix is deliberately not "add a land-area branch". Each layer got one small, generic mechanism, and census is simply
+the first user of them:
+
+| Layer | Mechanism | Where |
+|---|---|---|
+| Catalog | concept knobs (`requires_entity`, `gap`, `derived`, `derived_support`, `LOOKUP`) | §11.3, `db/catalog_model.py` |
+| Entity matching | `match_mode="components"` place lexicon | §11.4, `db/entity_lexicon.py` |
+| Planner | token-index phrase matching; `lookup` fallback operation | §11.6, `db/text_match.py`, `agents/query_planner.py` |
+| Tool | answer policy; unplannable short-circuit | §11.2, `agents/answer_policy.py`, `agents/tools.py` |
+| Orchestrator / validator | `NOT_ANSWERED[code]` statuses | §11.5, `agents/answer_status.py` |
+| Derived numbers | provider registry | §11.7, `services/derived_measures.py`, `services/census_metrics.py` |
+
+### 11.2 The answer policy
+
+`query_database` asks `agents/answer_policy.py` three questions, all answered from the `QueryPlan` and catalog metadata
+alone (the module contains no dataset vocabulary):
+
+1. **`route_before_sql`** - must this request be handled *without* the SQL model?
+   - a place name fits several places (`ambiguous` entities, §11.4) -> ask the user which one;
+   - a matched concept declares `derived` -> run the registered provider (§11.7);
+   - only `gap` concepts matched -> state that the topic is not loaded and estimate nothing.
+2. **`unplannable_result`** - nothing in the catalog matched. Return a status (not an error) naming any place that *was*
+   recognized and measures the data covers (drawn from the live catalog, so new datasets appear automatically), and
+   report empty tables that name matching depends on - an empty `census_msa` silently disables every metro question.
+   No model call is made.
+3. **`caveats_after_sql`** - a real answer was produced but part of the request touches a `gap` topic: append the
+   caveat so a partial result is never presented as complete.
+
+Before planning gives up, `query_database` also plans from `request + requirements`: the orchestrator often states the
+measure only in `requirements` ("Return one row per metro with its land area") while `request` just names places.
+
+### 11.3 Concept knobs
+
+Optional keys on a concept (`db/catalog_model.CONCEPT_KNOBS` is the single documented list; `db/catalog_lint.py`
+rejects unknown keys, because a misspelled knob silently does nothing):
+
+| Knob | Meaning | Use it when |
+|---|---|---|
+| `requires_entity: ["MSA"]` | applies only if the request names a live value of that entity type | natural phrasing ("population of ...") that must not capture unrelated questions |
+| `gap: True` | a known-unavailable topic; no tables; its description is the message shown to the user | you know users will ask for something the data does not hold |
+| `derived: {provider, measures}` | measures computed by a registered provider, not SQL | polygon areas, routing times, model scores |
+| `derived_support: {provider, measures}` | the provider *can also* supply this concept's measure when it is already running | an SQL concept whose number should ride along in a derived answer |
+| `overrides: [...]` | concepts to drop when all their phrases sit inside this concept's longer ones | your phrase extends an existing alias |
+| `scope_guard: False` | keep the concept's columns out of the unplanned-filter guard | the columns are legitimately filterable |
+| `LOOKUP(expr)` operation | plain "show these columns for the named entity"; chosen only when no aggregate/rank phrase matched | simple lookups the fallback compiler should answer deterministically |
+
+A `gap` concept **yields automatically** to any real concept that matches overlapping words, so loading a dataset that
+covers the topic silences the gap with no edit (and retiring the dataset restores it) -
+`tests/test_future_dataset_extensibility.py` proves both directions.
+The Data page's onboarding honors this too: `_known_aliases()` in `services/dataset_onboarding.py` skips `gap` concepts, so the
+dataset that finally covers the topic can claim the same phrases. (Without that, onboarding would report its aliases as
+"already used by ..." and create no concept at all - the test drives the real `build_concepts` to keep it that way.)
+
+**Alias hygiene.** Onboarding refuses to let an uploaded dataset claim an alias a built-in concept already owns, so every
+alias a built-in concept claims is a word no future dataset can use. Built-in aliases must therefore be specific phrases
+("land area", "how many people live in"), never bare generic words ("population", "area", "price"). The lint enforces the
+same rule onboarding uses (`_GENERIC_ALIASES`, single tokens shorter than six characters).
+
+### 11.4 Entity matching and `match_mode="components"`
+
+`match_mode` is a property of an entity domain. `exact` (tract FIPS) is resolved only by the literal-number pass;
+`exact_or_prefix` and `prefix` behave exactly as before. `components` (`db/entity_lexicon.py`) understands labels of the
+form `"City-City--City, ST-ST Metro Area"`:
+
+- each city of the label is a lookup key (principal city = tier 1, others = tier 2), plus the whole label, plus
+  state-qualified forms (`portland me`, `portland maine`); `Fort`/`Saint`/`Mount` and `Ft`/`St`/`Mt` are interchangeable;
+  accents are folded;
+- a phrase that fits several labels is **ambiguous** unless one candidate is strictly better by (tier, metro-before-micro).
+  Ambiguity is reported (`ambiguous: True`, `ambiguous_with`, `phrase` on every candidate) and the policy asks the user -
+  it is never guessed (the old matcher returned every same-named metro in one unflagged list, so a SUM silently added them);
+- everyday words that are also places (`mobile`, `reading`, `bend`, `normal`, `orange`) match only when state-qualified;
+- the lexicon is active for a domain only when a matched concept lists the domain's entity type in `entity_types`
+  (metro/MSA wording also activates it). Elsewhere `components` behaves exactly like `prefix`, so unrelated requests
+  resolve - and render in the plan text - exactly as they always did;
+- lexicons are cached by the *content* of the live values, so new data is picked up automatically and a stale lexicon
+  cannot be served.
+
+Any column of `"Name, ST"` labels can opt in by declaring the mode; `catalog_lint` suggests it when it sees such values.
+
+### 11.5 Answer statuses
+
+When a request cannot be answered, the result is `NOT_ANSWERED[<code>]: <message safe to show the user>`
+(`agents/answer_status.py`) instead of free text that every layer has to pattern-match:
+
+| Code | Meaning | Retried by the orchestrator? |
+|---|---|---|
+| `unplannable` | nothing in the data model matched; no SQL generated | yes - a reworded request might match |
+| `place_missing` | a derived measure needs a named place and the request has none | yes |
+| `place_ambiguous` | a name fits several places | no - only the user can choose |
+| `topic_unavailable` | a `gap` topic; nothing may be estimated | no |
+| `data_unavailable` | needed data is missing or too incomplete in the database | no |
+| `limit_exceeded` | larger than one call supports | no |
+
+Consumers: the orchestrator's `step_failed` retries only retryable codes (§3.1); `response_validator` never counts a
+status as data (whatever digits its explanation holds), and when the reply then presents a table or a pile of numbers it
+replaces the reply with the tool's own reason - not the generic "tables not loaded, run setup_data.py" message;
+`_extract_query_result_fallback` shows the user the plain message, never the marker. Messages contain no digits (tests
+enforce it): the validator's data heuristic is digit-based. To add a code, add it to `agents/answer_status.py`
+(`CODES`, and `RETRYABLE` if rewording can help) and use `not_answered(code, message)`.
+
+### 11.6 The planner's performance contract
+
+The planner runs several times per chat turn, and each run asks one question thousands of times: *does this normalized
+alias occur, as whole words, in the request?* It used to build one regular expression per alias and per live entity value.
+Python caches a few hundred compiled patterns, so at realistic data size nearly every call recompiled thousands of them
+(about 3,400 per warmed call in the benchmark) - the dominant fixed cost of every turn, growing with every dataset added.
+
+`db/text_match.py` answers the same question from a per-request n-gram index, so cost is O(request) however large the
+catalog or the data. Semantics are identical to the regex, including its non-overlapping-match rule that the `overrides`
+logic relies on - `tests/test_text_match.py` proves it differentially against the original implementation.
+
+Rules that keep it that way:
+
+- never build a regular expression from request text or live values on the planning path;
+- gate anything expensive behind something cheap the catalog declares (`requires_entity` is evaluated only after an
+  alias already matched, and after `excluded_terms`);
+- import heavy modules lazily (geopandas is loaded only when a derived measure is actually computed);
+- `tests/test_planner_hot_path.py` enforces the first three deterministically (a regex-compile counter run at a data
+  scale large enough to exceed the regex cache - at fixture scale even the old matcher shows zero compilations).
+
+### 11.7 Derived-measure providers
+
+A derived measure is a number SQL over the stored tables cannot produce. A provider is a module exposing `PROVIDER`
+(`services/derived_measures.py` documents the protocol), registered by id; concepts name it with `derived`.
+Adding one needs no change to the planner, tool, policy, validator or orchestrator
+(`tests/test_future_dataset_extensibility.py::test_a_new_derived_provider_plugs_in_through_metadata_alone`).
+
+The built-in provider `msa_geometry` (`services/census_metrics.py`) computes population, land area and density for named
+metro areas:
+
+- member counties come from `cbsa_counties` (by CBSA code, or by normalized title for an unresolved `X...` code);
+  tract populations from `census_tracts`; polygons from `services/geo_utils`, measured in an equal-area projection;
+- every figure is computed over the **footprint** - tracts with both a population and a polygon - so population, area and
+  density always reconcile, and any excluded tract is reported. Under 95% tract coverage or 98% population coverage is a
+  `data_unavailable` status with the likely cause (different geometry and census vintages), never a quietly wrong number;
+- each tract is measured at most once per loaded geometry object (caches follow the object, so reloading geometry cannot
+  serve stale areas; lock-protected), and database reads go through a private cursor;
+- a provider can recognise the other measures named in the same sentence once a specific concept has selected it
+  (`MeasureInfo.phrases`), so "population, land area and density of Pittsburgh" is one call.
+
+### 11.8 Adding a dataset: checklist
+
+1. Load the data and register tables/concepts (Data page, or `db/catalog_seed.py` for built-ins).
+2. Choose aliases that are specific multi-word phrases (§11.3).
+3. Not expressible as SQL -> write a provider (§11.7). Known-missing topic -> a `gap` concept. Place-like labels ->
+   `match_mode="components"` and `requires_entity`.
+4. `python -m db.catalog_lint` - no errors, and no new warnings (the ratchet in `tests/golden/catalog_lint_baseline.json`).
+5. Add two or three representative questions to `tests/plan_battery_queries.py`, then `python scripts/plan_battery.py --check`.
+   Any changed plan outside your own dataset is a collision between concepts: fix the aliases (or add `overrides`) rather
+   than accepting the diff. `--update --groups <group>` records an intended change.
+6. `python -m pytest tests/test_catalog_contract.py tests/test_plan_battery.py tests/test_planner_hot_path.py`.
+
+### 11.9 Known boundaries and sharp edges
+
+- **Metro scope, not city limits.** A city name resolves to the metro/micropolitan area that contains it; figures describe
+  the whole metro area. The answer says so. There is no city-boundary geometry.
+- **Only metro areas have derived measures.** No county, state or ZIP roll-ups yet; add a provider (or extend this one).
+  Ranking *every* metro by area or density is declined (`MAX_METROS = 25`) rather than attempted.
+- **"Land area" is polygon area.** If the tract polygons include water bodies the figure can exceed an official land-only
+  (`ALAND`) value; the answer says so. For authoritative land area, load Gazetteer/TIGER `ALAND` and have the provider
+  prefer it.
+- **One shared database connection.** `db/duckdb_store.py` serves every thread from one connection, whose result state is
+  not thread-safe; overlapping `store.query` calls can clobber each other. The derived provider reads through its own
+  cursor; the planner and SQL execution do not. Giving `store.query` a lock or cursor would fix it for everyone.
+- **Metro vocabulary in the resolver.** The words that put the resolver in metro context ("msa", "metro", "metro area" ...)
+  are still a short list in `resolve_request_entities`; a second `components` domain activates through concept
+  `entity_types` instead.
+- **Concept-level overlap is judged by the planner, not the lint.** The lint reports equal aliases claimed twice; a phrase
+  that merely *contains* another concept's alias needs `overrides` or the plan battery will show the collision.
+- `map_layers.get_msa_population_density` is no longer called by the agents (the provider replaced it); it remains for
+  compatibility and can be deleted once nothing else imports it.

@@ -486,6 +486,7 @@ The vector database (ChromaDB) grows automatically as you paste descriptions in 
 | "Crime" layer is empty | Confirm `data/crime/<city>/` has files for a city your map view overlaps, then `python setup_data.py --only crime` |
 | Asking about home values or market temperature gets no data | Confirm `data/zhvi/` / `data/market_heat_index/` have Zillow CSVs, then `python setup_data.py --only zhvi` / `--only market_heat_index` |
 | "NRI" layer is empty / shows a warning | It needs both tract *geometry* (from the NRI shapefile, or TIGER/Line shapefiles in `data/shapefiles/`) and tract *attributes* (`python setup_data.py --only nri`) — the layer's warning message says which is missing |
+| Chat says a question "could not be answered from the loaded data", or asks which place you mean | That is a deliberate, specific answer, not an error: it says why (an ambiguous name such as "Portland", a topic the data does not hold such as income, a metro whose county list or tract geometry is missing). Add the state ("Portland, ME"), load the missing data, or run `python scripts/diagnose_msa.py` for unresolved metros. See [Agent Architecture §11.5](AGENT_ARCHITECTURE.md#11-answer-routing-derived-measures-and-non-answers). |
 | Phoenix is unavailable | Set `PHOENIX_ENABLED=false` to run without tracing, or start it manually with `python -m phoenix.server.main serve` |
 | Bike route returns no route | Confirm BikePGH layers were loaded with `python setup_data.py --only bike`; the router does not fall back to an external road-routing service |
 
@@ -692,6 +693,12 @@ Parquet / GeoJSON / shapefile data. See [The Data page](#the-data-page).
    catalog is enough for the agent to work out how to query it, including joins.
 4. Call `setup_data.py` to load it. The seed is copied into the catalog store on the next start
    (see [The catalog is a store](#the-catalog-is-a-store)).
+5. **Check you did not break anything else** (this is what keeps adding the tenth dataset as safe as the second):
+   `python -m db.catalog_lint` (no errors, no new warnings), then `python scripts/plan_battery.py --check`
+   after adding two or three representative questions to `tests/plan_battery_queries.py`. Concepts need *specific*
+   multi-word aliases (a bare word like "population" would stop every future dataset from using it), and a measure SQL
+   cannot compute, a known-missing topic or place-like labels are declared in metadata, not in code - see
+   [Agent Architecture §11](AGENT_ARCHITECTURE.md#11-answer-routing-derived-measures-and-non-answers).
 
 `db/schema_catalog.py` is the single, unified view of what the agent knows about the data: live
 introspection of the running database (so column names/types can't go stale) plus curated notes for
@@ -1257,6 +1264,22 @@ These utility scripts and tests are intended for debugging, data validation, eva
 - `diagnose_msa.py`: Finds `X`-coded MSA rows that don't match `cbsa_counties`, suggests best CBSA candidates using a fuzzy normalizer, and can apply fixes with `--apply`. Usage: `python diagnose_msa.py [--apply]`
 
 
+
+### Census, planning and extensibility tests
+
+`tests/` also holds the regression net for answer routing (all run against a synthetic census database with known polygon
+areas, no `data/`, no network, no language model - models are stubbed at the boundary):
+`test_text_match.py` (the planner's phrase matcher is indistinguishable from the regex it replaced, differentially, plus
+catalog-level equivalence), `test_entity_lexicon.py` (how people name places vs how the Census labels them),
+`test_census_planning.py` (questions -> concepts/entities, a differential test of entity resolution against the original
+algorithm, and house/tract near-misses that must not be captured), `test_census_metrics.py` (areas, units, coverage,
+caches, staleness, threads), `test_census_query_database.py` and `test_census_orchestration.py` (the reported request end to
+end; no wasted model calls; bounded retries; hallucination guard), `test_answer_status.py`,
+`test_future_dataset_extensibility.py` (a dataset, a provider and an entity domain arrive through the catalog API with no
+code change), `test_catalog_contract.py` (catalog lint ratchet), `test_plan_battery.py` (golden plans; the unrelated-question
+groups were generated from the code *before* the census work, so passing means zero drift) and `test_planner_hot_path.py`
+(regex-compile counter at realistic scale; lazy imports). Developer tools: `python -m db.catalog_lint` and
+`python scripts/plan_battery.py --check | --update | --show "<question>"`.
 
 ### Data page tests
 
