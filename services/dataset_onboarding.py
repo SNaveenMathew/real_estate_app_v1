@@ -454,6 +454,11 @@ def enrich(dataset_id: str, kind: str) -> dict:
 def _known_aliases() -> dict[str, str]:
     known: dict[str, str] = {}
     for key, item in schema._glossary().items():
+        if item.get("gap"):
+            # A known-UNAVAILABLE topic (concept knob ``gap``) never owns a phrase: it exists to be replaced, and it
+            # yields automatically to any concept that matches the same words - so the dataset that finally covers the
+            # topic must be allowed to claim them.
+            continue
         for a in item.get("aliases", []):
             known.setdefault(schema._normalize(a), key)
     return known

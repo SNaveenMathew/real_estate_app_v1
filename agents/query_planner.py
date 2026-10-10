@@ -100,6 +100,16 @@ def build_query_plan(request: str, requirements: str = "", plan: str = "") -> Qu
                     if ops[0].get("op") == "count": qp.aggregation = ops[0]["expr"]; qp.operation = "count"; qp.select_expression = ops[0]["expr"]
                     elif ops[0].get("op") in {"avg", "sum", "median", "min", "max"}: qp.aggregation = ops[0]["expr"]; qp.operation = ops[0]["op"]; qp.select_expression = ops[0]["expr"]
 
+    if not qp.operation:
+        # Plain "show the named entity's columns" lookups: no aggregate or ranking phrase matched, so use the concept's
+        # declared LOOKUP operation (db/catalog_model.py).  Existing concepts declare none, so their plans are unchanged.
+        for c in concepts:
+            lookup = next((x for x in c.get("operations", []) if x.get("op") == "lookup"), None)
+            if lookup:
+                qp.operation = "lookup"
+                qp.select_expression = lookup.get("expr")
+                break
+
     missing_semantic = "house_missing_walk" in {c.get("key") for c in concepts}
     for c in concepts:
         if c.get("null_policy") and not missing_semantic and any(op.get("op") in {"avg","min","max","sum","median","rank"} for op in c.get("operations", [])):

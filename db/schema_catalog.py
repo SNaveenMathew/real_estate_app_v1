@@ -37,6 +37,7 @@ from db.catalog_model import (
     _concept, _op, COUNT, AVG, SUM, MEDIAN, MIN, MAX, RANK_DESC, RANK_ASC,
 )
 from db.catalog_seed import NRI_HAZARD_COLUMNS   # fixed hazard-code -> label map (not per-source metadata)
+from db import entity_lexicon, text_match
 
 
 DOMAIN_LABELS = {
@@ -435,25 +436,23 @@ REQUEST_INTENTS = [
 
 
 def _normalize(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    return text_match.normalize(text)
 
 
+# Phrase matching is token-level and cached per request text (db/text_match.py), so the planner's cost no longer
+# grows with the number of aliases or live entity values.  Semantics match the regex these replaced exactly.
 def _alias_spans(text: str, alias: str):
-    t = _normalize(text)
-    a = _normalize(alias)
-    if not a:
-        return []
-    pattern = r"(?<!\w)" + re.escape(a) + r"(?!\w)"
-    return [(m.start(), m.end(), len(a.split())) for m in re.finditer(pattern, t)]
+    return text_match.phrase_spans(text, alias)
 
 
 def _alias_matches(text: str, alias: str) -> bool:
-    return bool(_alias_spans(text, alias))
+    return text_match.has_phrase(text, alias)
 
 
 def semantic_matches(query: str) -> list[dict]:
     text = _normalize(query)
     hits = []
+    entity_checks: dict[tuple, bool] = {}          # one lookup per distinct requirement per call
     for key, item in _glossary().items():
         matches = []
         for alias in item.get("aliases", []):
@@ -466,6 +465,16 @@ def semantic_matches(query: str) -> list[dict]:
         excluded_terms = item.get("excluded_terms", [])
         if any(_alias_matches(text, term) for term in excluded_terms):
             continue
+        # ``requires_entity``: the concept only applies when the request names a live value of one of these entity
+        # types (e.g. a metro area). Lets a concept use natural phrasing ("population of ...") without capturing
+        # unrelated questions that merely contain the words. Evaluated only after an alias already matched.
+        needs = item.get("requires_entity")
+        if needs:
+            needs_key = tuple(sorted(needs))
+            if needs_key not in entity_checks:
+                entity_checks[needs_key] = request_has_entity(query, needs)
+            if not entity_checks[needs_key]:
+                continue
         specificity = max(m[0] for m in matches)
         hits.append((specificity, len(matches), key, item, [(m[1], m[2]) for m in matches]))
     hits.sort(key=lambda x: (-x[0], -x[1], x[2]))
@@ -484,6 +493,11 @@ def semantic_matches(query: str) -> list[dict]:
                     for s1, e1 in spans_by_key[other]):
                 overridden.add(other)
     hits = [h for h in hits if h[2] not in overridden]
+    # Known-gap concepts (``"gap": True``) declare topics the data does NOT cover. They yield to any real concept
+    # that matched overlapping words, so loading a dataset that covers the topic silences the gap on its own.
+    real_spans = [span for h in hits if not h[3].get("gap") for span in h[4]]
+    hits = [h for h in hits if not h[3].get("gap")
+            or not any(s1 < e2 and s2 < e1 for s1, e1 in h[4] for s2, e2 in real_spans)]
     # Suppress generic inventory if a more-specific sale/history concept is matched.
     specific_keys = {h[2] for h in hits if h[0] >= 2 or h[2] in {"sold_price", "arms_length_sale", "history", "nri_overall_risk", "nri_riverine_flood"}}
     out = []
@@ -547,36 +561,122 @@ def _fetch_values(table: str, column: str, limit: int = 5000):
         return []
 
 
-def resolve_request_entities(query: str, candidate_tables: set[str] | None = None) -> list[dict]:
-    t = _normalize(query)
-    domains = [d for d in _entity_domains() if not candidate_tables or d.table in candidate_tables]
-    results = []
-    # Tract FIPS are unambiguous literals and should be resolved first.
+# Match modes that compare request text with the live VALUES of a column.  "exact" domains (tract FIPS) are resolved
+# only by the literal-number pass, so the value loop skips them entirely (no per-value work, no database fetch).
+_VALUE_MATCH_MODES = ("exact_or_prefix", "prefix", "components")
+
+
+def _literal_tract_entities(domains, query: str) -> list[dict]:
+    """Tract FIPS are unambiguous 11-digit literals and are resolved first."""
+    out = []
     for d in domains:
         if d.entity_type == "tract_fips":
             for fips in re.findall(r"\b\d{11}\b", query):
                 values = _fetch_values(d.table, d.column)
                 if fips in values:
-                    results.append({"entity_type": d.entity_type, "table": d.table, "column": d.column, "value": fips, "domain": d.name, "score": 100})
+                    out.append({"entity_type": d.entity_type, "table": d.table, "column": d.column, "value": fips, "domain": d.name, "score": 100})
+    return out
+
+
+def _value_entities(d: EntityDomain, values, t: str, msa_context: bool) -> list[dict]:
+    """``exact_or_prefix`` / ``prefix`` matching of normalized request text ``t`` against live values."""
+    out = []
+    for value in values:
+        nv = _normalize(value)
+        if d.match_mode == "exact_or_prefix":
+            if _alias_matches(t, nv):
+                out.append({"entity_type": d.entity_type, "table": d.table, "column": d.column, "value": value, "domain": d.name, "score": 80})
+        else:
+            # Stored display value may be 'Pittsburgh, PA Metro Area'; a query token 'Pittsburgh' matches the leading label.
+            raw_prefix = value.split(",", 1)[0].strip()
+            prefix = _normalize(raw_prefix)
+            if prefix and (_alias_matches(t, prefix) or _alias_matches(t, nv)):
+                out.append({"entity_type": d.entity_type, "table": d.table, "column": d.column, "value": value, "domain": d.name, "score": 95 if msa_context else 55})
+    return out
+
+
+def _component_entities(d: EntityDomain, values, query: str, with_phrase: bool = False) -> list[dict]:
+    """``components`` matching (db/entity_lexicon.py): any city of a "City-City, ST" label, optionally state-qualified.
+
+    A phrase that fits several labels is flagged ``ambiguous`` on every candidate rather than guessed.  The user's
+    ``phrase`` is attached only when it is needed (ambiguity, guidance messages) so that the entities - and therefore
+    the plan text shown to the SQL model - are identical to the ones ``prefix`` matching produced whenever the same
+    places are recognized.
+    """
+    out = []
+    for m in entity_lexicon.find(entity_lexicon.get_lexicon(d.name, values), query):
+        for value in m.values:
+            e = {"entity_type": d.entity_type, "table": d.table, "column": d.column, "value": value, "domain": d.name,
+                 "score": 95 if m.tier <= 1 else 90}
+            if with_phrase or m.ambiguous:
+                e["phrase"] = m.display
+            if m.ambiguous:
+                e["ambiguous"] = True
+                e["ambiguous_with"] = list(m.values)
+            out.append(e)
+    return out
+
+
+def request_has_entity(query: str, entity_types) -> bool:
+    """True when the request names a live value of any entity domain of the given type(s)."""
+    wanted = set(entity_types)
+    domains = [d for d in _entity_domains() if d.entity_type in wanted]
+    if any(e["entity_type"] in wanted for e in _literal_tract_entities(domains, query)):
+        return True
+    t = _normalize(query)
+    for d in domains:
+        if d.match_mode not in _VALUE_MATCH_MODES:
+            continue
+        values = _fetch_values(d.table, d.column)
+        if d.match_mode == "components":
+            if entity_lexicon.find(entity_lexicon.get_lexicon(d.name, values), query):
+                return True
+        elif _value_entities(d, values, t, True):
+            return True
+    return False
+
+
+def recognized_entities(query: str, entity_types=None) -> list[dict]:
+    """Entities named in the request - for guidance messages on the failure path, never on the hot path."""
+    t = _normalize(query)
+    wanted = set(entity_types) if entity_types else None
+    out, seen = [], set()
+    for d in _entity_domains():
+        if (wanted and d.entity_type not in wanted) or d.match_mode not in _VALUE_MATCH_MODES:
+            continue
+        values = _fetch_values(d.table, d.column)
+        hits = (_component_entities(d, values, query, with_phrase=True) if d.match_mode == "components"
+                else _value_entities(d, values, t, True))
+        for e in hits:
+            k = (e["entity_type"], e["value"])
+            if k not in seen:
+                seen.add(k)
+                out.append(e)
+    return out
+
+
+def resolve_request_entities(query: str, candidate_tables: set[str] | None = None) -> list[dict]:
+    t = _normalize(query)
+    domains = [d for d in _entity_domains() if not candidate_tables or d.table in candidate_tables]
+    results = _literal_tract_entities(domains, query)
     # Prefer MSA domain when the request contains MSA/metro language or an MSA concept matched.
     msa_context = any(_alias_matches(t, a) for a in ["msa", "msas", "metro", "metro area", "metropolitan area", "metro areas"])
     matched_concepts = semantic_matches(query)
     if any("MSA" in c.get("entity_types", []) for c in matched_concepts):
         msa_context = True
+    # Entity types a matched concept is about.  A ``components`` domain of such a type gets the full place lexicon;
+    # outside that context it behaves exactly like ``prefix`` so unrelated requests resolve as they always did.
+    active_types = {et for c in matched_concepts for et in c.get("entity_types", [])}
+    if msa_context:
+        active_types.add("MSA")
     for d in domains:
+        if d.match_mode not in _VALUE_MATCH_MODES:
+            continue
         values = _fetch_values(d.table, d.column)
-        for value in values:
-            nv = _normalize(value)
-            if d.match_mode == "exact_or_prefix":
-                if _alias_matches(t, nv):
-                    results.append({"entity_type": d.entity_type, "table": d.table, "column": d.column, "value": value, "domain": d.name, "score": 80})
-            elif d.match_mode == "prefix":
-                # Stored display value may be 'Pittsburgh, PA Metro Area'; a query token 'Pittsburgh' matches the leading label.
-                raw_prefix = value.split(",", 1)[0].strip()
-                prefix = _normalize(raw_prefix)
-                if prefix and (_alias_matches(t, prefix) or _alias_matches(t, nv)):
-                    score = 95 if msa_context else 55
-                    results.append({"entity_type": d.entity_type, "table": d.table, "column": d.column, "value": value, "domain": d.name, "score": score})
+        if d.match_mode == "components" and d.entity_type in active_types:
+            results.extend(_component_entities(d, values, query))
+        else:
+            results.extend(_value_entities(d, values, t, msa_context))
     # Keep the best domain for each normalized value/entity type.
     best = {}
     for e in results:

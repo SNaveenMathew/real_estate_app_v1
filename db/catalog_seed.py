@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from db.catalog_model import (
     ColumnNote, TableMeta, Relationship, EntityDomain,
-    _concept, _op, COUNT, AVG, SUM, MEDIAN, MIN, MAX, RANK_DESC, RANK_ASC,
+    _concept, _op, COUNT, AVG, SUM, MEDIAN, MIN, MAX, RANK_DESC, RANK_ASC, LOOKUP,
 )
 
 
@@ -193,13 +193,18 @@ SEMANTIC_GLOSSARY = {
     "house_transit_score": _concept("house_transit_score", ["houses"], ["transit score", "transit accessibility", "transit access"], "Current house Transit Score.", columns=("houses.transit_score",), operations=(AVG("houses.transit_score"),), null_policy="exclude NULL", grain="house"),
     "house_favorite": _concept("house_favorite", ["houses"], ["saved house", "saved houses", "favorite house", "favorite houses", "favorites", "my favorites", "saved list", "my saved list"], "Explicit saved/favorited-house scope. Ordinary 'my houses' is not this concept.", columns=("houses.is_favorite",), filters=("houses.is_favorite = TRUE",), grain="house"),
     "census_tract_population": _concept("census_tract_population", ["census_tracts"], ["tract population", "census tract population", "population of the tract", "census population"], "Census population at tract grain. A named city/metro can identify the corresponding tract only through the documented geography bridge.", columns=("census_tracts.population",), operations=(RANK_DESC("census_tracts.population", group_by="census_msa.name"),), grain="tract", entity_types=("tract_fips", "MSA"), groupings=("census_msa.name",), rollup=False),
-    "msa_population": _concept("msa_population", ["census_msa"], ["MSA population", "metro population", "metro area population", "metro areas", "combined population", "combined MSA population", "largest metro", "largest MSA", "smallest metro", "smallest MSA", "population ranking"], "Census MSA population.", columns=("census_msa.population",), operations=(SUM("CAST(census_msa.population AS BIGINT)"), RANK_DESC("CAST(census_msa.population AS BIGINT)", group_by="census_msa.name")), grain="MSA", entity_types=("MSA",), groupings=("census_msa.name",), required_terms=("population",)),
+    "msa_population": _concept("msa_population", ["census_msa"], ["MSA population", "metro population", "metro area population", "metro areas", "combined population", "combined MSA population", "largest metro", "largest MSA", "smallest metro", "smallest MSA", "population ranking", "rank MSAs", "top MSAs", "largest MSAs", "smallest MSAs", "MSAs by population", "all MSAs", "metros", "metropolitan areas", "metropolitan statistical areas", "micropolitan areas"], "Census MSA population.", columns=("census_msa.population",), operations=(SUM("CAST(census_msa.population AS BIGINT)"), RANK_DESC("CAST(census_msa.population AS BIGINT)", group_by="census_msa.name")), grain="MSA", entity_types=("MSA",), groupings=("census_msa.name",), required_terms=("population",),
+        derived_support={"provider": "msa_geometry", "measures": ["population"]}),
     "census_tract_population_density": _concept(
         "census_tract_population_density",
         ["census_msa", "cbsa_counties", "census_tracts"],
         ["population density", "total population density", "people per square mile",
          "population per square mile", "population per sq mi", "population density by metro",
-         "population density by MSA"],
+         "population density by MSA", "pop density", "density of population", "densely populated",
+         "how dense", "how densely populated", "most densely populated", "least densely populated",
+         "people per square kilometer", "persons per square mile", "residents per square mile",
+         "inhabitants per square mile", "people per sq km", "population per square kilometer",
+         "population per sq km"],
         "Population density for a named MSA is total Census tract population divided by the sum of its tract polygon areas in square miles. Use the documented MSA-to-county-to-tract relationships and do not average tract-level density values.",
         columns=("census_tracts.population",),
         operations=(SUM("census_tracts.population"),),
@@ -207,6 +212,8 @@ SEMANTIC_GLOSSARY = {
         grain="tract",
         entity_types=("MSA",),
         default_operation="sum",
+        overrides=["census_land_area", "census_place_population"],     # their phrases sit inside this one's
+        derived={"provider": "msa_geometry", "measures": ["population", "land_area", "density"]},
     ),
     "msa_cbsa_membership": _concept(
         "msa_cbsa_membership",
@@ -325,10 +332,100 @@ SEMANTIC_GLOSSARY.update({
 for _mode_key in ("house_commute_bike", "house_commute_walk", "house_commute_transit", "house_commute_distance"):
     SEMANTIC_GLOSSARY[_mode_key]["overrides"] = ["house_commute_drive"]
 
+# ---------------------------------------------------------------------------
+# Census place questions ("population of Denver", "land area of Pittsburgh", "which counties make up ...").
+#
+# Design rules these concepts follow (see AGENT_ARCHITECTURE.md §11.3 "Concept knobs" and §11.8 "Adding a dataset"):
+#   * Aliases are SPECIFIC phrases, never bare generic words.  onboarding (services/dataset_onboarding.py) refuses to
+#     let an uploaded dataset claim an alias a built-in concept already owns, so a generic alias here would make that
+#     word undiscoverable for every future dataset.
+#   * ``requires_entity`` keeps natural phrasing ("population of ...") from capturing questions that merely contain the
+#     words: the concept applies only when the request names a metro/place that really exists in the data.
+#   * ``excluded_terms`` hands house/tract/listing questions back to the concepts that own them.
+#   * ``derived`` / ``derived_support`` route polygon-derived measures to a registered provider, not to SQL.
+#   * ``scope_guard=False``: these concepts add no new filterable column names to the unplanned-filter guard.
+# ---------------------------------------------------------------------------
+_HOUSE_WORDS = ("house", "houses", "home", "homes", "listing", "listings", "property", "properties", "sold")
+_TRACT_WORDS = ("tract", "tracts", "census tract", "fips", "block group")
+_DENSITY_WORDS = ("density", "per square mile", "per square kilometer", "per sq mi", "per sq km")
+_METRO_GEOMETRY = {"provider": "msa_geometry"}
+
+SEMANTIC_GLOSSARY.update({
+    "census_place_population": _concept(
+        "census_place_population", ["census_msa"],
+        ["population of", "population in", "populations of", "s population", "how many people live in",
+         "how many people are in", "how many people reside in", "how many residents", "number of residents",
+         "number of people living in", "residents of", "inhabitants of", "people live in", "people living in",
+         "how populous", "how many live in"],
+        "Total Census population of a named metropolitan/micropolitan statistical area. A city name resolves to the metro "
+        "area that contains it, so the figure describes the whole metro area, not the city limits.",
+        columns=("census_msa.name", "census_msa.population"),
+        operations=(LOOKUP("census_msa.name, census_msa.population"),),
+        grain="MSA", entity_types=("MSA",), groupings=("census_msa.name",),
+        excluded_terms=_HOUSE_WORDS + _TRACT_WORDS + _DENSITY_WORDS,
+        requires_entity=["MSA"], scope_guard=False,
+        derived_support=dict(_METRO_GEOMETRY, measures=["population"]),
+    ),
+    "census_land_area": _concept(
+        "census_land_area", ["census_msa", "cbsa_counties", "census_tracts"],
+        ["land area", "land areas", "total land area", "square miles", "square mile", "sq mi", "sq miles", "sq mile",
+         "square kilometers", "square kilometres", "square kilometer", "square kilometre", "square km", "sq km",
+         "bigger in area", "larger in area", "biggest in area", "largest in area", "smaller in area",
+         "smallest in area", "area comparison", "geographic area"],
+        "Land area of a named metropolitan/micropolitan statistical area: the summed areas of the census-tract boundary "
+        "polygons of its member counties, in square miles (or square kilometers when asked). It is NOT a stored column; the "
+        "application computes it. A city name resolves to the metro area that contains it, so the figure describes the whole "
+        "metro area, not the city limits.",
+        grain="tract", entity_types=("MSA",), groupings=("census_msa.name",),
+        excluded_terms=_HOUSE_WORDS + ("lot", "lots", "square feet", "square foot", "sqft", "sq ft", "acre", "acres"),
+        scope_guard=False, derived=dict(_METRO_GEOMETRY, measures=["land_area"]),
+    ),
+    "census_profile": _concept(
+        "census_profile", ["census_msa", "cbsa_counties", "census_tracts"],
+        ["census data", "census profile", "census statistics", "census facts", "census numbers", "census information",
+         "quick facts", "key facts"],
+        "Headline census figures for a named metro area: population, land area and population density.",
+        grain="tract", entity_types=("MSA",), groupings=("census_msa.name",),
+        excluded_terms=_HOUSE_WORDS + _TRACT_WORDS,
+        requires_entity=["MSA"], scope_guard=False,
+        derived=dict(_METRO_GEOMETRY, measures=["population", "land_area", "density"]),
+    ),
+    "msa_counties": _concept(
+        "msa_counties", ["census_msa", "cbsa_counties"],
+        ["counties in", "counties are in", "counties make up", "counties does", "which counties", "member counties",
+         "constituent counties", "list of counties", "county list", "counties comprise", "counties belong"],
+        "The counties that make up a named metropolitan/micropolitan statistical area (CBSA delineation).",
+        columns=("cbsa_counties.county_name", "cbsa_counties.state_name"),
+        operations=(LOOKUP("cbsa_counties.county_name, cbsa_counties.state_name"),),
+        grain="county", entity_types=("MSA",), groupings=("census_msa.name",),
+        excluded_terms=_HOUSE_WORDS + _TRACT_WORDS,
+        requires_entity=["MSA"], scope_guard=False,
+    ),
+    "census_unloaded_topics": _concept(
+        "census_unloaded_topics", [],
+        ["median household income", "household income", "median income", "per capita income", "average income",
+         "income level", "income levels", "income distribution", "poverty", "poverty rate", "unemployment",
+         "unemployment rate", "median age", "average age", "age distribution", "age groups", "age breakdown",
+         "demographics", "demographic", "demographic breakdown", "racial makeup", "racial composition", "ethnic makeup",
+         "race and ethnicity", "population by race", "population by age", "foreign born", "household size",
+         "average household size", "number of households", "homeownership rate", "owner occupied", "renter occupied",
+         "vacancy rate", "housing units", "median rent", "median gross rent", "educational attainment",
+         "education level", "college educated", "population growth", "population change", "population trend",
+         "population over time", "population history", "growth in population", "population decline",
+         "population increase"],
+        "Census topics that are NOT part of the loaded data: household and per-capita income, poverty, unemployment, age, "
+        "race and ethnicity, households and household size, housing units, vacancy and rent, education, and population change "
+        "over time. What IS loaded: total population of metropolitan/micropolitan areas and of census tracts from the latest "
+        "decennial Census, which counties make up each metro area, and land area and population density derived from tract "
+        "boundaries. Never estimate values for the unloaded topics.",
+        gap=True, scope_guard=False,
+    ),
+})
+
 ENTITY_DOMAINS = (
     EntityDomain("house_city", "houses", "city", "city", "Current house city labels", match_mode="exact_or_prefix", preferred_for=("house_inventory", "house_list_price", "house_walk_score", "house_bike_score", "house_transit_score")),
     EntityDomain("sold_city", "sold_homes", "city", "city", "Sold-home city labels", match_mode="exact_or_prefix", preferred_for=("sold_price",)),
-    EntityDomain("msa_name", "census_msa", "name", "MSA", "MSA display names", match_mode="prefix", preferred_for=("msa_population", "nri_overall_risk", "nri_riverine_flood")),
+    EntityDomain("msa_name", "census_msa", "name", "MSA", "MSA display names", match_mode="components", preferred_for=("msa_population", "nri_overall_risk", "nri_riverine_flood", "census_place_population", "census_land_area")),
     EntityDomain("tract_fips", "census_tracts", "tract_fips", "tract_fips", "Census tract identifiers", match_mode="exact", preferred_for=("census_tract_population",)),
     EntityDomain("nri_tract_fips", "nri_tracts", "tract_fips", "tract_fips", "NRI tract identifiers", match_mode="exact", preferred_for=("nri_overall_risk", "nri_riverine_flood")),
     EntityDomain("sold_tract_fips", "sold_homes", "tract_fips", "tract_fips", "Sold-home tract identifiers when geocoded", match_mode="exact", preferred_for=("sold_price", "arms_length_sale")),
