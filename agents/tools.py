@@ -17,6 +17,7 @@ import db.vector_store as vs
 import db.schema_catalog as schema
 import services.bike_routing as bike_routing
 from agents.query_planner import build_query_plan
+from agents import answer_policy
 from agents.artifacts import classify_dataframe, emit_artifact
 import asyncio
 import threading
@@ -645,6 +646,10 @@ def run_code_query(
     unaffected by it; only the emitted artifact, if any, changes shape.
     """
     query_plan = build_query_plan(request)
+    if not query_plan.required_tables:
+        # The validator rejects every statement that does not use a planned table, so with an empty plan no SQL a model
+        # could write can succeed: asking it - up to three times - only burns time and ends in a misleading error.
+        return "", answer_policy.unplannable_result(request)
     base_plan = query_plan.render()
     repair_note = ""
     last_sql = ""
@@ -800,43 +805,25 @@ def query_database(
     still renders as a chart or table, never a fabricated map.
     """
     structured_plan = build_query_plan(request)
-    if "census_tract_population_density" in structured_plan.semantic_keys:
-        msa_names = [
-            entity["value"] for entity in structured_plan.resolved_entities
-            if entity["entity_type"] == "MSA"
-        ]
-        if not msa_names:
-            return (
-                "[GENERATED SQL]\nDerived tract-area aggregation\n[RESULT]\n"
-                "Population density requires a named metropolitan area that matches the Census MSA catalog."
-            )
-        try:
-            from services import map_layers
+    if not structured_plan.required_tables and requirements and requirements.strip():
+        # The orchestrator often states the measure only in `requirements` ("Return one row per metro with its land
+        # area") while `request` just names the places.  Plan from both before giving up: an empty plan can never succeed.
+        enriched = f"{request.strip()} {requirements.strip()}"
+        retry_plan = build_query_plan(enriched)
+        if retry_plan.required_tables or retry_plan.semantic_keys:
+            request, structured_plan = enriched, retry_plan
 
-            with trace_span("population_density_aggregation", attributes={"population_density.msa_count": len(msa_names)}) as span:
-                try:
-                    frame = map_layers.get_msa_population_density(msa_names, request=request)
-                    if span is not None:
-                        set_span_output(span, frame.to_dict(orient="records"), mime_type="application/json")
-                except Exception as exc:
-                    mark_span_error(span, exc)
-                    raise
-            try:
-                emit_artifact(classify_dataframe(frame, request=request, presentation=presentation))
-            except Exception:
-                pass
-            result = (
-                "Density is total tract population divided by total tract polygon area in square miles; "
-                "it is not the average of tract densities.\n" + frame.to_string(index=False)
-            )
-        except Exception as exc:
-            result = f"Code Agent error: {exc}"
-        return f"[GENERATED SQL]\nDerived tract-area aggregation\n[RESULT]\n{result}"
+    # Requests that must not reach SQL generation (ambiguous place, polygon-derived measure, known-unloaded topic) are
+    # decided from catalog metadata in agents/answer_policy.py - there is no question-specific branch here.
+    routed = answer_policy.route_before_sql(structured_plan, request, presentation=presentation)
+    if routed is not None:
+        return routed
 
     try:
         sql, result = run_code_query(request, presentation=presentation)
     except Exception as exc:
         sql, result = "", f"Code Agent error: {exc}"
+    result += answer_policy.caveats_after_sql(structured_plan)
 
     # LLM-first architecture: SQL generation and repair are driven entirely by
     # the live schema plus semantic metadata. There are no question-specific

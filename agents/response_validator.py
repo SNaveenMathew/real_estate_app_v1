@@ -18,6 +18,8 @@ Does NOT flag:
 import re
 from langchain_core.messages import BaseMessage, AIMessage, ToolMessage
 
+from agents import answer_status
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -75,6 +77,8 @@ def _tool_returned_real_data(tool_outputs: list[tuple[str, str]]) -> bool:
         c = content.strip()
         if not c:
             continue
+        if answer_status.is_not_answered(c):
+            continue            # a deliberate non-answer (agents/answer_status.py) is never data, whatever digits it holds
         # Exclude known error/status outputs
         c_lower = c.lower()
         if (c.startswith("ERROR:") or c.startswith("EMPTY TABLE")
@@ -197,6 +201,12 @@ Please ask again — the assistant checks the live schema (`get_database_schema`
 before retrying, so it won't guess at column names a second time.
 """
 
+HALLUCINATION_NOT_ANSWERED = """\
+⚠️ **This question could not be answered from the loaded data.**
+
+{detail}
+"""
+
 HALLUCINATION_NO_TOOLS = """\
 ⚠️ **No data was fetched for this query.**
 
@@ -228,9 +238,15 @@ def validate_response(
     failure_type    = _classify_tool_failure(tool_outputs)
     tools_failed    = failure_type is not None or _tool_output_signals_failure(tool_outputs)
     reply_has_data  = _reply_claims_data(reply)
+    # A tool that explicitly said "NOT_ANSWERED" (and why) is the most specific evidence there is: a reply that then
+    # presents a table or a pile of numbers invented them.
+    not_answered = next((c for _, c in tool_outputs if answer_status.is_not_answered(c)), None)
 
     hallucinated = False
-    if tools_failed and reply_has_data:
+    if not_answered is not None and reply_has_data:
+        hallucinated = True
+        failure_type = "not_answered"
+    elif tools_failed and reply_has_data:
         hallucinated = True
     elif no_tools_called and reply_has_data:
         hallucinated = True
@@ -258,6 +274,9 @@ def validate_response(
 
     if no_tools_called:
         return HALLUCINATION_NO_TOOLS
+
+    if failure_type == "not_answered":
+        return HALLUCINATION_NOT_ANSWERED.format(detail=answer_status.status_message(not_answered))
 
     if failure_type and failure_type.startswith("sql_error:"):
         error_detail = failure_type[len("sql_error:"):]

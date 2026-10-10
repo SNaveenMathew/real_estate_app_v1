@@ -33,6 +33,7 @@ from agents.tools import (
     search_all_house_descriptions,
 )
 from agents.response_validator import validate_response
+from agents import answer_status
 import db.schema_catalog as schema
 from agents.query_planner import build_query_plan
 
@@ -528,6 +529,10 @@ def _extract_query_result_fallback(evidence: str) -> str:
         candidate = blocks[-1].strip()
         if "[RESULT]" in candidate:
             candidate = candidate.split("[RESULT]", 1)[1].strip()
+        # A deliberate non-answer carries a machine marker; show the user only its plain-language message.
+        explained = answer_status.status_message(candidate)
+        if explained:
+            return explained
         if candidate and not candidate.lower().startswith(("code agent error", "query returned 0 rows", "0 rows")):
             return candidate
 
@@ -726,7 +731,8 @@ def run_general_chat(
                     ("Query returned 0 rows" in result
                      or "Code Agent error:" in result
                      or "does not match" in result.lower()
-                     or "join" in result.lower() and "likely" in result.lower())
+                     or "join" in result.lower() and "likely" in result.lower()
+                     or answer_status.is_retryable(result))     # NOT_ANSWERED a reworded request could fix
                     for _, result in calls
                 )
                 if not any(name in {"query_database", "find_bike_route", "search_all_house_descriptions"} for name in names) or step_failed:
