@@ -15,7 +15,8 @@ place_missing     A derived measure needs a named place and the request has none
 place_ambiguous   A place name fits several places; the user must choose.
 topic_unavailable The topic is known NOT to be loaded (a ``gap`` concept); nothing may be estimated.
 data_unavailable  The data needed exists in the model but is missing/incomplete in the database.
-limit_exceeded    The request is larger than one call supports.
+limit_exceeded    The request is larger than one call supports (too many items, or it ran too long and was stopped).
+model_unavailable The language model service is not responding and this step needs it.
 
 *Retryable* means a differently-worded request from the orchestrator could succeed; the others need the user (or an
 operator) and retrying would only repeat the same answer.
@@ -33,8 +34,9 @@ PLACE_AMBIGUOUS = "place_ambiguous"
 TOPIC_UNAVAILABLE = "topic_unavailable"
 DATA_UNAVAILABLE = "data_unavailable"
 LIMIT_EXCEEDED = "limit_exceeded"
+MODEL_UNAVAILABLE = "model_unavailable"
 
-CODES = frozenset({UNPLANNABLE, PLACE_MISSING, PLACE_AMBIGUOUS, TOPIC_UNAVAILABLE, DATA_UNAVAILABLE, LIMIT_EXCEEDED})
+CODES = frozenset({UNPLANNABLE, PLACE_MISSING, PLACE_AMBIGUOUS, TOPIC_UNAVAILABLE, DATA_UNAVAILABLE, LIMIT_EXCEEDED, MODEL_UNAVAILABLE})
 RETRYABLE = frozenset({UNPLANNABLE, PLACE_MISSING})
 
 # Anchored to the start of the text or to the "[RESULT]" header that query_database puts in front of results, so a
