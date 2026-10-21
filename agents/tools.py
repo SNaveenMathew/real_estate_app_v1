@@ -17,7 +17,7 @@ import db.vector_store as vs
 import db.schema_catalog as schema
 import services.bike_routing as bike_routing
 from agents.query_planner import build_query_plan
-from agents import answer_policy
+from agents import answer_policy, answer_status, llm_resilience, semantic_fallback
 from agents.artifacts import classify_dataframe, emit_artifact
 import asyncio
 import threading
@@ -332,6 +332,7 @@ def get_code_agent() -> ChatOpenAI:
             # context limit.
             max_tokens=settings.code_agent_max_tokens,
             timeout=settings.llm_request_timeout,
+            max_retries=settings.llm_max_retries,
         )
     return _agent
 
@@ -366,10 +367,10 @@ def generate_sql(request: str, requirements: str = "", plan: str = "", focused: 
             except Exception:
                 pass
         try:
-            response = get_code_agent().invoke([
+            response = llm_resilience.invoke(get_code_agent(), [
                 SystemMessage(content=SYSTEM_PROMPT),
                 HumanMessage(content=prompt),
-            ])
+            ], role="sql_agent")
             raw = _extract_content(response)
             cleaned = _clean_sql(raw)
             if span is not None:
@@ -477,6 +478,38 @@ def _validate_sql_against_plan(sql: str, query_plan) -> None:
                 continue
             if not selected.intersection(keys):
                 raise ValueError(f"Generated SQL introduced an unplanned filter on semantic field '{col}'.")
+
+    _verify_plan_contract(sql, query_plan)
+
+
+_inspector_warned = False
+
+
+def _verify_plan_contract(sql: str, query_plan) -> None:
+    """Structural verification (agents/plan_contract.py): safety, approved joins, entity/scope filters, row limit.
+
+    Runs AFTER the legacy checks so every message they produce for a statement they already rejected is unchanged; this
+    only ADDS rejections.  If DuckDB's parse-tree format is ever unreadable the legacy checks alone apply (the previous
+    behaviour) and the problem is logged loudly once, instead of every statement being rejected.
+    """
+    global _inspector_warned
+    from agents import plan_contract, sql_inspector
+    try:
+        violations = plan_contract.verify(sql, query_plan)
+    except sql_inspector.SqlInspectorUnavailable as exc:
+        if not _inspector_warned:
+            _inspector_warned = True
+            import logging
+            logging.getLogger(__name__).warning("SQL inspector unavailable (%s): falling back to the legacy SQL checks only. "
+                                                "Run tests/test_sql_inspector.py against this DuckDB version.", exc)
+        return
+    mode = str(getattr(settings, "sql_contract_mode", "enforce") or "enforce").lower()
+    blockers = plan_contract.blocking(violations, mode)
+    if blockers:
+        raise ValueError("SQL contract violated: " + " | ".join(v.message for v in blockers))
+    if violations:
+        import logging
+        logging.getLogger(__name__).info("SQL contract (mode=%s) would reject: %s", mode, "; ".join(v.message for v in violations))
 
 
 def _qualify_join_expr(table: str, expr: str) -> str:
@@ -622,6 +655,7 @@ def _compile_sql_from_plan(query_plan) -> str:
 
     predicates = []
     predicates.extend(_group_equality_predicates(query_plan.entity_filters))
+    predicates.extend(query_plan.scope_filters)             # mandatory scope (agents/query_scope.py)
     predicates.extend(query_plan.filters)
     if "exclude NULL" in query_plan.null_policy and expr:
         for field in re.findall(r"\b[a-zA-Z_][\w]*\.[a-zA-Z_][\w]*\b", expr):
@@ -630,8 +664,9 @@ def _compile_sql_from_plan(query_plan) -> str:
 
     group_clause = f" GROUP BY {', '.join(group_sql)}" if group_sql else ""
     order_clause = f" ORDER BY {query_plan.ordering}" if query_plan.ordering else ""
+    limit_clause = f" LIMIT {int(query_plan.result_limit)}" if query_plan.result_limit else ""     # an explicit "top N"
 
-    return f"SELECT {select_sql} FROM {from_sql}{where_sql}{group_clause}{order_clause}"
+    return f"SELECT {select_sql} FROM {from_sql}{where_sql}{group_clause}{order_clause}{limit_clause}"
 
 
 def run_code_query(
@@ -675,6 +710,8 @@ def run_code_query(
             last_sql = sql
             if not sql.strip():
                 sql = _compile_sql_from_plan(query_plan)
+        except llm_resilience.TurnCancelled:
+            raise                                           # the deadline passed: never "recover" by doing more work
         except Exception as exc:
             try:
                 # The fallback compiler is intentionally limited to the empty/invalid
@@ -688,6 +725,9 @@ def run_code_query(
                     raise
             except Exception:
                 repair_note = f"Generation/validation failed: {exc}. Regenerate from the same authoritative plan; do not change user scope."
+                if isinstance(exc, llm_resilience.ModelUnavailable):
+                    raise exc                               # the REAL cause (not the compile error being handled right now);
+                                                            # a model known to be down will not answer the next attempt either
                 if attempt == 2:
                     raise
                 continue
@@ -697,8 +737,9 @@ def run_code_query(
                 "sql.statement": sql,
             }) as execution_span:
                 try:
-                    df = store.query(sql)
+                    df, truncated = store.query_limited(sql)     # time-limited and row-capped (db/duckdb_store.py)
                     if execution_span is not None:
+                        execution_span.set_attribute("sql.truncated", bool(truncated))
                         execution_span.set_attribute("sql.row_count", int(len(df)))
                         execution_span.set_attribute("sql.result_empty", bool(df.empty))
                         if not df.empty:
@@ -708,6 +749,12 @@ def run_code_query(
                         execution_span.set_attribute("sql.execution_status", "error")
                         execution_span.set_attribute("sql.execution_error", str(execution_exc))
                     raise
+        except store.SqlTimeout as exc:
+            # Re-running a statement that is too slow with the same plan would only repeat the wait: stop, and say so.
+            return sql, answer_status.not_answered(
+                answer_status.LIMIT_EXCEEDED,
+                f"{exc} The question is too broad to answer in one step; narrow it (a place, a time range, a smaller set) "
+                "and ask again.")
         except Exception as exc:
             repair_note = f"Execution failed: {exc}. Previous SQL: {sql}. Correct only the SQL error using the same plan."
             if attempt == 2:
@@ -733,6 +780,10 @@ def run_code_query(
             emit_artifact(classify_dataframe(df, request=request, presentation=presentation))
         except Exception:
             pass  # a presentation-layer problem must never break an otherwise-successful query
+        if truncated:
+            return sql, df.head(50).to_string(index=False) + (
+                f"\n... (more than {len(df)} rows exist; only the first {len(df)} were loaded and 50 are shown - "
+                "add a filter or a LIMIT for the full picture)")
         if len(df) > 50:
             return sql, df.head(50).to_string(index=False) + f"\n... ({len(df)} total rows, showing 50)"
         return sql, df.to_string(index=False)
@@ -813,6 +864,26 @@ def query_database(
         if retry_plan.required_tables or retry_plan.semantic_keys:
             request, structured_plan = enriched, retry_plan
 
+    # Nothing matched by alias: let a model PROPOSE concept keys (never SQL).  Proposed keys enter the plan as if an alias
+    # had matched; everything after - routing, SQL contract, execution - is unchanged (agents/semantic_fallback.py).
+    proposed: list[str] = []
+    if not structured_plan.required_tables and not structured_plan.semantic_keys:
+        proposed = semantic_fallback.propose_concepts(request)
+    if proposed:
+        with schema.forcing_concepts(proposed):
+            return _annotate_interpretation(_answer(request, requirements, presentation), proposed)
+    return _answer(request, requirements, presentation, structured_plan)
+
+
+def _annotate_interpretation(out: str, keys: list[str]) -> str:
+    """Tell the answer model (and so the user) how a request nothing matched was interpreted."""
+    if "[RESULT]\n" not in out or answer_status.is_not_answered(out):
+        return out
+    return out.replace("[RESULT]\n", f"[RESULT]\n(Interpreted as: {semantic_fallback.describe(keys)})\n", 1)
+
+
+def _answer(request: str, requirements: str, presentation: str, structured_plan=None) -> str:
+    structured_plan = structured_plan or build_query_plan(request)
     # Requests that must not reach SQL generation (ambiguous place, polygon-derived measure, known-unloaded topic) are
     # decided from catalog metadata in agents/answer_policy.py - there is no question-specific branch here.
     routed = answer_policy.route_before_sql(structured_plan, request, presentation=presentation)
@@ -821,6 +892,13 @@ def query_database(
 
     try:
         sql, result = run_code_query(request, presentation=presentation)
+    except llm_resilience.TurnCancelled:
+        raise
+    except llm_resilience.ModelUnavailable:
+        sql, result = "", answer_status.not_answered(
+            answer_status.MODEL_UNAVAILABLE,
+            "The language model service is not responding, and writing a query for this question needs it. Nothing was "
+            "estimated; ask again in a minute.")
     except Exception as exc:
         sql, result = "", f"Code Agent error: {exc}"
     result += answer_policy.caveats_after_sql(structured_plan)

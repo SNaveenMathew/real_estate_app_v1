@@ -29,6 +29,7 @@ from langchain_openai import ChatOpenAI
 from config import settings, LLM_STOP_SEQUENCES
 from agents.response_validator import validate_response
 from agents.artifacts import classify_dataframe, emit_artifact, reset_artifacts, collect_artifacts
+from agents import llm_resilience
 
 
 # -- Constants ----------------------------------------------------------------
@@ -192,17 +193,25 @@ def make_house_approved_functions(house_id: str) -> dict:
             for d in docs
         )
 
-    def query_database(request: str, presentation: str = "auto") -> str:
-        """Run a read-only analytical query scoped to this house."""
-        scoped_request = (
-            f"{request}\n\nThis is House Chat for house_id={house_id!r}. "
-            "Restrict house-specific results to this house."
-        )
-        return general_query_database.invoke({
-            "request": scoped_request,
-            "requirements": f"Keep the result scoped to house_id={house_id!r}.",
-            "presentation": presentation,
-        })
+    def query_database(request: str, presentation: str = "auto", scope: str = "this_house") -> str:
+        """Run a read-only analytical query.
+
+        ``scope="this_house"`` (the default) is STRUCTURAL: the plan carries ``houses.house_id = <this house>`` as a mandatory
+        filter, the SQL compiler adds it, and the SQL contract rejects any statement that drops it (agents/query_scope.py).
+        ``scope="all_houses"`` is the explicit, auditable way to ask a comparison or an aggregate over many houses.
+        The model chooses the scope; it cannot see, alter or omit the filter itself.
+        """
+        from agents import query_scope
+        if scope not in ("this_house", "all_houses"):
+            return (f"Code Agent error: scope must be 'this_house' or 'all_houses' (got {scope!r}). Use 'this_house' for "
+                    "anything about this house and 'all_houses' for comparisons or aggregates across houses.")
+        filters = (query_scope.ScopeFilter("houses", "house_id", str(house_id)),) if scope == "this_house" else ()
+        with query_scope.scoped(*filters):
+            return general_query_database.invoke({
+                "request": request,
+                "requirements": "",
+                "presentation": presentation,
+            })
 
     def get_commute_info() -> str:
         """Estimated commute from this house to the user's saved work location (free-flow; no traffic)."""
@@ -361,9 +370,13 @@ APPROVED FUNCTIONS
    -> Search stored descriptions, inspection notes, and Redfin/Zillow
      text for this house.
 
-6. query_database(request: str, presentation: str = "auto")
-    -> Run a read-only analytical query scoped to this house when the other
-        functions do not provide the requested computation. presentation is
+6. query_database(request: str, presentation: str = "auto", scope: str = "this_house")
+    -> Run a read-only analytical query when the other functions do not
+        provide the requested computation. scope="this_house" (the default)
+        restricts the query to THIS house - use it for anything about this
+        house. scope="all_houses" is ONLY for comparisons across houses or
+        aggregates over the datasets (averages in a city, rankings, counts).
+        presentation is
         an OPTIONAL hint -- "map"/"chart"/"table" when the user's own words
         ask to see the result that way, "auto" otherwise -- and the
         application still decides the actual shape from the data.
@@ -386,7 +399,8 @@ RULES
 7. For price estimation: call estimate_price_with_code().
 8. For comp/sold home: call get_nearby_sold_homes().
 9. For stored descriptions/documents: call search_house_documents(query=...).
-10. For custom house-specific analysis: call query_database(request=...).
+10. For custom house-specific analysis: call query_database(request=...). For comparisons across houses or aggregates:
+    call query_database(request=..., scope="all_houses").
 11. For commute, travel time or distance to work: call get_commute_info().
 12. You may call multiple functions when the question needs multiple sources.
 13. Set `final_result` to the most relevant result for the response model.
@@ -457,6 +471,7 @@ def _get_house_code_agent() -> ChatOpenAI:
             temperature=0.0,
             max_tokens=min(getattr(settings, "agent_max_tokens", 2000), 1200),
             timeout=settings.llm_request_timeout,
+            max_retries=settings.llm_max_retries,
             stop=LLM_STOP_SEQUENCES,
         )
     return _house_code_agent
@@ -472,6 +487,7 @@ def _get_house_response_agent() -> ChatOpenAI:
             temperature=0.0,
             max_tokens=min(getattr(settings, "agent_max_tokens", 2000), 1400),
             timeout=settings.llm_request_timeout,
+            max_retries=settings.llm_max_retries,
             stop=LLM_STOP_SEQUENCES,
         )
     return _house_response_agent
@@ -578,7 +594,7 @@ def _linked_datasets_prompt() -> str:
         lines.append(f"   - {d['name']}: {clean(d['description'])} Grain: {clean(d['grain']) or 'unspecified'}.{measures} Join: {d['join']}")
     first = linked[0]["name"]
     lines += [
-        "   For comparisons across houses, or aggregates over these datasets, use query_database(request=...).",
+        "   For comparisons across houses, or aggregates over these datasets, use query_database(request=..., scope=\"all_houses\").",
         f"   Example: User: What does {first} say about this house?",
         f'   Code: final_result = get_linked_dataset_records(dataset="{first}")',
     ]
@@ -610,10 +626,13 @@ def _generate_house_program(
         prompt_parts.append("EXECUTED EVIDENCE FROM A PREVIOUS STEP:\n" + prior_evidence[:6000])
     prompt_parts.append("Generate the next small Python program now.")
 
-    response = _get_house_code_agent().invoke([
-        SystemMessage(content="\n\n".join(p for p in prompt_parts if p)),
-        HumanMessage(content=user_message),
-    ])
+    try:
+        response = llm_resilience.invoke(_get_house_code_agent(), [
+            SystemMessage(content="\n\n".join(p for p in prompt_parts if p)),
+            HumanMessage(content=user_message),
+        ], role="house_code_agent")
+    except llm_resilience.ModelUnavailable:
+        return "final_result = get_house_details()"   # model down: degrade, do not fail
     code = _clean_code(_extract_text(response))
 
     if code:
@@ -634,10 +653,13 @@ def _generate_house_program(
         f"FIRST GENERATION ERROR: {first_error}\n"
         "Approved functions: " + ", ".join(sorted(approved_names))
     )
-    retry = _get_house_code_agent().invoke([
-        SystemMessage(content=retry_prompt),
-        HumanMessage(content="Generate the statement now."),
-    ])
+    try:
+        retry = llm_resilience.invoke(_get_house_code_agent(), [
+            SystemMessage(content=retry_prompt),
+            HumanMessage(content="Generate the statement now."),
+        ], role="house_code_agent")
+    except llm_resilience.ModelUnavailable:
+        return "final_result = get_house_details()"   # model down: degrade, do not fail
     retry_code = _clean_code(_extract_text(retry))
     if retry_code:
         try:
@@ -652,17 +674,17 @@ def _generate_house_program(
 
 # -- Final answer synthesis ---------------------------------------------------
 
-def _write_house_final_answer(user_message: str, history: list | None, evidence: str) -> str:
+def _write_house_final_answer_with_model(user_message: str, history: list | None, evidence: str) -> str:
     conversation = _messages_to_text(history, user_message)
     prompt = (
         _HOUSE_FINAL_RESPONSE_PROMPT
         + "\n\nCONVERSATION:\n" + conversation
         + "\n\nEXECUTED EVIDENCE:\n" + evidence[:HOUSE_FINAL_RESPONSE_MAX_CHARS]
     )
-    response = _get_house_response_agent().invoke([
+    response = llm_resilience.invoke(_get_house_response_agent(), [
         SystemMessage(content=prompt),
         HumanMessage(content="Write the final answer to the user's request. Return non-empty text grounded in the evidence."),
-    ])
+    ], role="house_response_agent")
     answer = _extract_text(response)
     if answer:
         return answer
@@ -672,11 +694,23 @@ def _write_house_final_answer(user_message: str, history: list | None, evidence:
         "Do not invent facts. Return concise, non-empty plain text or markdown.\n\n"
         f"USER REQUEST:\n{user_message}\n\nEVIDENCE:\n{evidence[:10000]}"
     )
-    retry = _get_house_response_agent().invoke([
+    retry = llm_resilience.invoke(_get_house_response_agent(), [
         SystemMessage(content=retry_prompt),
         HumanMessage(content="Answer now."),
-    ])
+    ], role="house_response_agent")
     return _extract_text(retry) or evidence.strip() or "I could not produce a response."
+
+
+def _write_house_final_answer(user_message: str, history: list | None, evidence: str) -> str:
+    """The answer model writes the reply; if it is unavailable the user still gets the retrieved data, labeled as such."""
+    try:
+        return _write_house_final_answer_with_model(user_message, history, evidence)
+    except llm_resilience.ModelUnavailable:
+        if not evidence.strip():
+            return ("The language model service is not responding and this question needs it. Nothing was estimated; "
+                    "please try again in a minute.")
+        return ("(The language model service is not responding, so this is the data the app retrieved without it, "
+                "not a written answer.)\n\n" + evidence.strip()[:6000])
 
 
 # -- Public entry-point -------------------------------------------------------

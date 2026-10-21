@@ -33,7 +33,7 @@ from agents.tools import (
     search_all_house_descriptions,
 )
 from agents.response_validator import validate_response
-from agents import answer_status
+from agents import answer_status, llm_resilience
 import db.schema_catalog as schema
 from agents.query_planner import build_query_plan
 
@@ -370,6 +370,7 @@ def _get_code_agent() -> ChatOpenAI:
             temperature=0.0,
             max_tokens=min(getattr(settings, "agent_max_tokens", 2000), 1800),
             timeout=settings.llm_request_timeout,
+            max_retries=settings.llm_max_retries,
             stop=LLM_STOP_SEQUENCES,
         )
     return _code_agent
@@ -385,6 +386,7 @@ def _get_response_agent() -> ChatOpenAI:
             temperature=0.0,
             max_tokens=min(getattr(settings, "agent_max_tokens", 2000), 1400),
             timeout=settings.llm_request_timeout,
+            max_retries=settings.llm_max_retries,
             stop=LLM_STOP_SEQUENCES,
         )
     return _response_agent
@@ -445,10 +447,13 @@ def _generate_program(user_message: str, history: list[dict] | None, prior_evide
     if prior_evidence:
         prompt.append("EXECUTED EVIDENCE FROM A PREVIOUS STEP:\n" + prior_evidence[:12000])
     prompt.append("Generate the next small Python program now.")
-    response = _get_code_agent().invoke([
-        SystemMessage(content="\n\n".join(prompt)),
-        HumanMessage(content=user_message),
-    ])
+    try:
+        response = llm_resilience.invoke(_get_code_agent(), [
+            SystemMessage(content="\n\n".join(prompt)),
+            HumanMessage(content=user_message),
+        ], role="code_agent")
+    except llm_resilience.ModelUnavailable:
+        return _deterministic_program(user_message, query_plan)   # model down: degrade, do not fail
     code = _clean_code(_extract_text(response))
     if code:
         try:
@@ -477,10 +482,13 @@ def _generate_program(user_message: str, history: list[dict] | None, prior_evide
         "Preserve the metadata-derived structured plan and retrieved data-model context. "
         "Do not invent filters, tables, relationships, or geography grains."
     )
-    retry = _get_code_agent().invoke([
-        SystemMessage(content=retry_prompt + f"\nFIRST GENERATION ERROR: {first_error}"),
-        HumanMessage(content="Generate the statement now."),
-    ])
+    try:
+        retry = llm_resilience.invoke(_get_code_agent(), [
+            SystemMessage(content=retry_prompt + f"\nFIRST GENERATION ERROR: {first_error}"),
+            HumanMessage(content="Generate the statement now."),
+        ], role="code_agent")
+    except llm_resilience.ModelUnavailable:
+        return _deterministic_program(user_message, query_plan)   # model down: degrade, do not fail
     retry_code = _clean_code(_extract_text(retry))
     if retry_code:
         try:
@@ -496,6 +504,11 @@ def _generate_program(user_message: str, history: list[dict] | None, prior_evide
     # still goes through query_database, which preserves the LLM-first/data-
     # model-grounded architecture while making malformed local-model output
     # non-fatal.
+    return _deterministic_program(user_message, query_plan)
+
+
+def _deterministic_program(user_message: str, query_plan) -> str:
+    """The plan-driven program that needs no model to WRITE (it still goes through query_database's validators)."""
     return (
         "final_result = query_database("
         f"request={user_message!r}, "
@@ -544,17 +557,17 @@ def _extract_query_result_fallback(evidence: str) -> str:
     return evidence.strip()
 
 
-def _write_final_answer(user_message: str, history: list[dict] | None, evidence: str) -> str:
+def _write_final_answer_with_model(user_message: str, history: list[dict] | None, evidence: str) -> str:
     context = _messages_to_text(history, user_message)
     prompt = (
         FINAL_RESPONSE_PROMPT
         + "\n\nCONVERSATION:\n" + context
         + "\n\nEXECUTED EVIDENCE:\n" + evidence[:FINAL_RESPONSE_MAX_CHARS]
     )
-    response = _get_response_agent().invoke([
+    response = llm_resilience.invoke(_get_response_agent(), [
         SystemMessage(content=prompt),
         HumanMessage(content="Write the final answer to the user's current request. Return non-empty text grounded in the evidence."),
-    ])
+    ], role="response_agent")
     answer = _extract_text(response)
     if answer:
         return answer
@@ -566,12 +579,25 @@ def _write_final_answer(user_message: str, history: list[dict] | None, evidence:
         "Do not invent facts. Return concise, non-empty plain text or markdown.\n\n"
         f"USER REQUEST:\n{user_message}\n\nEVIDENCE:\n{evidence[:12000]}"
     )
-    retry = _get_response_agent().invoke([
+    retry = llm_resilience.invoke(_get_response_agent(), [
         SystemMessage(content=retry_prompt),
         HumanMessage(content="Answer now."),
-    ])
+    ], role="response_agent")
     answer = _extract_text(retry)
     return answer or _extract_query_result_fallback(evidence)
+
+
+def _write_final_answer(user_message: str, history: list[dict] | None, evidence: str) -> str:
+    """The answer model writes the reply; if it is unavailable the user still gets what was retrieved, labeled as such."""
+    try:
+        return _write_final_answer_with_model(user_message, history, evidence)
+    except llm_resilience.ModelUnavailable:
+        body = _extract_query_result_fallback(evidence).strip()
+        if not body:
+            return ("The language model service is not responding and this question needs it. Nothing was estimated; "
+                    "please try again in a minute.")
+        return ("(The language model service is not responding, so this is the data the app retrieved without it, "
+                "not a written answer.)\n\n" + body)
 
 
 def run_general_chat(

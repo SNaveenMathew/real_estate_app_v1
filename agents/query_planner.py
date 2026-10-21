@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 import re
 import db.schema_catalog as schema
+from agents import query_scope
 
 @dataclass
 class QueryPlan:
@@ -23,10 +24,11 @@ class QueryPlan:
     select_expression: str | None = None
     operation: str | None = None
     rollup_spec: dict = field(default_factory=dict)
+    scope_filters: list[str] = field(default_factory=list)   # mandatory, set by code (agents/query_scope.py), never by the model
 
     def to_dict(self): return asdict(self)
     def render(self) -> str:
-        return "\n".join([
+        lines = [
             f"question_type: {self.question_type}",
             f"semantic_keys: {', '.join(self.semantic_keys) or 'none'}",
             f"required_tables: {', '.join(self.required_tables) or 'none'}",
@@ -43,11 +45,26 @@ class QueryPlan:
             f"result_limit: {self.result_limit if self.result_limit is not None else 'none'}",
             f"resolved_entities: {self.resolved_entities or 'none'}",
             f"entity_filters: {' | '.join(self.entity_filters) or 'none'}",
-        ])
+        ]
+        if self.scope_filters:        # only when set, so every plan without a scope renders exactly as before
+            lines.append(f"scope_filters (MANDATORY - the SQL must contain each as a positive condition): {' | '.join(self.scope_filters)}")
+        return "\n".join(lines)
+
+_NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+                 "eleven": 11, "twelve": 12, "fifteen": 15, "twenty": 20}
+_N = r"(\d{1,4}|" + "|".join(_NUMBER_WORDS) + r")"
+# "top 5", "bottom 3", "first 10", "best 5", ...  /  "5 cheapest", "3 most expensive", ...   (not "top 5 percent")
+_TOP_N = re.compile(r"\b(?:top|bottom|first|best|worst|highest|lowest)\s+" + _N + r"\b(?!\s*(?:%|percent|per\s*cent|percentile))", re.I)
+_N_SUPERLATIVE = re.compile(r"\b" + _N + r"\s+(?:cheapest|most\s+expensive|largest|biggest|smallest|highest|lowest|best|worst|safest|riskiest)\b", re.I)
 
 def _top_n(text):
-    m = re.search(r"\btop\s+(\d+)\b", text, re.I)
-    return int(m.group(1)) if m else None
+    """The N the user asked for ("top 25" -> 25, "five cheapest" -> 5), or None.  Sane bounds only."""
+    m = _TOP_N.search(text) or _N_SUPERLATIVE.search(text)
+    if not m:
+        return None
+    raw = m.group(1).lower()
+    n = _NUMBER_WORDS.get(raw) if raw in _NUMBER_WORDS else int(raw)
+    return n if 1 <= n <= 1000 else None
 
 def _select_operation(concepts, text):
     best = None
@@ -62,7 +79,9 @@ def _select_operation(concepts, text):
         return best[1], best[2]
     return None, None
 
-def build_query_plan(request: str, requirements: str = "", plan: str = "") -> QueryPlan:
+def build_query_plan(request: str, requirements: str = "", plan: str = "", scope=None) -> QueryPlan:
+    """``scope`` defaults to the scope set by code around the call (agents/query_scope.py); pass ``()`` to force none."""
+    scope = query_scope.current() if scope is None else tuple(scope)
     text = request.strip()
     concepts = schema.semantic_matches(text)
     intent = schema.match_request_intents(text)
@@ -157,11 +176,14 @@ def build_query_plan(request: str, requirements: str = "", plan: str = "") -> Qu
     if any(c.get("rollup") for c in concepts) and any(e["entity_type"] == "MSA" for e in resolved):
         tables.update({"census_msa", "cbsa_counties", "nri_tracts"})
 
+    tables.update(f.table.lower() for f in scope)         # the scoped table must be in the plan (and joined to the rest)
     tables = set(schema.expand_required_tables(tables))
     qp.required_tables = sorted(tables)
     qp.required_relationships = [r.render() for r in schema.relationships_for_tables(tables)]
     qp.entity_filters = [f"{e['table']}.{e['column']} = '{e['value'].replace(chr(39), chr(39)*2)}'" for e in resolved if e['table'] in tables]
 
+    qp.scope_filters = [f.render() for f in scope]
+
     top_n = _top_n(text)
-    if top_n is not None: qp.result_limit = 10
+    if top_n is not None: qp.result_limit = top_n          # honour the number the user actually asked for
     return qp

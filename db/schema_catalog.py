@@ -28,6 +28,7 @@ import re
 import threading
 from collections import deque
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Iterable, Iterator
 
 import db.duckdb_store as store
@@ -449,6 +450,21 @@ def _alias_matches(text: str, alias: str) -> bool:
     return text_match.has_phrase(text, alias)
 
 
+# Concepts PROPOSED by the semantic fallback (agents/semantic_fallback.py) for the current request.  They are held in a
+# ContextVar - set by code around one call, never by a model - and appear in ``semantic_matches`` exactly as if an alias
+# had matched, so the planner, the entity resolver and the context builder all agree without any argument plumbing.
+_FORCED_CONCEPTS: ContextVar = ContextVar("forced_concepts", default=())
+
+
+@contextmanager
+def forcing_concepts(keys):
+    token = _FORCED_CONCEPTS.set(tuple(keys))
+    try:
+        yield
+    finally:
+        _FORCED_CONCEPTS.reset(token)
+
+
 def semantic_matches(query: str) -> list[dict]:
     text = _normalize(query)
     hits = []
@@ -508,6 +524,17 @@ def semantic_matches(query: str) -> list[dict]:
         row["key"] = key
         row["match_score"] = spec * 10 + count
         out.append(row)
+    forced = _FORCED_CONCEPTS.get()
+    if forced:                                       # proposed by the semantic fallback: valid keys only, once each
+        have = {r["key"] for r in out}
+        glossary = _glossary()
+        for key in forced:
+            if key in glossary and key not in have:
+                row = dict(glossary[key])
+                row["key"] = key
+                row["match_score"] = 0
+                out.append(row)
+                have.add(key)
     return out
 
 
