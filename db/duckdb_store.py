@@ -3,6 +3,7 @@ DuckDB-backed structured data store.
 All heavy analytics (SQL-like queries, joins) go through here.
 """
 import json
+import threading
 import duckdb
 import pandas as pd
 from pathlib import Path
@@ -45,14 +46,80 @@ def _safe_connect(db_path: Path) -> duckdb.DuckDBPyConnection:
         raise
 
 
+# One database, one connection per THREAD.
+#
+# A DuckDB connection's result state is not thread-safe: two threads calling ``conn.execute(...).df()`` on the same
+# connection can clobber each other's results (``None`` frames, mixed rows).  The app used to get away with one shared
+# connection because every request ran on the event-loop thread, one at a time - at the price of a chat turn freezing the
+# whole server.  Now that turns run on worker threads (agents/turn_runner.py), every thread gets its own cursor: an
+# independent handle on the SAME database (DuckDB's documented pattern), so reads run concurrently, writes serialize in
+# the engine, and nothing else in the app changes: callers still just call ``get_conn()``.
+_local = threading.local()
+_create_lock = threading.RLock()
+_cursors: list = []            # every cursor handed out, so close() can release them (they keep the database file open)
+
+
 def get_conn() -> duckdb.DuckDBPyConnection:
+    """The calling thread's connection (a cursor on the shared database)."""
     global _conn, _generation
     if _conn is None:
-        settings.duckdb_path.parent.mkdir(parents=True, exist_ok=True)
-        _conn = _safe_connect(settings.duckdb_path)
-        _ensure_schema(_conn)
-        _generation += 1
-    return _conn
+        with _create_lock:
+            if _conn is None:                       # another thread may have created it while we waited
+                settings.duckdb_path.parent.mkdir(parents=True, exist_ok=True)
+                _conn = _safe_connect(settings.duckdb_path)
+                _ensure_schema(_conn)               # (assigned first: schema setup re-enters get_conn())
+                _generation += 1
+    cursor = getattr(_local, "cursor", None)
+    if cursor is None or getattr(_local, "generation", -1) != _generation:
+        with _create_lock:                          # also makes other threads wait while the schema is being created
+            cursor = _conn.cursor()
+            _cursors.append(cursor)
+        _local.cursor, _local.generation = cursor, _generation
+    return cursor
+
+
+class SqlTimeout(RuntimeError):
+    """A statement was interrupted because it ran longer than allowed."""
+
+
+def query_limited(sql: str, params=None, *, max_rows: int | None = None, timeout_s: float | None = None):
+    """Run one statement with a time limit and a row cap: ``(DataFrame, truncated)``.
+
+    LLM-written SQL can be correct yet enormous (a many-to-many join, a missing filter).  The statement is interrupted after
+    ``settings.sql_timeout_s`` (-> ``SqlTimeout``), and at most ``settings.sql_max_rows`` rows are materialized (the caller
+    is told when more existed).  Reads go through the calling thread's cursor, so a runaway statement never blocks others.
+    """
+    max_rows = int(settings.sql_max_rows if max_rows is None else max_rows)
+    timeout_s = float(settings.sql_timeout_s if timeout_s is None else timeout_s)
+    cursor = get_conn()
+    fired = threading.Event()
+
+    def _expire():
+        fired.set()
+        try:
+            cursor.interrupt()
+        except Exception:
+            pass
+
+    timer = threading.Timer(timeout_s, _expire) if timeout_s > 0 else None
+    if timer:
+        timer.daemon = True
+        timer.start()
+    try:
+        result = cursor.execute(sql, params) if params else cursor.execute(sql)
+        vectors = max(1, -(-(max_rows + 1) // 2048))      # DuckDB hands out rows 2048 at a time
+        frame = result.fetch_df_chunk(vectors)
+        truncated = len(frame) > max_rows
+        if truncated:
+            frame = frame.iloc[:max_rows].reset_index(drop=True)
+        return frame, truncated
+    except duckdb.InterruptException as exc:
+        if fired.is_set():
+            raise SqlTimeout(f"The statement ran longer than {timeout_s:g} seconds and was cancelled.") from exc
+        raise
+    finally:
+        if timer:
+            timer.cancel()
 
 
 def is_connected() -> bool:
@@ -1296,6 +1363,14 @@ def close():
             _conn.execute("CHECKPOINT")
         except Exception:
             pass
+        with _create_lock:
+            for cursor in _cursors:           # cursors keep the database open; release them with the connection
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+            _cursors.clear()
+        _local.cursor = None
         try:
             _conn.close()
         except Exception:
