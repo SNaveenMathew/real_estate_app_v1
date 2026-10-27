@@ -60,10 +60,9 @@ check("right set, wrong order -> FAIL",
       verdict(ex_ord, "Ranked: 1. Denver 2. Miami 3. Austin 4. Pittsburgh.") == "FAIL")
 check("missing item -> FAIL",
       verdict(ex_ord, "Miami, then Denver, then Pittsburgh.") == "FAIL")
-check("(documented limitation) earlier out-of-order mention before the real "
-      "list can still cause a false FAIL",
+check("earlier out-of-order mention does not override the correctly ordered list",
       verdict(ex_ord, "Denver and Miami are both large. Ranked: "
-                       "1. Miami 2. Denver 3. Pittsburgh 4. Austin.") == "FAIL")
+                       "1. Miami 2. Denver 3. Pittsburgh 4. Austin.") == "PASS")
 
 # ── Numeric, exact (tolerance=0 — counts) ───────────────────────────────────
 print("\nNumeric, exact match required (counts)")
