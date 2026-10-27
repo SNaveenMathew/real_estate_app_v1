@@ -182,7 +182,9 @@ def test_query_database_emits_chart_artifact_for_qualifying_result(reference_dat
 
     A.reset_artifacts()
     result = tools.query_database.invoke({
-        "request": "average price by city",
+        # The semantic catalog intentionally recognizes "list price" (not the
+        # unqualified phrase "price") for current house listings.
+        "request": "average list price by city",
         "presentation": "chart",
     })
     assert "avg_price" in result.lower() or "AVG" in result
