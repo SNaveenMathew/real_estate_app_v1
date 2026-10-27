@@ -2,6 +2,7 @@
 LangChain tools shared by house agent and general agent.
 """
 import json
+import logging
 import re
 import traceback
 from typing import Any, Optional
@@ -713,6 +714,12 @@ def run_code_query(
         except llm_resilience.TurnCancelled:
             raise                                           # the deadline passed: never "recover" by doing more work
         except Exception as exc:
+            # Never swallow silently: a model writing bad SQL (ValueError from validation) is routine, but anything else
+            # before the model was even reached (prompt building, client set-up) is a defect that the compiled-SQL
+            # fallback would otherwise hide.
+            _sql_log = logging.getLogger(__name__)
+            (_sql_log.info if isinstance(exc, ValueError) else _sql_log.warning)(
+                "SQL attempt %d failed (%s: %s)", attempt + 1, type(exc).__name__, str(exc)[:300])
             try:
                 # The fallback compiler is intentionally limited to the empty/invalid
                 # SQL case; it never replaces valid LLM-generated SQL.
