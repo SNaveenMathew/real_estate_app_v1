@@ -61,6 +61,7 @@ class CensusFixture:
     tmp_path: Path
     expected: dict = field(default_factory=dict)   # msa display name -> expected population / area / density
     saved: dict = field(default_factory=dict)
+    tracer_saved: tuple = (False, None)            # (was saved, previous observability._tracer)
 
 
 def _build_geometry(rows: list[dict]) -> gpd.GeoDataFrame:
@@ -94,6 +95,15 @@ def activate(tmp_path: Path) -> CensusFixture:
 
     fx = CensusFixture(tmp_path=Path(tmp_path))
     fx.saved = {k: getattr(settings, k) for k in ("duckdb_path", "nri_shp", "shapefile_dir")}
+    # Tracing OFF for these tests.  With Phoenix installed and no collector running, every span used to cost seconds of
+    # connection retries (and spam the log); tests must neither wait on nor depend on an external service.  The previous
+    # process-wide state is restored by deactivate(), so other test modules see exactly what they would have seen.
+    try:
+        import observability
+        fx.tracer_saved = (True, observability._tracer)
+        observability._tracer = False
+    except Exception:
+        pass
     store.close()
     settings.duckdb_path = fx.tmp_path / "fixture.duckdb"
     settings.nri_shp = fx.tmp_path / "nri" / "NRI_fixture.shp"
@@ -163,4 +173,7 @@ def deactivate(fx: CensusFixture) -> None:
     store.close()
     for k, v in fx.saved.items():
         setattr(settings, k, v)
+    if fx.tracer_saved[0]:
+        import observability
+        observability._tracer = fx.tracer_saved[1]
     _clear_geometry_caches()
