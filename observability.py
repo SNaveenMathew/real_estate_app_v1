@@ -307,7 +307,10 @@ def initialize_observability() -> None:
                 project_name=settings.phoenix_project_name,
                 endpoint=endpoint,
                 protocol=settings.phoenix_protocol,
-                batch=False,
+                # Export spans from a background thread.  batch=False exported each span SYNCHRONOUSLY inside span.end(),
+                # so with the collector stopped every span cost ~7 seconds of connection retries - minutes per chat turn.
+                # (The local evaluation capture below is a separate in-memory processor and stays synchronous.)
+                batch=settings.phoenix_batch_export,
                 auto_instrument=False,
             )
             try:

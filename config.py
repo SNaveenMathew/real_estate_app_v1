@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     agent_max_tokens: int = 2048        # ReAct agent turn: reasoning + tool call + final answer
     code_agent_max_tokens: int = 1500   # SQL Code Agent: raised from 700 — see "Round 2" above
     llm_request_timeout: float = 120.0  # seconds, per HTTP request to llama-server
+    phoenix_batch_export: bool = True   # False = export each span synchronously: blocks every request while the collector is down
     llm_max_retries: int = 1            # client-level retries; the library default (2) multiplies the worst-case wait to ~3x the timeout
 
     # ── Resilience (agents/llm_resilience.py, agents/turn_runner.py, agents/tools.py, db/duckdb_store.py) ────────
