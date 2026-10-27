@@ -113,7 +113,11 @@ def test_nri_and_census_tracts_are_the_only_fill_layers_and_risk_score_ranks_fir
     ]
 
 
-def test_choropleth_reports_unavailable_without_tract_geometry(reference_data):
+def test_choropleth_reports_unavailable_without_tract_geometry(reference_data, monkeypatch):
+    # Geometry may be installed on the machine running the tests. Make the
+    # no-geometry precondition explicit instead of depending on local data files.
+    from services import geo_utils
+    monkeypatch.setattr(geo_utils, "_load_tracts_gdf", lambda: None)
     spec = next(s for s in ml.derive_layer_specs() if s["name"] == "nri_tracts")
     assert spec["available"] is False and "geometry" in spec["reason"].lower()
 
@@ -361,7 +365,12 @@ def test_msa_population_density_uses_total_population_over_total_land_area(refer
     reference_data.execute("INSERT INTO census_tracts VALUES ('18097010100', '1400000US18097010100', 'Marion', 2000)")
     reference_data.executemany(
         "INSERT INTO census_msa VALUES (?, NULL, ?, NULL)",
-        [("38300", "Pittsburgh, PA Metro Area")],
+        [
+            ("38300", "Pittsburgh, PA Metro Area"),
+            # query_database resolves requested metros through census_msa; the
+            # direct helper below can also resolve a title from cbsa_counties.
+            ("26900", "Indianapolis, IN Metro Area"),
+        ],
     )
     reference_data.executemany(
         "INSERT INTO cbsa_counties VALUES (?, ?, 'Metro', ?, ?, ?, ?)",
@@ -402,7 +411,10 @@ def test_get_tract_choropleth_measure_validation_and_missing_geometry(reference_
         ml.get_tract_choropleth("houses", "price", *PGH_BBOX)     # houses is not a choropleth-kind layer at all
 
 
-def test_get_tract_choropleth_without_geometry_returns_an_explained_empty_result(reference_data):
+def test_get_tract_choropleth_without_geometry_returns_an_explained_empty_result(reference_data, monkeypatch):
+    # Do not depend on whether the developer has optional NRI/TIGER geometry installed.
+    from services import geo_utils
+    monkeypatch.setattr(geo_utils, "_load_tracts_gdf", lambda: None)
     out = ml.get_tract_choropleth("nri_tracts", "risk_score", *PGH_BBOX)
     assert out["features"] == [] and "geometry" in out["warning"].lower()
 
