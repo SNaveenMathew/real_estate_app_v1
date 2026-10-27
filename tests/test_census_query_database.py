@@ -205,7 +205,10 @@ def test_partial_topics_are_flagged_after_a_real_sql_answer(fx, model):
 def test_house_questions_are_untouched(fx, model):
     model.replies = ["SELECT COUNT(houses.house_id) FROM houses WHERE houses.city = 'Pittsburgh'"]
     out = ask("How many houses are in Pittsburgh?")
-    assert model.calls == 1 and "NOT_ANSWERED" not in out and "NOTE (not part" not in out
+    # Outcome first (what a user sees), then mechanism; both report the evidence so a failure is diagnosable at a glance.
+    assert "NOT_ANSWERED" not in out and "NOTE (not part" not in out and "Code Agent error" not in out, out
+    assert result_of(out).split()[-1] == "2", out                    # the two Pittsburgh houses in the fixture
+    assert model.calls == 1, f"the SQL model was called {model.calls} time(s), expected 1. Evidence was:\n{out}"
 
 
 # --------------------------------------------------------------------------------------------------------------------
