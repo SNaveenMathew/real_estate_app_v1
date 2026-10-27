@@ -11,7 +11,8 @@ server slow, each call could wait out the full HTTP timeout, up to three times (
   not the service's fault and is re-raised untouched, so existing handling of those is unchanged;
 * **circuit breaker** - after ``llm_breaker_threshold`` consecutive transient failures the model is declared down and
   calls fail INSTANTLY for ``llm_breaker_cooldown_s``; then exactly one probe call is allowed, and its outcome closes or
-  re-opens the breaker.  A dead server therefore costs one timeout, not one per call;
+  re-opens the breaker.  A dead server therefore costs one timeout, not one per call.  Breakers are per ROLE ("chat" for
+  the primary models, "semantic" for the optional proposer) so a best-effort feature cannot disable the primary path;
 * **ModelUnavailable** - what callers see.  Each caller has a deterministic fallback (a fixed program, the compiled
   SQL, the raw evidence) and uses it: the app keeps working, in a degraded mode that says so.
 
@@ -101,31 +102,43 @@ class CircuitBreaker:
             return {"state": self.state, "consecutive_failures": self.failures, "retry_in_s": round(retry_in, 1)}
 
 
-_BREAKER: CircuitBreaker | None = None
+# One breaker per ROLE of model use, not one for the process.  The primary path ("chat": code, SQL and answer models) and
+# the optional semantic proposer ("semantic") share a server, but an optional, best-effort enhancement must never be able
+# to take down the primary path: if the proposer's calls fail (its own short timeout, its own client) only ITS breaker
+# opens, and the chat models keep working.  (A shared breaker did exactly that in a test run with no model server: the
+# proposer's connection failures opened it, and every later chat-model call - even a stub - was refused unseen.)
+_BREAKERS: dict[str, CircuitBreaker] = {}
 _BREAKER_LOCK = threading.Lock()
 
 
-def breaker() -> CircuitBreaker:
-    global _BREAKER
-    if _BREAKER is None:
+def breaker(name: str = "chat") -> CircuitBreaker:
+    cb = _BREAKERS.get(name)
+    if cb is None:
         with _BREAKER_LOCK:
-            if _BREAKER is None:
-                _BREAKER = CircuitBreaker(settings.llm_breaker_threshold, settings.llm_breaker_cooldown_s)
-    return _BREAKER
+            cb = _BREAKERS.get(name)
+            if cb is None:
+                cb = _BREAKERS[name] = CircuitBreaker(settings.llm_breaker_threshold, settings.llm_breaker_cooldown_s)
+    return cb
 
 
-def configure_breaker(threshold: int, cooldown_s: float, clock=time.monotonic) -> CircuitBreaker:
-    """Replace the breaker (tests, or reconfiguration at start-up)."""
-    global _BREAKER
+def configure_breaker(threshold: int, cooldown_s: float, clock=time.monotonic, name: str = "chat") -> CircuitBreaker:
+    """Replace a breaker (tests, or reconfiguration at start-up)."""
     with _BREAKER_LOCK:
-        _BREAKER = CircuitBreaker(threshold, cooldown_s, clock)
-    return _BREAKER
+        _BREAKERS[name] = CircuitBreaker(threshold, cooldown_s, clock)
+        return _BREAKERS[name]
+
+
+def statuses() -> dict:
+    """Every breaker that exists, for health checks."""
+    with _BREAKER_LOCK:
+        names = sorted(_BREAKERS)
+    return {n: breaker(n).status() for n in (names or ["chat"])}
 
 
 def reset() -> None:
-    global _BREAKER
+    """Forget all breaker state (a fresh process, or test isolation)."""
     with _BREAKER_LOCK:
-        _BREAKER = None
+        _BREAKERS.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -169,14 +182,14 @@ def check_cancelled() -> None:
 # ---------------------------------------------------------------------------
 # The one place a model is called
 # ---------------------------------------------------------------------------
-def invoke(client, messages, *, role: str = "model"):
+def invoke(client, messages, *, role: str = "model", breaker_name: str = "chat"):
     """``client.invoke(messages)`` with classification, the breaker and cancellation.
 
     Raises ``ModelUnavailable`` for a transient service failure (or an open breaker), ``TurnCancelled`` past the deadline,
     and re-raises anything else (a bad request is not an outage) exactly as before.
     """
     check_cancelled()
-    gate = breaker()
+    gate = breaker(breaker_name)
     gate.before_call()
     try:
         result = client.invoke(messages)

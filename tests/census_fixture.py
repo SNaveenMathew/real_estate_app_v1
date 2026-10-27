@@ -62,6 +62,7 @@ class CensusFixture:
     expected: dict = field(default_factory=dict)   # msa display name -> expected population / area / density
     saved: dict = field(default_factory=dict)
     tracer_saved: tuple = (False, None)            # (was saved, previous observability._tracer)
+    semantic_saved: bool = True                    # previous settings.semantic_fallback_enabled
 
 
 def _build_geometry(rows: list[dict]) -> gpd.GeoDataFrame:
@@ -102,6 +103,16 @@ def activate(tmp_path: Path) -> CensusFixture:
         import observability
         fx.tracer_saved = (True, observability._tracer)
         observability._tracer = False
+    except Exception:
+        pass
+    # The optional semantic proposer would call a REAL model client (nothing is listening in a test run), and its failures
+    # must not leak into other tests: off by default here; tests that exercise it enable it with a stub client.  Breaker
+    # state is process-wide, so it is reset on the way in and out.
+    fx.semantic_saved = settings.semantic_fallback_enabled
+    settings.semantic_fallback_enabled = False
+    try:
+        from agents import llm_resilience
+        llm_resilience.reset()
     except Exception:
         pass
     store.close()
@@ -176,4 +187,10 @@ def deactivate(fx: CensusFixture) -> None:
     if fx.tracer_saved[0]:
         import observability
         observability._tracer = fx.tracer_saved[1]
+    settings.semantic_fallback_enabled = fx.semantic_saved
+    try:
+        from agents import llm_resilience
+        llm_resilience.reset()
+    except Exception:
+        pass
     _clear_geometry_caches()

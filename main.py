@@ -368,7 +368,7 @@ async def stats():
 @app.get("/api/agent/status")
 async def agent_status():
     """Is the language model reachable, and how busy is the agent?  Makes no model call."""
-    return {"model": llm_resilience.breaker().status(), "turns": turn_runner.status()}
+    return {"model": llm_resilience.breaker().status(), "breakers": llm_resilience.statuses(), "turns": turn_runner.status()}
 
 
 if __name__ == "__main__":

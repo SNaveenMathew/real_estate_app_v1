@@ -101,7 +101,7 @@ def propose_concepts(request: str) -> list[str]:
     try:
         reply = llm_resilience.invoke(
             _get_client(), [SystemMessage(content=_SYSTEM), HumanMessage(content=f"CONCEPTS:\n{listing}\n\nQUESTION: {request.strip()[:500]}")],
-            role="semantic_fallback")
+            role="semantic_fallback", breaker_name="semantic")      # its own breaker: it must never disable the chat models
     except llm_resilience.ModelUnavailable:
         return []                                                  # transient: not cached, and the request is then simply unplannable
     content = getattr(reply, "content", reply)
