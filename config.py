@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     # When no catalog alias matches, a short model call may PROPOSE concept keys (never SQL); see agents/semantic_fallback.py.
     semantic_fallback_enabled: bool = True
     semantic_fallback_timeout_s: float = 20.0
+    # Dataset onboarding: a model may suggest extra column pairs to TEST for joins (services/relationship_suggestions.py).
+    # Off by default: it adds one model call to onboarding. Suggested pairs are still validated against the data and
+    # still need the user's approval.
+    relationship_llm_suggestions_enabled: bool = False
+    relationship_llm_timeout_s: float = 20.0
 
     # ── Presentation layer (agents/artifacts.py) ────────────────────────────
     # Caps on how much of an executed result becomes a table/chart/map
