@@ -26,6 +26,7 @@ import pandas as pd
 
 import db.schema_catalog as schema
 from services.dataset_readers import qi
+from services.relationship_suggestions import suggest_pairs
 
 # ---------------------------------------------------------------------------
 # Column profiling
@@ -630,6 +631,11 @@ def discover_relationships(conn, dataset: dict, source_table: str, *, max_evals:
     included = [c for c in dataset["columns"] if c.get("include", True)]
     prof = profile_table(conn, source_table)
     targets = _target_columns(conn, exclude={final, source_table})
+    # Optional (opt-in): a model may suggest extra pairs to TEST.  They get the same evaluation and thresholds as any other
+    # candidate; the time the call took is not charged to the evaluation budget.
+    _llm_t0 = time.monotonic()
+    llm_pairs = suggest_pairs(prof, included, targets)
+    started += time.monotonic() - _llm_t0
     tcache: dict = {}
     non_empty: dict[str, int] = {}
     taken_cols = {c["name"] for c in included}
@@ -662,7 +668,10 @@ def discover_relationships(conn, dataset: dict, source_table: str, *, max_evals:
             if ns >= 0.6 or same_group:
                 cands.append((max(ns, 0.9 if same_group else 0.0), t))
         cands.sort(key=lambda x: (-x[0], x[1]["table"], x[1]["column"]))
-        for ns, t in cands[:10]:
+        name_based = {(t["table"], t["column"]) for _, t in cands[:10]}
+        suggested = [(name_score(cname, t["column"]), t) for t in llm_pairs.get(cname, [])
+                     if (t["table"], t["column"]) not in name_based]
+        for ns, t in cands[:10] + suggested:
             if evals >= max_evals or time.monotonic() - started > budget_s:
                 break
             tp = _target_profile(conn, tcache, t["table"], t["column"], t["family"])
@@ -709,6 +718,10 @@ def discover_relationships(conn, dataset: dict, source_table: str, *, max_evals:
                 warnings.append(f"One key matches up to {st['fanout_max']:,} rows in {t['table']}; averages over the joined result are weighted by that repetition.")
             if score < 0.6:
                 warnings.append("Fewer than 60% of values match; check that the key's format is what you expect.")
+            llm_suggested = (t["table"], t["column"]) not in name_based
+            if llm_suggested:
+                warnings.append("The assistant suggested testing this pair because the names differ; the match below is measured "
+                                "from your data. Check the examples before approving.")
             if tr["kind"] != "identity":
                 warnings.append(f"A new column '{left_expr}' will be added to {final} ({transform_rule_text(tr, cname).lower()}).")
             ex = build_examples(conn, source_table, cname, transform_sql(tr, qi(cname)), t["table"], t["column"], ctx_cols,
@@ -730,7 +743,8 @@ def discover_relationships(conn, dataset: dict, source_table: str, *, max_evals:
                             "preferred": (conf in ("high", "medium") and card != "many-to-many") or (conf == "high" and ns >= 0.9),
                             "grain_effect": f"{final} row -> {t['table']} row(s)",
                             "note": f"{_explain(tr, cname, t['table'], right_expr)}.",
-                            "derive": derive, "score": round(score, 3), "name_score": ns},
+                            "derive": derive, "score": round(score, 3), "name_score": ns,
+                            **({"origin": "llm-suggested"} if llm_suggested else {})},
                 "evidence": {"stats": st, "transform": {**tr, "label": transform_rule_text(tr, cname)},
                              "rule_text": transform_rule_text(tr, cname), "examples": ex["examples"],
                              "unmatched": ex["unmatched"], "target": f"{t['table']}.{right_expr}",
