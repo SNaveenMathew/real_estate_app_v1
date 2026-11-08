@@ -209,6 +209,9 @@ The project reads `.env` via `pydantic-settings` and includes defaults for:
 - model timeout and token caps
 - Phoenix observability endpoint
 - app host/port and default map center
+- resilience and limits: model retries and circuit breaker, how many chat turns run at once and for how long, SQL
+  timeout and row cap, the SQL contract mode (see [Agent Architecture §12](AGENT_ARCHITECTURE.md#12-resilience-verified-sql-scoped-queries-and-bounded-turns)
+  and `.env.example`)
 
 All settings are optional. The defaults in `config.py` point at a local
 `llama-server` on port `8080`, Phoenix on port `6006`, and the database and
@@ -488,6 +491,10 @@ The vector database (ChromaDB) grows automatically as you paste descriptions in 
 | "NRI" layer is empty / shows a warning | It needs both tract *geometry* (from the NRI shapefile, or TIGER/Line shapefiles in `data/shapefiles/`) and tract *attributes* (`python setup_data.py --only nri`) — the layer's warning message says which is missing |
 | Chat says a question "could not be answered from the loaded data", or asks which place you mean | That is a deliberate, specific answer, not an error: it says why (an ambiguous name such as "Portland", a topic the data does not hold such as income, a metro whose county list or tract geometry is missing). Add the state ("Portland, ME"), load the missing data, or run `python scripts/diagnose_msa.py` for unresolved metros. See [Agent Architecture §11.5](AGENT_ARCHITECTURE.md#11-answer-routing-derived-measures-and-non-answers). |
 | Phoenix is unavailable | Set `PHOENIX_ENABLED=false` to run without tracing, or start it manually with `python -m phoenix.server.main serve` |
+| Running the tests (or the app) while Phoenix is not running used to take minutes | Fixed: spans are exported from a background thread (`PHOENIX_BATCH_EXPORT=true`, the default), so a missing collector costs nothing per request. The test fixtures also switch tracing off; set `PHOENIX_ENABLED=false` for your own test runs if they do not. |
+| Chat answers with "(The language model service is not responding ...)" or HTTP 503 | The model server is down or unreachable. Questions the app can answer without a model (place lookups, land area / density) still work and are labelled as retrieved without one. Start `llama-server`; the app retries by itself after `LLM_BREAKER_COOLDOWN_S`. `GET /api/agent/status` shows the breaker and how many turns are running. |
+| Chat returns HTTP 503 "busy" or 504 "took too long" | 503: more turns were waiting than `AGENT_MAX_CONCURRENT_TURNS` allows for longer than `AGENT_QUEUE_TIMEOUT_S`. 504: a turn exceeded `AGENT_TURN_DEADLINE_S` and was stopped at its next step. Both are limits, not failures; raise them in `.env` if your hardware is slow. |
+| Logs show "SQL contract violated: ..." | The model's SQL was rejected by the structural check (an unapproved join, a missing entity/scope filter, a cross product, a file/system access). The message says what is acceptable and the agent repairs the statement automatically; see [§12.2](AGENT_ARCHITECTURE.md#122-the-plan-contract). Set `SQL_CONTRACT_MODE=warn` to log instead of reject (safety checks always reject). |
 | Bike route returns no route | Confirm BikePGH layers were loaded with `python setup_data.py --only bike`; the router does not fall back to an external road-routing service |
 
 ---

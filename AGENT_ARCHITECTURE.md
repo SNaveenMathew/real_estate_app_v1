@@ -41,6 +41,7 @@ computed, decides whether it's shown as a table, a chart, or a map.
 9. [Commute times](#9-commute-times)
 10. [Presentation layer: tables, charts, and maps](#10-presentation-layer-tables-charts-and-maps)
 11. [Answer routing, derived measures, and non-answers](#11-answer-routing-derived-measures-and-non-answers)
+12. [Resilience: verified SQL, scoped queries, and bounded turns](#12-resilience-verified-sql-scoped-queries-and-bounded-turns)
 
 ---
 
@@ -1166,3 +1167,208 @@ metro areas:
   that merely *contains* another concept's alias needs `overrides` or the plan battery will show the collision.
 - `map_layers.get_msa_population_density` is no longer called by the agents (the provider replaced it); it remains for
   compatibility and can be deleted once nothing else imports it.
+
+
+---
+
+## 12. Resilience: verified SQL, scoped queries, and bounded turns
+
+### 12.1 What problem this solves
+
+The parts of the agent that *produce* answers were already well designed: a fixed toolset, deterministic planning, validators,
+a deterministic fallback. What stopped short was everything a regular expression or a convention was trusted to enforce, and
+the server around the agent, which assumed a healthy, instant model. Each row below was **demonstrated**, not assumed:
+
+| Finding | Evidence | Now |
+|---|---|---|
+| SQL validation was regex-only | The old validator accepted: a cross join with no condition; joins on unrelated columns; an entity filter that was negated, only in a comment, or ORed with `1=1`; `read_csv_auto('/etc/passwd')` in a comma-joined table function; `getenv('HOME')` | §12.2 |
+| House Chat's scope was a sentence appended to the request | nothing checked that the model honoured it | §12.3 |
+| "top N" was parsed but always limited to 10 | `result_limit` was hard-coded and never consumed | §12.3 |
+| A chat turn froze the whole server | the handlers called the blocking agent inside `async def`: a 0.6 s turn gave 0.6 s of event-loop lag | §12.6 |
+| One shared DuckDB connection | 12 threads on one connection returned wrong or `None` frames | §12.4 |
+| Model down = HTTP 500, even when no model was needed | planning, the SQL compiler and derived measures need none | §12.5 |
+| A failure before the model call was hidden | the compiled-SQL fallback answered correctly and silently | logged; tests report the evidence |
+| Phoenix export blocked requests | collector down: about 7.8 s *per span* (synchronous export) | §12.9 |
+
+Principles: the plan is a **contract verified structurally** (never by text matching); scope is **structural**; an explicit
+user constraint ("top 5") is carried end to end; the server stays **responsive and bounded**; a model may only **propose**
+things that code then verifies; every guarantee has a test that fails when it is broken (§12.11).
+
+### 12.2 The plan contract
+
+`agents/sql_inspector.py` parses ONE statement with **DuckDB's own parser** (`json_serialize_sql`: no new dependency, no
+dialect mismatch, about 0.3 ms) and reports facts: relations, functions, table functions, joins, `column = constant`
+predicates, the outermost `LIMIT`. It never judges. `agents/plan_contract.py` judges those facts against the plan:
+
+| Severity | Checks |
+|---|---|
+| **safety** (never relaxed) | exactly one SELECT; no table function except `unnest`/`range`/`generate_series`; no file paths; no `getenv`, `read_*`, `duckdb_*`, `pragma_*`, `current_setting`, `query()` ...; only catalog tables (a schema-qualified `information_schema.tables` is not the table `tables`) |
+| **contract** | every join condition is an **approved relationship** (compared canonically); tables in a block are connected (no cross product); no `NATURAL JOIN`; every resolved entity and every scope filter appears as a **positive** filter (not negated, not commented out, not voided by an `OR`); an explicit "top N" is honoured by a `LIMIT` no larger than N |
+
+Equivalent spellings are **not** violations: `LEFT(x,5)` = `SUBSTR(x,1,5)`, `a || b` = `CONCAT(a,b)`, a `CAST` around a join key,
+`LOWER(col) = 'value'`, an `IN` list or an `OR` chain of equalities, aliases, `INNER`/`LEFT JOIN`, comma joins with `WHERE`
+equalities, CTEs and subqueries. A different but approved path between the same tables is also fine: the contract does not
+require the exact planned edge set. `tests/test_plan_contract.py` keeps a corpus of valid statements that must stay valid, and
+checks that **everything the deterministic compiler emits for the whole plan battery** satisfies the contract.
+
+Messages are written for the model that will repair the statement: they say what is wrong *and what is acceptable* ("Use:
+`census_msa.msa_code = cbsa_counties.cbsa_code`", "use the exact literal from the plan").
+
+`settings.sql_contract_mode`: `enforce` (default) rejects any violation; `warn` rejects only safety violations and logs the
+rest; `off` likewise. The contract runs **after** the legacy checks, so every message the old validator produced is unchanged
+and the contract only *adds* rejections. Cost: about 0.6 ms per statement (end-to-end tool calls measured +0.3 to +1 ms).
+
+**Upgrading DuckDB.** The inspector reads DuckDB's JSON syntax tree. `agents/sql_inspector.selftest()` and
+`tests/test_sql_inspector.py` detect a format change; if the tree is ever unreadable the legacy checks alone apply (the
+previous behaviour) and one warning is logged, instead of every statement being rejected. Run those tests on any DuckDB upgrade
+(the suite passes on the pinned 1.5.4).
+
+### 12.3 Structural scope, and the "top N" the user asked for
+
+`agents/query_scope.py` holds a `ScopeFilter(table, column, value)` in a **`ContextVar`**. Code sets it around a call; the model
+can neither see, alter nor omit it. The planner turns it into a `scope_filters` line of the plan (rendered only when set, so
+every other plan is byte-identical) and forces the scope table into the planned tables; the deterministic compiler adds the
+predicate; the contract verifies it. A `ContextVar` follows work onto worker threads (`asyncio.to_thread`, the turn runner) and
+never leaks between concurrent turns (tested with 18 interleaved House turns over three houses).
+
+House Chat's `query_database(request, presentation, scope="this_house")`: `this_house` (default) is enforced; `all_houses` is the
+explicit, auditable way to ask a comparison or aggregate across houses (the House prompt documents when). The old prose
+("This is House Chat for house_id=...") is gone, which also stops the word "house" from polluting concept matching. Invariant,
+tested: a model that **deliberately omits** the house predicate still only ever gets this house's data (the statement is
+rejected and the compiled, scoped one runs).
+
+"top N" ("top 25", "five cheapest", "3 most expensive"; not "top 5 percent"; 1 to 1000) now sets `result_limit = N`; the
+compiler emits `LIMIT N` and the contract requires a `LIMIT` no larger than N.
+
+### 12.4 Bounded execution and per-thread connections
+
+`db/duckdb_store.get_conn()` returns **the calling thread's cursor** on the one shared database (DuckDB's documented
+pattern). Callers are unchanged. Reads run concurrently, writes serialize in the engine, and `close()` releases every cursor.
+`tests/test_db_concurrency.py` runs 12 threads x 25 rounds of mixed reads and writes with exact expected results, **and** a
+"teeth" test showing the old shared-connection pattern fails under the same load on this DuckDB version.
+
+`store.query_limited(sql)` is used for LLM-written SQL: a watchdog interrupts a statement after `sql_timeout_s` (-> `SqlTimeout`,
+reported as `NOT_ANSWERED[limit_exceeded]` and **not retried**: the same plan would only repeat the wait), and at most
+`sql_max_rows` rows are materialized (the evidence says "more than N rows exist; only the first N were loaded"). It returns a
+frame identical to `query()` (dtypes included), and the cursor stays usable after an interrupt.
+
+### 12.5 Model resilience
+
+`agents/llm_resilience.invoke()` is the one place a model is called:
+
+* **classify** - connection errors, timeouts, HTTP 5xx/429 are *transient*; a 400 (bad request, context overflow) is not an
+  outage and is re-raised untouched;
+* **circuit breaker** - after `llm_breaker_threshold` consecutive transient failures calls fail instantly for
+  `llm_breaker_cooldown_s`, then exactly one probe is allowed. A dead server costs one timeout, not one per call. Breakers are
+  **per role** (`chat` for the code/SQL/answer models, `semantic` for the proposer, `relationships` for onboarding), because an
+  optional, best-effort feature must never be able to disable the primary path (§12.11, regression);
+* clients are built with `max_retries=llm_max_retries` (default 1) instead of the library's 2.
+
+What each step does when the model is unavailable:
+
+| Step | Needs a model? | When it is down |
+|---|---|---|
+| Planning, entity resolution, answer routing | no | unchanged |
+| Derived measures (land area, density) | no | unchanged |
+| Writing the orchestrator program | yes | the deterministic `query_database(request, plan)` program (House: `get_house_details()`) |
+| Writing SQL | yes | the deterministic compiler, validated exactly like model SQL; if the plan is not compilable, `NOT_ANSWERED[model_unavailable]` (not retried) |
+| Writing the final answer | yes | the retrieved evidence, labelled "(The language model service is not responding ... not a written answer.)" |
+| Semantic fallback, relationship suggestions | optional | skipped silently |
+
+Turns carry a deadline (`llm_resilience.turn()` / `use_turn()`); `check_cancelled()` runs before every model call, so a turn past
+its deadline starts no further work and is never "recovered" by a fallback.
+
+### 12.6 The turn runner and HTTP semantics
+
+`agents/turn_runner.run_turn()` runs a chat turn on a worker thread: the event loop stays free (the status endpoint answers in
+under 150 ms during a 0.7 s turn; tested). `agent_max_concurrent_turns` run at once; others wait up to `agent_queue_timeout_s`.
+A turn past `agent_turn_deadline_s` is cancelled cooperatively. A thread cannot be killed, so **the slot is released only when
+the thread really finishes**: a hung model call cannot silently exceed the concurrency limit. A client disconnect cancels the turn.
+
+| Situation | HTTP | Message |
+|---|---|---|
+| no slot within the queue timeout | 503 + `Retry-After: 5` | the assistant is busy |
+| turn past its deadline | 504 | took too long, try a narrower question |
+| model unavailable | 503 + `Retry-After: 30` | the language model service is not responding |
+| anything else | 500 | `Agent error: ...` (stack in the server log) |
+
+`GET /api/agent/status` reports the breakers and running/waiting turns; it makes no model call.
+
+### 12.7 Semantic fallback
+
+When **no alias matches** (the plan is empty), `agents/semantic_fallback.py` lets a model *propose* concept keys. It is shown a
+closed list (`key: one-line description`, gap concepts marked "NOT LOADED") and returns JSON keys; anything not in the list is
+dropped; at most 3. The keys enter the plan exactly as if an alias had matched (`schema.forcing_concepts`, a `ContextVar` read by
+`semantic_matches`, so the planner, entity resolver and context builder agree with no plumbing). Everything after is unchanged and
+deterministic: entity resolution, answer routing, SQL, the contract, execution. The evidence says how the request was interpreted
+("(Interpreted as: ...)"). Bounded: one call, its own client (20 s timeout, 120 tokens, no retries), cached per catalog and
+request, skipped when its breaker is open. Disable with `SEMANTIC_FALLBACK_ENABLED=false`.
+
+It rescues **empty** plans only. A request that matches the *wrong* alias is not second-guessed: verifying working matches would
+put a model call on flows that already work (tested both ways).
+
+### 12.8 Relationship suggestions for uploaded datasets
+
+`discover_relationships` only *evaluated* a column pair when the names looked alike (or a value pattern placed both in one key
+family), so `locale` <-> `houses.city` was never tested however complete the overlap. With
+`RELATIONSHIP_LLM_SUGGESTIONS_ENABLED=true` (off by default: it adds one model call to onboarding),
+`services/relationship_suggestions.py` lets a model suggest extra (source column, `table.column`) pairs **to test**, from closed
+lists. Every suggestion goes through the **same value-containment evaluation and thresholds** as a name-based candidate (a confident
+guess whose values do not match produces nothing), and an accepted one is still only a *proposal* needing the user's approval,
+labelled `origin: llm-suggested` with a warning. Any failure means "no extra candidates" (exactly the previous behaviour).
+
+### 12.9 Observability must not slow requests
+
+`observability.py` registered the Phoenix exporter with `batch=False`: every span was exported **synchronously** inside
+`span.end()`. With no collector listening each span burned about 7.8 s in connection retries, so a chat turn (many spans) took
+minutes and a 94-test run took over five. Export is now from a background thread (`phoenix_batch_export=true`); 15 spans with the
+collector down take under a millisecond. (The local evaluation capture is a separate in-memory processor and stays
+synchronous.) `tests/test_observability_nonblocking.py` guards it in a fresh interpreter, and `tests/test_tracing_paths.py` runs the
+real flows under an **in-memory OpenTelemetry tracer** so the `if span is not None` code paths are actually executed (they never
+were while tracing was off).
+
+### 12.10 Settings
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `llm_max_retries` | 1 | client-level retries |
+| `llm_breaker_threshold` / `llm_breaker_cooldown_s` | 3 / 30 | consecutive transient failures before "down"; fail-fast window |
+| `agent_max_concurrent_turns` | 2 | chat turns running at once |
+| `agent_queue_timeout_s` / `agent_turn_deadline_s` | 30 / 600 | wait for a slot (-> 503) / maximum turn length (-> 504) |
+| `sql_contract_mode` | `enforce` | `enforce` / `warn` / `off`; safety is never relaxed |
+| `sql_timeout_s` / `sql_max_rows` | 30 / 50000 | per-statement limits for LLM-written SQL |
+| `semantic_fallback_enabled` / `semantic_fallback_timeout_s` | true / 20 | §12.7 |
+| `relationship_llm_suggestions_enabled` / `relationship_llm_timeout_s` | false / 20 | §12.8 |
+| `phoenix_batch_export` | true | background span export |
+
+### 12.11 Testing strategy
+
+* **Hermetic.** A test must not depend on, or wait for, an external service. `tests/census_fixture.py` switches tracing off,
+  disables the semantic fallback and resets breaker state on the way in and out (restoring the previous values, so other test
+  modules see what they would have seen). A new test that calls `query_database` with an *unplannable* request and a stub model
+  must keep the proposer stubbed or disabled, or it would call the real model server.
+* **Teeth.** Tests that prove the old behaviour was really broken (blocked event loop, shared connection, synchronous export),
+  so a passing guard means something. Regression tests fail on the *symptom*, not on an implementation detail.
+* **Corpora.** Valid-SQL idioms and the deterministic compiler's output must stay valid; hostile statements must be rejected for
+  the right reason.
+* **Whole-agent concurrency.** 24 General turns and 18 House turns at once through the real turn runner, each getting its own answer.
+* Run everything: `python -m pytest tests -q`. A cold full run is a few minutes; with Phoenix installed and not running, set
+  `PHOENIX_ENABLED=false` for suites that do not test tracing.
+
+### 12.12 Known boundaries and sharp edges
+
+* **Structure, not meaning.** The contract proves a statement joins through approved relationships and carries the plan's filters;
+  it cannot prove the right *measure* was computed. The plan, the evidence and the answer validator remain the guard for that.
+* **Exact literals.** Entity and scope filters must use the plan's exact literal (DuckDB comparisons are case-sensitive, so
+  `= 'PITTSBURGH'` silently returns no rows). `LOWER()/UPPER()/TRIM()` wrappers are accepted; `LIKE`/`ILIKE` are not.
+* **Unqualified columns** are attributed through a live `DESCRIBE`; a name that exists in several joined tables is not attributed,
+  so a filter on it is not recognized (the message tells the model to qualify it).
+* **DuckDB tree dependency** (§12.2): covered by tests and a degrade path, but a major upgrade needs the inspector tests run.
+* **Cancellation is cooperative.** It takes effect before the next model call or SQL attempt. A long statement is bounded by
+  `sql_timeout_s`, a model call by `llm_request_timeout`; a thread keeps its slot until it ends.
+* **Per process.** Breakers and the turn limit are per process: with several uvicorn workers each has its own.
+* **Semantic fallback** is only as good as the one-line concept descriptions (write them well for new concepts) and rescues empty plans only.
+* **Relationship suggestions** show the model at most 150 target columns of a matching type; with many tables the cap can hide the
+  right one. Opt-in.
+* **"top N"** understands a fixed set of phrasings; others leave `result_limit` unset (nothing is invented).
+* **Tracing-on paths** are covered with an in-memory tracer, not a live Phoenix server.
