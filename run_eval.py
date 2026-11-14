@@ -30,6 +30,7 @@ evidence) in .env. Exits non-zero if anything failed or errored, so this is
 safe to wire into CI.
 """
 import argparse
+import atexit
 import json
 import sys
 import time
@@ -147,6 +148,13 @@ def main():
     judge = MockJudge() if args.mock else LLMJudge()
     if args.mock:
         print("*** --mock: smoke-testing the harness only. This is NOT a real evaluation. ***")
+    else:
+        from observability import ensure_phoenix_server, initialize_observability, stop_phoenix_server
+        atexit.register(stop_phoenix_server)
+        if settings.phoenix_enabled and not ensure_phoenix_server():
+            settings.phoenix_enabled = False
+            print("Phoenix is unavailable; continuing evaluation without tracing.", file=sys.stderr)
+        initialize_observability()
 
     results: list[tuple[GoldenExample, ScoreResult]] = []
     print(f"\nRunning {len(examples)} example(s){' [MOCK]' if args.mock else ''}...\n")
