@@ -2,56 +2,55 @@
 FastAPI backend for the Real Estate Analysis App.
 Run: uvicorn main:app --reload --port 8000
 """
+from __future__ import annotations
+
+import hashlib
 import json
-import shutil
-import traceback
-import math
-import os
-import socket
-import subprocess
-import sys
-import time
+import logging
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import make_asgi_app
-from pydantic import BaseModel
 
 from config import settings
 import db.duckdb_store as store
-import db.vector_store as vs
-from services import bike_routing
-from agents.house_agent import run_house_chat
-from agents.general_agent import run_general_chat
-from agents import llm_resilience, turn_runner
-from api.onboarding import router as onboarding_router
-from api.commute import router as commute_router
-from api.data_sources import router as data_sources_router
-from api.map_layers import router as map_layers_router
-from observability import initialize_observability, ensure_phoenix_server, stop_phoenix_server, phoenix_enabled
+from observability import (
+    initialize_observability,
+    ensure_phoenix_server,
+    stop_phoenix_server,
+    phoenix_enabled,
+)
 
+# Segmented API routers
+from api import (
+    houses_router,
+    chat_router,
+    bike_router,
+    system_router,
+    commute_router,
+    data_sources_router,
+    map_layers_router,
+    onboarding_router,
+)
+from api.common import (
+    safe_value as _safe,
+    safe_dict as _safe_dict,
+    ChatRequest,
+    DocumentRequest,
+    BikeRouteRequest,
+)
+from api.chat import turn_failure as _turn_failure
 
-def _safe(v):
-    """Replace NaN / Inf / -Inf with None so json.dumps never raises."""
-    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-        return None
-    return v
-
-
-def _safe_dict(d: dict) -> dict:
-    return {k: _safe(v) for k, v in d.items()}
+logger = logging.getLogger(__name__)
 
 
 # ── Phoenix process lifecycle ────────────────────────────────────────────────
-# Shared with run_eval.py so both the web app and evaluations can bootstrap
-# the same local collector.
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     ensure_phoenix_server()
@@ -64,314 +63,78 @@ async def lifespan(app: FastAPI):
 
 
 # ── App setup ────────────────────────────────────────────────────────────────
-app = FastAPI(title="Real Estate Analysis", version="1.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="Real Estate Analysis API",
+    description="Local, AI-powered analytical real estate intelligence backend service.",
+    version="1.0.0",
+    lifespan=lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
-app.include_router(onboarding_router)
-app.include_router(commute_router)     # Commute tab API: /api/commute/*   # Data page API: /api/onboarding/*
-app.include_router(data_sources_router)  # Data page API: /api/data-sources/*
-app.include_router(map_layers_router)  # Map layer panel API: /api/layers/*
+# Ensure upload directory exists
 settings.uploads_dir.mkdir(parents=True, exist_ok=True)
+
+# Register modular service routers
+app.include_router(houses_router)
+app.include_router(chat_router)
+app.include_router(bike_router)
+app.include_router(system_router)
+app.include_router(commute_router)
+app.include_router(data_sources_router)
+app.include_router(map_layers_router)
+app.include_router(onboarding_router)
+
+# Prometheus metrics endpoint
 app.mount("/metrics", make_asgi_app(), name="metrics")
 
 
-# ── Pydantic models ──────────────────────────────────────────────────────────
+# ── Optional static UI serving (for standalone local dev runs) ───────────────
+# In containerized/service deployments, the dedicated Frontend service (Nginx)
+# serves static files and proxies /api traffic. Mounting here allows running
+# `python main.py` or `uvicorn main:app` directly without a separate web server.
+static_dir = Path("static")
+if static_dir.exists() and static_dir.is_dir():
+    app.mount("/static", StaticFiles(directory="static"), name="static")
 
-class ChatRequest(BaseModel):
-    message: str
-    history: list[dict] = []   # [{"role": "user"|"assistant", "content": "..."}]
-    session_id: Optional[str] = None
+    def _static_version() -> str:
+        """MD5 of assets — changes whenever any of them changes."""
+        h = hashlib.md5()
+        for name in ("app.js", "commute.js", "layers.js", "style.css"):
+            p = static_dir / name
+            if p.exists():
+                h.update(p.read_bytes())
+        return h.hexdigest()[:8]
 
+    _STATIC_VER = _static_version()
 
-class DocumentRequest(BaseModel):
-    text: str
-    doc_type: str = "description"
+    @app.get("/data", response_class=HTMLResponse)
+    async def data_page():
+        """The Data page: schema map, dataset upload, and review of proposed catalog changes."""
+        html = (static_dir / "data.html").read_text(encoding="utf-8")
+        ver = hashlib.sha1(b"".join((static_dir / n).read_bytes() for n in ("data.js", "data.css"))).hexdigest()[:10]
+        html = re.sub(r'(/static/[\w./-]+\.(?:js|css))(\?v=\w+)?', lambda m: f"{m.group(1)}?v={ver}", html)
+        return HTMLResponse(content=html, headers={"Cache-Control": "no-cache"})
 
-
-# ── Cache-busting version stamp ───────────────────────────────────────────────
-# Recomputed each time the server starts, so any static file change takes effect
-# immediately after restarting uvicorn — no manual version bumping needed.
-
-import hashlib as _hashlib
-
-def _static_version() -> str:
-    """MD5 of app.js + commute.js + layers.js + style.css contents — changes whenever any of them changes."""
-    h = _hashlib.md5()
-    for name in ("app.js", "commute.js", "layers.js", "style.css"):
-        p = Path("static") / name
-        if p.exists():
-            h.update(p.read_bytes())
-    return h.hexdigest()[:8]
-
-_STATIC_VER = _static_version()
-
-
-# ── HTML entry point ─────────────────────────────────────────────────────────
-
-@app.get("/data", response_class=HTMLResponse)
-async def data_page():
-    """The Data page: schema map, dataset upload, and review of proposed catalog changes."""
-    import re as _re
-    root = Path("static")
-    html = (root / "data.html").read_text(encoding="utf-8")
-    ver = _hashlib.sha1(b"".join((root / n).read_bytes() for n in ("data.js", "data.css"))).hexdigest()[:10]
-    html = _re.sub(r'(/static/[\w./-]+\.(?:js|css))(\?v=\w+)?', lambda m: f"{m.group(1)}?v={ver}", html)
-    return HTMLResponse(content=html, headers={"Cache-Control": "no-cache"})
-
-
-@app.get("/", response_class=HTMLResponse)
-async def root():
-    html = Path("static/index.html").read_text(encoding="utf-8")
-    client_config = json.dumps({"cartoApiKey": settings.carto_api_key}).replace("</", "<\\/")
-    html = html.replace("</head>", f"<script>window.APP_CONFIG={client_config};</script>\n</head>", 1)
-    # Replace any existing ?v=... or inject fresh version into static asset URLs
-    import re
-    html = re.sub(r'(/static/[^"\']+\.(?:js|css))(\?v=[^"\']*)?',
-                  lambda m: f'{m.group(1)}?v={_STATIC_VER}', html)
-    return HTMLResponse(content=html,
-                        headers={"Cache-Control": "no-store"})
-
-
-# ── Map data ─────────────────────────────────────────────────────────────────
-
-@app.get("/api/houses")
-async def get_houses():
-    """Return all houses as GeoJSON FeatureCollection."""
-    houses = store.get_all_houses()
-    features = []
-    for h in houses:
-        h = _safe_dict(h)
-        if h.get("lat") is None or h.get("lon") is None:
-            continue
-        props = {k: v for k, v in h.items() if k not in ("lat", "lon", "raw_json")}
-        features.append({
-            "type": "Feature",
-            "geometry": {"type": "Point", "coordinates": [h["lon"], h["lat"]]},
-            "properties": props,
-        })
-    return {"type": "FeatureCollection", "features": features}
-
-
-@app.get("/api/house/{house_id}")
-async def get_house(house_id: str):
-    house = store.get_house(house_id)
-    if not house:
-        raise HTTPException(404, "House not found")
-    house = _safe_dict(house)
-    docs = vs.get_house_documents(house_id)
-    nri = None
-    if house.get("tract_fips"):
-        nri = store.get_nri_for_tract(house["tract_fips"])
-        if nri:
-            nri = _safe_dict(nri)
-    history = [_safe_dict(h) for h in store.get_house_history(house_id)]
-    return {"house": house, "documents": docs, "nri": nri, "history": history}
-
-
-# ── Chat endpoints ────────────────────────────────────────────────────────────
-# A turn runs on a worker thread (agents/turn_runner.py) so a slow model never freezes the other endpoints.
-
-def _turn_failure(exc: BaseException) -> HTTPException:
-    status_code, message, headers = turn_runner.describe_failure(exc)
-    if status_code == 500:
-        traceback.print_exception(type(exc), exc, exc.__traceback__)     # unexpected: keep the stack in the server log
-    return HTTPException(status_code, message, headers=headers or None)
-
-
-@app.post("/api/house/{house_id}/chat")
-async def house_chat(house_id: str, req: ChatRequest):
-    """Chat with the house-specific agent."""
-    house = store.get_house(house_id)
-    if not house:
-        raise HTTPException(404, "House not found")
-
-    # Auto-save description if message looks like a property description (>100 chars, no ?)
-    auto_saved = False
-    if len(req.message) > 100 and "?" not in req.message[:50]:
-        vs.upsert_description(house_id, req.message)  # enforces single description
-        auto_saved = True
-
-    try:
-        reply, updated_history, artifacts = await turn_runner.run_turn(run_house_chat, house_id, req.message, req.history)
-    except Exception as e:
-        raise _turn_failure(e)
-
-    # Prepend acknowledgment if we auto-saved
-    if auto_saved and "thank" not in reply.lower()[:50]:
-        reply = ("Thank you for the property description — it has been saved. " + reply)
-
-    trace_url = updated_history[-1].get("trace_url") if updated_history else None
-    return {
-        "reply": reply,
-        "history": updated_history,
-        "auto_saved": auto_saved,
-        "artifacts": artifacts,
-        "trace_url": trace_url,
-    }
-
-
-@app.post("/api/chat")
-async def general_chat(req: ChatRequest):
-    """General chat — cross-house, MSA, national risk questions."""
-    try:
-        reply, updated_history, artifacts, observability = await turn_runner.run_turn(
-            run_general_chat,
-            req.message,
-            req.history,
-            include_metadata=True,
-            session_id=req.session_id,
+    @app.get("/", response_class=HTMLResponse)
+    async def root():
+        html = (static_dir / "index.html").read_text(encoding="utf-8")
+        client_config = json.dumps({"cartoApiKey": settings.carto_api_key}).replace("</", "<\\/")
+        html = html.replace("</head>", f"<script>window.APP_CONFIG={client_config};</script>\n</head>", 1)
+        html = re.sub(
+            r'(/static/[^"\']+\.(?:js|css))(\?v=[^"\']*)?',
+            lambda m: f'{m.group(1)}?v={_STATIC_VER}',
+            html,
         )
-    except Exception as e:
-        raise _turn_failure(e)
-    return {
-        "reply": reply,
-        "history": updated_history,
-        "artifacts": artifacts,
-        "observability": observability,
-        "phoenix_enabled": phoenix_enabled(),
-    }
-
-
-# ── Document / photo upload ──────────────────────────────────────────────────
-
-@app.post("/api/house/{house_id}/favorite")
-async def toggle_favorite(house_id: str):
-    """Toggle the favorite status of a house."""
-    house = store.get_house(house_id)
-    if not house:
-        raise HTTPException(404, "House not found")
-    new_val = store.toggle_favorite(house_id)
-    return {"house_id": house_id, "is_favorite": new_val}
-
-
-@app.put("/api/house/{house_id}/description")
-async def update_description(house_id: str, req: DocumentRequest):
-    """Replace the single stored description for a house."""
-    house = store.get_house(house_id)
-    if not house:
-        raise HTTPException(404, "House not found")
-    if not req.text.strip():
-        raise HTTPException(400, "Text is empty")
-    doc_id = vs.upsert_description(house_id, req.text)
-    return {"status": "saved", "doc_id": doc_id}
-
-@app.delete("/api/house/{house_id}/description")
-async def delete_description(house_id: str):
-    """Delete the stored description for a house."""
-    house = store.get_house(house_id)
-    if not house:
-        raise HTTPException(404, "House not found")
-    desc = vs.get_description(house_id)
-    if not desc:
-        return {"status": "not_found"}
-    vs.delete_document(desc["id"])
-    return {"status": "deleted"}
-
-
-@app.get("/api/house/{house_id}/description")
-async def get_description_endpoint(house_id: str):
-    """Get the stored description for a house."""
-    desc = vs.get_description(house_id)
-    return {"description": desc}
-
-
-@app.post("/api/house/{house_id}/photo")
-async def upload_photo(
-    house_id: str,
-    file: UploadFile = File(...),
-    caption: str = Form(""),
-):
-    """Upload a photo for a house. Stores reference in vector DB."""
-    house = store.get_house(house_id)
-    if not house:
-        raise HTTPException(404, "House not found")
-
-    # Save file
-    house_dir = settings.uploads_dir / house_id
-    house_dir.mkdir(parents=True, exist_ok=True)
-    dest = house_dir / file.filename
-    with dest.open("wb") as f:
-        shutil.copyfileobj(file.file, f)
-
-    # Store in vector DB
-    doc_id = vs.add_photo(house_id, dest, caption=caption)
-    return {"status": "uploaded", "doc_id": doc_id, "path": str(dest)}
-
-
-@app.get("/api/house/{house_id}/documents")
-async def get_documents(house_id: str):
-    docs = vs.get_house_documents(house_id)
-    return {"documents": docs}
-
-
-# ── NRI data ─────────────────────────────────────────────────────────────────
-
-@app.get("/api/nri/{tract_fips}")
-async def get_nri(tract_fips: str):
-    nri = store.get_nri_for_tract(tract_fips)
-    if not nri:
-        raise HTTPException(404, "NRI data not found for this tract")
-    return nri
-
-
-# ── Map layers (Houses, Crime, Risk, Bike routes, Sold homes, and anything added on the Data page) ──
-# Genuinely one route per KIND of request, not one per table: see api/map_layers.py and
-# services/map_layers.py. Both are viewport-scoped the same way /api/nri/{tract_fips} above's siblings
-# always were: the frontend passes the current Leaflet map bounds and re-requests on pan/zoom, so a
-# national-scale dataset never has to be shipped whole just to render what is on screen.
-
-
-class BikeRouteRequest(BaseModel):
-    start: str
-    end: str
-    city: str = "Pittsburgh, PA"
-
-
-@app.post("/api/bike/route")
-async def get_bike_route(req: BikeRouteRequest):
-    """Find a bicycle route between place names or addresses."""
-    try:
-        return await bike_routing.route_bike(req.start, req.end, city=req.city)
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=502, detail=f"Bike routing service error: {e}")
-
-
-
-# ── Stats / health ────────────────────────────────────────────────────────────
-
-@app.get("/api/stats")
-async def stats():
-    houses = store.query("SELECT COUNT(*) as n FROM houses").iloc[0]["n"]
-    tracts = store.query("SELECT COUNT(*) as n FROM nri_tracts").iloc[0]["n"]
-    sold   = store.query("SELECT COUNT(*) as n FROM sold_homes").iloc[0]["n"]
-    crime  = store.query("SELECT COUNT(*) as n FROM crime_incidents").iloc[0]["n"]
-    docs   = vs.collection_count()
-    return {
-        "houses": int(houses),
-        "nri_tracts": int(tracts),
-        "sold_homes": int(sold),
-        "crime_incidents": int(crime),
-        "vector_documents": docs,
-    }
-
-
-@app.get("/api/agent/status")
-async def agent_status():
-    """Is the language model reachable, and how busy is the agent?  Makes no model call."""
-    return {"model": llm_resilience.breaker().status(), "breakers": llm_resilience.statuses(), "turns": turn_runner.status()}
+        return HTMLResponse(content=html, headers={"Cache-Control": "no-store"})
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host=settings.app_host,
-                port=settings.app_port, reload=True)
+    uvicorn.run("main:app", host=settings.app_host, port=settings.app_port, reload=True)
