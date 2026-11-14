@@ -1,0 +1,32 @@
+# Version control
+.git
+.gitignore
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv/
+
+# Testing and IDE
+.pytest_cache/
+.coverage
+htmlcov/
+.vscode/
+.idea/
+
+# Large temporary files and archives
+*.zip
+*.tar.gz
+temp_data/
+screenshots/
+
+# Data directory runtime files (persisted via Docker volumes)
+data/*.duckdb.wal*
+data/chroma/
+
