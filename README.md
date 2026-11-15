@@ -1332,3 +1332,8 @@ The intermediate map is intentionally corridor-focused so the crime layer remain
 ### Consistent hotspot scoring
 
 The bike/crime intermediate visualization and the routing filter now share one crime-density model. Each occupied grid cell receives the same intensity score shown on the map: 75% normalized incident count + 25% normalized severity-weighted score. The routing hotspot percentile is applied to that same intensity score using a citywide baseline. The selected cells are buffered, then BikePGH geometry is evaluated at logical intersection-to-intersection segment granularity so one affected sub-edge does not create an inconsistent dark/orange/dark split within the same real-world segment.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
+
