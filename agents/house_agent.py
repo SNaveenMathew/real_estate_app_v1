@@ -923,7 +923,7 @@ def run_house_chat(
             *_tool_messages_from_calls(all_calls),
             AIMessage(content=raw_reply),
         ]
-        reply = validate_response(raw_reply, all_lc_messages, strict=True)
+        reply = validate_response(raw_reply, all_lc_messages, strict=True, tool_results=all_calls)
 
         # 5. Output grounding guardrails
         try:

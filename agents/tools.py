@@ -7,6 +7,7 @@ tool below. A house-only capability belongs there, not in this module - the
 second copy this module used to carry is exactly what let the ZHVI estimate go
 missing from the path users actually reach.
 """
+import functools
 import json
 import logging
 import re
@@ -25,12 +26,14 @@ import db.schema_catalog as schema
 import services.bike_routing as bike_routing
 import services.transit_routing as transit_routing
 from agents.query_planner import build_query_plan
-from agents import answer_policy, answer_status, llm_resilience, semantic_fallback
+from agents import answer_policy, answer_status, capabilities, llm_resilience, semantic_fallback, tool_result
 from agents.artifacts import classify_dataframe, emit_artifact
 import asyncio
 import threading
 
 from observability import trace_span, mark_span_error, set_span_output
+
+capability = capabilities.capability        # read as a decorator below: @capability("find_bike_route")
 
 
 _FORBIDDEN = re.compile(
@@ -42,6 +45,50 @@ _TABLE_REF = re.compile(
     re.I,
 )
 _AGGREGATE_CALL_RE = re.compile(r"\b(?:AVG|SUM|COUNT|MEDIAN|MIN|MAX)\s*\(", re.I)
+
+
+# ── Typed results and capability bounds (agents/tool_result.py, agents/capabilities.py) ──
+
+def _envelope(text: str) -> tool_result.ToolResult:
+    """Wrap query_database's rendered evidence with the facts downstream code needs.
+
+    The text is unchanged. The envelope stops the response validator (and anything else) from deciding what the
+    output *means* by counting digits or looking for the word "Error" in it.
+    """
+    if answer_status.is_not_answered(text):
+        return tool_result.not_answered(text, answer_status.status_code(text) or "not_answered")
+    if text.startswith(("Code Agent error", "ERROR:")) or "SQL Error" in text:
+        return tool_result.failure(text)
+    return tool_result.ToolResult(text, kind="data")
+
+
+def _typed_tool(kind: str):
+    """Give a JSON-returning tool a ToolResult carrying its own status, and a clean deadline failure."""
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                out = fn(*args, **kwargs)
+            except capabilities.CapabilityTimeout:
+                return tool_result.not_answered(
+                    answer_status.not_answered(
+                        answer_status.LIMIT_EXCEEDED,
+                        "This step took longer than the time allowed for it, so it was stopped. Nothing was estimated.",
+                    ),
+                    answer_status.LIMIT_EXCEEDED,
+                )
+            try:
+                payload = json.loads(out)
+            except (TypeError, ValueError):
+                return tool_result.ToolResult(str(out), kind=kind)
+            status = str(payload.get("status") or "").lower()
+            ok = status not in ("error", "analysis") and payload.get("kind") != "no_route"
+            return tool_result.ToolResult(
+                out, kind=kind if ok else "not_answered", ok=ok,
+                status=None if ok else (payload.get("kind") or status or None),
+            )
+        return wrapper
+    return decorator
 
 
 SYSTEM_PROMPT = """You are a SQL Code Agent. Return exactly one read-only DuckDB SELECT statement.
@@ -593,6 +640,7 @@ def run_code_query(
 # ── General tools ────────────────────────────────────────────────────────────
 
 @tool
+@capability("check_data_availability")
 def check_data_availability(_: str = "") -> str:
     """
     Row count for every table, so you know what is actually loaded.
@@ -608,12 +656,13 @@ def check_data_availability(_: str = "") -> str:
         emit_artifact(classify_dataframe(counts_df, title="Data availability", presentation="table"))
     except Exception:
         pass
-    return report
+    return tool_result.ToolResult(report, kind="status")
 
 
 
 
 @tool
+@capability("retrieve_data_model_context")
 def retrieve_data_model_context(query: str) -> str:
     """Mandatory grounding retrieval: plan + targeted live schema + vector metadata."""
     structured_plan = build_query_plan(query)
@@ -631,9 +680,10 @@ def retrieve_data_model_context(query: str) -> str:
             parts.extend(d["text"] for d in docs)
     except Exception as exc:
         parts.append(f"[VECTOR METADATA FALLBACK] unavailable: {exc}")
-    return "\n\n".join(p for p in parts if p)
+    return tool_result.ToolResult("\n\n".join(p for p in parts if p), kind="schema")
 
 @tool
+@capability("query_database")
 def query_database(
     request: str, requirements: str = "", plan: str = "", presentation: str = "auto",
 ) -> str:
@@ -672,7 +722,7 @@ def query_database(
         proposed = semantic_fallback.propose_concepts(request)
     if proposed:
         with schema.forcing_concepts(proposed):
-            return _annotate_interpretation(_answer(request, requirements, presentation), proposed)
+            return _envelope(_annotate_interpretation(_answer(request, requirements, presentation), proposed))
 
     # Semantic cache (services/cache.py): an earlier question the deterministic planner routed to the
     # SAME concepts, tables, operation and scope, on unchanged data, is reused verbatim - so the
@@ -682,7 +732,7 @@ def query_database(
     signature = result_cache.semantic_signature(structured_plan)
     cached = result_cache.lookup_semantic("query_database", request, signature)
     if cached is not None:
-        return cached["response"]
+        return _envelope(cached["response"])
 
     out = _answer(request, requirements, presentation, structured_plan)
     if not answer_status.is_not_answered(out) and "Code Agent error" not in out:
@@ -692,7 +742,7 @@ def query_database(
                   "tables": structured_plan.required_tables,
                   "operation": structured_plan.operation or "",
                   "kind": "semantic"})
-    return out
+    return _envelope(out)
 
 
 def _annotate_interpretation(out: str, keys: list[str]) -> str:
@@ -730,34 +780,45 @@ def _answer(request: str, requirements: str, presentation: str, structured_plan=
     return f"[GENERATED SQL]\n{sql}\n[RESULT]\n{result}"
 
 
-def _run_async_safely(async_fn, *args, **kwargs):
-    """Run an async function from sync code or from an active event loop."""
+def _run_async_safely(async_fn, *args, deadline_s: float | None = None, **kwargs):
+    """Run an async function from sync code or from an active event loop.
+
+    ``deadline_s`` is a real bound, not a note: without a running loop the coroutine is wrapped in
+    ``asyncio.wait_for``; with one, the worker thread is joined with a timeout and abandoned when it overruns
+    (a running thread cannot be killed, so the vertex stops waiting — the coroutine is still cancelled by
+    ``wait_for`` at the same deadline).
+    """
+    coro = async_fn(*args, **kwargs)
+    if deadline_s is not None:
+        coro = asyncio.wait_for(coro, timeout=max(float(deadline_s), 0.001))
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(async_fn(*args, **kwargs))
+        return asyncio.run(coro)
 
     result = []
     error = []
 
     def runner():
         try:
-            result.append(asyncio.run(async_fn(*args, **kwargs)))
+            result.append(asyncio.run(coro))
         except BaseException as exc:
             error.append(exc)
 
     thread = threading.Thread(target=runner, daemon=True)
     thread.start()
-    thread.join()
+    thread.join(deadline_s)
 
     if error:
         raise error[0]
     if not result:
-        raise RuntimeError("Async worker returned no result.")
+        raise TimeoutError(f"Async worker did not finish within {deadline_s}s.")
     return result[0]
 
 
 @tool
+@_typed_tool("route")
+@capability("find_bike_route")
 def find_bike_route(
     start: str,
     end: str,
@@ -783,6 +844,7 @@ def find_bike_route(
             city=(city or "Pittsburgh, PA").strip(),
             avoid_crime_dense_areas=bool(avoid_crime_dense_areas),
             crime_density_percentile=float(crime_density_percentile),
+            deadline_s=capabilities.effective_deadline("find_bike_route"),
         )
         # A routing failure/no-route result intentionally uses route=None.
         # Never call .get() on that None value; normalize it to an empty dict
@@ -897,11 +959,12 @@ def find_bike_route(
         })
 
 
+@capability("search_all_house_descriptions")
 def search_all_house_descriptions(query: str) -> str:
     """Search all house descriptions stored in the vector knowledge base."""
     docs = vs.search_all(query, n_results=6)
     if not docs:
-        return "No documents found in the knowledge base yet."
+        return tool_result.ToolResult("No documents found in the knowledge base yet.", kind="status")
     try:
         matches_df = pd.DataFrame([
             {
@@ -914,13 +977,18 @@ def search_all_house_descriptions(query: str) -> str:
         emit_artifact(classify_dataframe(matches_df, title=f'Matches for "{query}"', presentation="table"))
     except Exception:
         pass
-    return "\n\n".join(
-        f"[House {d['metadata'].get('house_id','?')} | {d['metadata'].get('doc_type','text')}]\n{d['text'][:300]}"
-        for d in docs
+    return tool_result.ToolResult(
+        "\n\n".join(
+            f"[House {d['metadata'].get('house_id','?')} | {d['metadata'].get('doc_type','text')}]\n{d['text'][:300]}"
+            for d in docs
+        ),
+        kind="data",
+        row_count=len(docs),
     )
 
 
 @tool
+@capability("get_database_schema")
 def get_database_schema(_: str = "") -> str:
     """
     Return the live database schema: every table's actual columns (introspected
@@ -930,12 +998,14 @@ def get_database_schema(_: str = "") -> str:
     obvious key. Call this before writing SQL against a table you haven't
     already queried successfully earlier in this conversation.
     """
-    return schema.render_schema_for_agent()
+    return tool_result.ToolResult(schema.render_schema_for_agent(), kind="schema")
 
 
 
 
 @tool
+@_typed_tool("route")
+@capability("find_transit_route")
 def find_transit_route(
     start: str,
     end: str,
@@ -954,6 +1024,7 @@ def find_transit_route(
             start.strip(),
             end.strip(),
             city=(city or "Pittsburgh, PA").strip(),
+            deadline_s=capabilities.effective_deadline("find_transit_route"),
         )
         if not isinstance(result, dict):
             raise TypeError(f"Transit routing returned an unexpected result type: {type(result).__name__}")

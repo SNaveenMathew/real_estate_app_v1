@@ -18,7 +18,7 @@ Does NOT flag:
 import re
 from langchain_core.messages import BaseMessage, AIMessage, ToolMessage
 
-from agents import answer_status
+from agents import answer_status, tool_result
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -35,6 +35,20 @@ def _extract_tool_outputs(messages: list[BaseMessage]) -> list[tuple[str, str]]:
         for m in messages
         if isinstance(m, ToolMessage)
     ]
+
+
+def _typed_results(tool_results) -> list[tuple[str, dict]]:
+    """The (name, facts) pairs for results that arrived as a ToolResult.
+
+    A tool that returns the envelope states what it produced, so the validator does not have to guess from the
+    rendered text whether a digit-bearing line was a result or a row count in a status message.
+    """
+    out: list[tuple[str, dict]] = []
+    for name, value in tool_results or ():
+        facts = tool_result.facts(value)
+        if facts is not None:
+            out.append((name, facts))
+    return out
 
 
 def _has_markdown_table(text: str) -> bool:
@@ -55,7 +69,7 @@ _NON_RESULT_TOOLS = {"get_database_schema", "check_data_availability"}
 _NON_DATA_QUERY_PREFIXES = ("query returned 0 rows", "0 rows", "no results")
 
 
-def _tool_returned_real_data(tool_outputs: list[tuple[str, str]]) -> bool:
+def _tool_returned_real_data(tool_outputs: list[tuple[str, str]], tool_results=None) -> bool:
     """
     Return True only if a tool returned an actual query result — i.e. output
     that looks like a pandas DataFrame.to_string() with column headers and rows.
@@ -71,6 +85,10 @@ def _tool_returned_real_data(tool_outputs: list[tuple[str, str]]) -> bool:
       - Has at least 2 lines
       - Has digit-containing line(s) that look like data rows
     """
+    for name, facts in _typed_results(tool_results):       # authoritative: the tool said what it produced
+        if facts["ok"] and facts["kind"] not in tool_result.NON_EVIDENCE_KINDS:
+            return True
+
     for name, content in tool_outputs:
         if name in _NON_RESULT_TOOLS:
             continue
@@ -219,18 +237,24 @@ def validate_response(
     reply: str,
     all_messages: list[BaseMessage],
     strict: bool = True,
+    tool_results=None,
 ) -> str:
     """
     Validate the agent's reply against actual tool outputs.
+
+    ``tool_results`` is the agent's own ``(name, result)`` list from executing the program. When those results
+    carry a ``ToolResult`` envelope their kind/ok/status is used directly; the text heuristics below then only
+    apply to tools that return plain strings.
 
     Returns the original reply if grounded, or a specific replacement message
     explaining what went wrong (SQL error vs missing data vs no tools called).
     """
     tool_outputs = _extract_tool_outputs(all_messages)
     tool_text_combined = " ".join(c for _, c in tool_outputs)
+    typed = _typed_results(tool_results)
 
     # ── Fast pass: a tool returned a real query result → reply is grounded ─
-    if _tool_returned_real_data(tool_outputs):
+    if _tool_returned_real_data(tool_outputs, tool_results):
         return reply
 
     # ── Determine failure type ─────────────────────────────────────────────
@@ -242,8 +266,15 @@ def validate_response(
     # presents a table or a pile of numbers invented them.
     not_answered = next((c for _, c in tool_outputs if answer_status.is_not_answered(c)), None)
 
+    # A typed failure is more specific than anything the text can say: a route that found nothing, a query that
+    # refused to proceed, a call that ran out of its deadline. If the reply then presents figures, it invented them.
+    typed_failure = next((facts for _, facts in typed if not facts["ok"]), None)
+
     hallucinated = False
-    if not_answered is not None and reply_has_data:
+    if typed_failure is not None and reply_has_data:
+        hallucinated = True
+        failure_type = "not_answered" if typed_failure["kind"] == "not_answered" else "missing_data"
+    elif not_answered is not None and reply_has_data:
         hallucinated = True
         failure_type = "not_answered"
     elif tools_failed and reply_has_data:

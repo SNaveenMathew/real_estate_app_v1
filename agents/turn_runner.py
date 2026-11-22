@@ -89,6 +89,10 @@ async def run_turn(fn, *args, **kwargs):
     def work():
         if tracker:
             set_current_tracker(tracker)
+        # Approved-function budget (agents/capabilities.py): the turn, not the individual call, is what has to be bounded,
+        # or a few "cheap" network calls add up to a stuck request. The agent's calls read this on their worker thread.
+        from agents import capabilities
+        budget_token = capabilities.start_turn_budget(capabilities.settings_budget())
         with llm_resilience.use_turn(handle):
             try:
                 result = fn(*args, **kwargs)
@@ -99,6 +103,8 @@ async def run_turn(fn, *args, **kwargs):
                 if tracker:
                     tracker.fail_current(str(exc))
                 raise
+            finally:
+                capabilities.end_turn_budget(budget_token)
 
     loop = asyncio.get_running_loop()
     _state["running"] += 1

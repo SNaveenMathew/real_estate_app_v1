@@ -821,7 +821,7 @@ def run_general_chat(
             *all_tool_messages,
             AIMessage(content=raw_reply),
         ]
-        reply = validate_response(raw_reply, all_messages, strict=True)
+        reply = validate_response(raw_reply, all_messages, strict=True, tool_results=all_calls)
 
         updated_history = list(history or []) + [
             {"role": "user", "content": message},

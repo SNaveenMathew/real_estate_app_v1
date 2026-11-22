@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     agent_max_concurrent_turns: int = 2   # local model servers cannot parallelize much; extra turns queue
     agent_queue_timeout_s: float = 30.0   # waiting longer than this for a slot -> "busy" (HTTP 503)
     agent_turn_deadline_s: float = 600.0  # a turn running longer than this is cancelled at its next step (HTTP 504)
+    # The vocabulary an agent program may call is tagged and deadline-bounded (agents/capabilities.py). Each call has
+    # its own limit; this is the cumulative budget for one turn, so five "cheap" calls cannot add up to a hang.
+    approved_function_budget_s: float = 180.0
     # LLM-written SQL is verified structurally against the plan (agents/plan_contract.py).
     #   enforce (default): reject any violation   warn: reject only safety violations   off: likewise (safety is never optional)
     sql_contract_mode: str = "enforce"
@@ -61,6 +64,9 @@ class Settings(BaseSettings):
     # When no catalog alias matches, a short model call may PROPOSE concept keys (never SQL); see agents/semantic_fallback.py.
     semantic_fallback_enabled: bool = True
     semantic_fallback_timeout_s: float = 20.0
+    # Server-side chat memory (services/session_memory.py): turns kept per session_id, so a reload or a second
+    # tab continues the conversation. The client's own history, when it sends one, still takes precedence.
+    session_memory_max_turns: int = 20
     # Dataset onboarding: a model may suggest extra column pairs to TEST for joins (services/relationship_suggestions.py).
     # Off by default: it adds one model call to onboarding. Suggested pairs are still validated against the data and
     # still need the user's approval.
