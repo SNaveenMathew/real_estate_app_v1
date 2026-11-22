@@ -6,12 +6,16 @@ store's per-thread cursors (db/duckdb_store.py) serve each thread its own handle
 ``async def`` they held the event loop for the whole query - a 1.4 MB ``/api/houses``
 payload froze every other request for the duration.
 """
+
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi.encoders import jsonable_encoder
 
 from api.common import safe_dict, DocumentRequest
 from api.uploads import sanitize_filename, save_stream, sniff_image_extension
@@ -23,21 +27,59 @@ router = APIRouter(tags=["houses"])
 
 
 @router.get("/api/houses")
-def get_houses():
-    """Return all houses as GeoJSON FeatureCollection."""
+def get_houses(
+    request: Request,
+    west: float | None = None,
+    south: float | None = None,
+    east: float | None = None,
+    north: float | None = None,
+    city: str | None = None,
+):
+    """Return houses as a GeoJSON FeatureCollection.
+
+    Two things make the payload affordable: a viewport (``west/south/east/north``, all four or
+    none, plus an optional exact ``city``) so the map can ask for what it is showing instead of
+    every property, and a strong ``ETag`` over the serialised body, so a client that already has
+    the collection gets a 304 rather than 1.5 MB of unchanged GeoJSON.
+    """
+    bounds = (west, south, east, north)
+    if any(v is not None for v in bounds):
+        if any(v is None for v in bounds):
+            raise HTTPException(400, "west, south, east and north must be given together")
+        if west >= east or south >= north:
+            raise HTTPException(400, "bbox must satisfy west < east and south < north")
+        bounds = (west, south, east, north)
+    else:
+        bounds = None
+    city_key = (city or "").strip().lower() or None
+
     houses = store.get_all_houses()
     features = []
     for h in houses:
         h = safe_dict(h)
         if h.get("lat") is None or h.get("lon") is None:
             continue
+        if bounds is not None and not (bounds[0] <= h["lon"] <= bounds[2] and bounds[1] <= h["lat"] <= bounds[3]):
+            continue
+        if city_key is not None and str(h.get("city") or "").strip().lower() != city_key:
+            continue
         props = {k: v for k, v in h.items() if k not in ("lat", "lon", "raw_json")}
-        features.append({
-            "type": "Feature",
-            "geometry": {"type": "Point", "coordinates": [h["lon"], h["lat"]]},
-            "properties": props,
-        })
-    return {"type": "FeatureCollection", "features": features}
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [h["lon"], h["lat"]]},
+                "properties": props,
+            }
+        )
+
+    body = json.dumps(
+        jsonable_encoder({"type": "FeatureCollection", "features": features}), separators=(",", ":")
+    ).encode()
+    etag = '"' + hashlib.md5(body).hexdigest() + '"'
+    headers = {"ETag": etag, "Cache-Control": "no-cache"}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=body, media_type="application/json", headers=headers)
 
 
 @router.get("/api/house/{house_id}")
@@ -119,7 +161,7 @@ def upload_photo(
     house_dir = Path(settings.uploads_dir) / sanitize_filename(house_id, fallback="house")
     house_dir.mkdir(parents=True, exist_ok=True)
 
-    staged = house_dir / f".{uuid.uuid4().hex}.part"        # never visible under a serving name while it is checked
+    staged = house_dir / f".{uuid.uuid4().hex}.part"  # never visible under a serving name while it is checked
     save_stream(file.file, staged, max_bytes=limit)
     try:
         ext = sniff_image_extension(staged)
