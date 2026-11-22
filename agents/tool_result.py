@@ -24,6 +24,7 @@ The validator prefers these facts over its text heuristics, and falls back to
 the heuristics only for results that arrive as a plain string (e.g. a tool the
 application does not own).
 """
+
 from __future__ import annotations
 
 from typing import Any, Iterable
@@ -38,6 +39,13 @@ class ToolResult(str):
     """A tool's rendered text plus the facts about it (see module docstring)."""
 
     __slots__ = ("ok", "kind", "status", "row_count", "columns")
+
+    # Declared for type checkers: __slots__ creates the storage, not the annotations.
+    ok: bool
+    kind: str
+    status: str | None
+    row_count: int | None
+    columns: tuple[str, ...]
 
     def __new__(
         cls,
