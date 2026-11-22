@@ -124,6 +124,7 @@ architecture; the SQL agent queries physical tables only.
 │  ├─ /api/transit/route          Multimodal transit routing endpoint        │
 │  ├─ /api/house/{id}/chat        House-specific agent                       │
 │  ├─ /api/chat                   General agent                              │
+│  ├─ /api/chat/progress/{turn_id}  Live agent step progress (SSE)           │
 │  ├─ /metrics                    Prometheus metrics endpoint                │
 │  └─ /api/house/{id}/photo       Photo upload                               │
 └───────────────┬───────────────────────────────────────┬────────────────────┘
@@ -478,6 +479,31 @@ Agent: [compares HOA against other houses in the same city]
 - *"Which city has the most severe crime, weighted, not just the most incidents?"*
 - *"Find a transit route from Shadyside to Highland Park"*
 - *"Compare transit ridership and safety incidents between Pittsburgh PRT and Philadelphia SEPTA"*
+
+### Thinking process — real-time agent steps
+
+The **🧠 Thinking** button in the top bar opens a **Thinking Process** side panel that follows the agent while it
+works on your question, then keeps the finished list on screen until you send your next message. The answer
+itself still appears in the chat as usual.
+
+![Thinking Process side panel next to a General Chat answer, showing Started, Query Planning, Data Model Retrieval, Code Generation, Code Execution, Answer Synthesis and result all completed](screenshots/15-llm-thinking-progress.png)
+
+Each agent declares the steps it will run when the turn starts, so the panel never lists steps that do not run:
+
+| Chat | Steps |
+|---|---|
+| General Chat | Query Planning → Data Model Retrieval → Code Generation → Code Execution → Answer Synthesis |
+| House Chat | Property Analysis → Code Generation → Code Execution → Answer Synthesis |
+
+The panel walks that list the way the turn advances: `●` marks the step running now, `✓` a finished step, `o` a
+step still to come, and `✗` a step that failed (the badge then reads **Failed** instead of **Completed**). The
+first entry starts as `● Starting` and becomes `✓ Started` as soon as the first real step begins; the last is
+`result`, shown as `● result` while the answer is assembled and `✓ result` when the turn is done. A
+code-generation retry appears as its own `Code Generation (Attempt 2)` entry, just before `result`.
+
+Progress is delivered over Server-Sent Events (`GET /api/chat/progress/{turn_id}/stream`), with a
+`GET /api/chat/progress/{turn_id}` snapshot the browser falls back to if the stream drops. Both chat endpoints
+accept an optional `turn_id`; the browser generates one per message.
 
 ---
 
@@ -1042,6 +1068,8 @@ The browser uses these main endpoints:
 | `POST /api/transit/route` | Route between geocoded places on the national transit graph |
 | `POST /api/chat` | Ask the general cross-city agent |
 | `POST /api/house/{id}/chat` | Ask the agent about one house |
+| `GET /api/chat/progress/{turn_id}` | Snapshot of one turn's step progress |
+| `GET /api/chat/progress/{turn_id}/stream` | Server-Sent Events stream of step progress updates |
 | `GET /metrics` | Expose Prometheus metrics |
 
 ---

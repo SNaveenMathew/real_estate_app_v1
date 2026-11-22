@@ -43,6 +43,17 @@ CODE_AGENT_MAX_STEPS = 3
 CODE_AGENT_MAX_CHARS = 16000
 FINAL_RESPONSE_MAX_CHARS = 18000
 
+# The steps this agent reports to the thinking-process panel (agents/turn_progress.py).  The plan is registered
+# before the turn starts so every step can be shown as pending; start_step() reuses an entry by id or title, and
+# a retry inserts an extra "Code Generation (Attempt 2)"-style step just before "result".
+PROGRESS_STEPS: list[tuple[str, str]] = [
+    ("query_planning", "Query Planning"),
+    ("retrieval", "Data Model Retrieval"),
+    ("code_generation", "Code Generation"),
+    ("code_execution", "Code Execution"),
+    ("response_synthesis", "Answer Synthesis"),
+]
+
 APPROVED_FUNCTIONS = {
     "check_data_availability": check_data_availability,
     "get_database_schema": get_database_schema,
@@ -689,7 +700,11 @@ def run_general_chat(
     generated_programs: list[str] = []
 
     try:
+        from agents.turn_progress import get_current_tracker
+        tracker = get_current_tracker()
         evidence = ""
+        if tracker:
+            tracker.start_step("query_planning", "Query Planning")
         with trace_span(
             "general_chat.query_planner",
             attributes={"openinference.span.kind": "CHAIN"},
@@ -698,6 +713,8 @@ def run_general_chat(
             set_span_input(plan_span, {"request": message}, mime_type="application/json")
             set_span_output(plan_span, planned.to_dict(), mime_type="application/json")
 
+        if tracker:
+            tracker.start_step("retrieval", "Data Model Retrieval")
         with trace_span(
             "general_chat.data_model_rag",
             attributes={"openinference.span.kind": "RETRIEVER"},
@@ -707,6 +724,9 @@ def run_general_chat(
             set_span_output(rag_span, {"context": str(model_context)[:12000]}, mime_type="application/json")
 
         for step in range(CODE_AGENT_MAX_STEPS):
+            if tracker:
+                step_title = "Code Generation" if step == 0 else f"Code Generation (Attempt {step + 1})"
+                tracker.start_step(f"code_gen_{step + 1}", step_title)
             with trace_span(
                 f"general_chat.code_agent.step_{step + 1}",
                 attributes={
@@ -726,6 +746,9 @@ def run_general_chat(
                     mark_span_error(code_span, exc)
                     raise
 
+            if tracker:
+                exec_title = "Code Execution" if step == 0 else f"Code Execution (Attempt {step + 1})"
+                tracker.start_step(f"code_exec_{step + 1}", exec_title)
             with trace_span(
                 f"general_chat.code_execution.step_{step + 1}",
                 attributes={
@@ -780,6 +803,8 @@ def run_general_chat(
             break
 
         evidence = _render_evidence(all_calls)
+        if tracker:
+            tracker.start_step("response_synthesis", "Answer Synthesis")
         with trace_span(
             "general_chat.response",
             attributes={"openinference.span.kind": "LLM"},
@@ -787,6 +812,9 @@ def run_general_chat(
             set_span_input(response_span, {"message": message, "evidence": evidence[:12000]}, mime_type="application/json")
             raw_reply = _write_final_answer(message, history, evidence)
             set_span_output(response_span, {"reply": raw_reply}, mime_type="application/json")
+
+        if tracker:
+            tracker.set_result_running()
 
         all_messages: list[BaseMessage] = [
             HumanMessage(content=message),

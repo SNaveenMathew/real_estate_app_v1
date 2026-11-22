@@ -32,6 +32,7 @@
   </div>
   <div class="topbar-right">
     <a class="btn-data" href="/data" title="Add your own data and link it to the catalog">🗂️ Data model</a>
+    <button class="btn-thinking" id="btn-toggle-thinking" title="Toggle Thinking Process Side Panel" aria-expanded="false">🧠 Thinking</button>
     <button class="btn-general" id="btn-general-chat" title="Open General Chat in the sidebar">💬 General Chat</button>
     <button class="btn-sidebar-toggle" id="btn-toggle-sidebar" title="Toggle House Details Sidebar" aria-expanded="false">📋 House Details</button>
   </div>
@@ -42,6 +43,26 @@
 
   <!-- Map -->
   <div id="map"></div>
+
+  <!-- Agent Thinking Process Side Panel -->
+  <aside class="thinking-panel" id="thinking-panel" aria-label="Thinking Process Side Panel">
+    <div class="thinking-header">
+      <div class="thinking-title">
+        <span class="thinking-icon">🧠</span>
+        <span class="thinking-heading">Thinking Process</span>
+      </div>
+      <div class="thinking-header-actions">
+        <span class="thinking-status-badge idle" id="thinking-status-badge">Idle</span>
+        <button class="thinking-btn-close" id="btn-close-thinking" title="Close thinking panel" aria-label="Close thinking panel">✕</button>
+      </div>
+    </div>
+    <div class="thinking-body">
+      <div class="thinking-intro-text" id="thinking-intro-text">
+        Real-time decision and execution steps appear here during conversation turns.
+      </div>
+      <div class="thinking-progress-list" id="thinking-progress-list"></div>
+    </div>
+  </aside>
 
   <!-- Sidebar edge toggle tab -->
   <button class="sidebar-edge-toggle" id="sidebar-edge-toggle" title="Toggle sidebar" aria-label="Toggle sidebar">
