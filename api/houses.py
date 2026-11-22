@@ -1,20 +1,29 @@
-"""HTTP API endpoints for houses, property documents, favorites, photos, and NRI risk."""
+"""HTTP API endpoints for houses, property documents, favorites, photos, and NRI risk.
+
+Threading: these handlers are plain ``def``. Every one of them reads or writes DuckDB or
+Chroma and nothing on the way waits, so FastAPI runs them in its worker pool and the
+store's per-thread cursors (db/duckdb_store.py) serve each thread its own handle. As
+``async def`` they held the event loop for the whole query - a 1.4 MB ``/api/houses``
+payload froze every other request for the duration.
+"""
 from __future__ import annotations
 
-import shutil
+import uuid
 from pathlib import Path
+
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
+from api.common import safe_dict, DocumentRequest
+from api.uploads import sanitize_filename, save_stream, sniff_image_extension
 from config import settings
 import db.duckdb_store as store
 import db.vector_store as vs
-from api.common import safe_dict, DocumentRequest
 
 router = APIRouter(tags=["houses"])
 
 
 @router.get("/api/houses")
-async def get_houses():
+def get_houses():
     """Return all houses as GeoJSON FeatureCollection."""
     houses = store.get_all_houses()
     features = []
@@ -32,7 +41,7 @@ async def get_houses():
 
 
 @router.get("/api/house/{house_id}")
-async def get_house(house_id: str):
+def get_house(house_id: str):
     house = store.get_house(house_id)
     if not house:
         raise HTTPException(404, "House not found")
@@ -48,7 +57,7 @@ async def get_house(house_id: str):
 
 
 @router.post("/api/house/{house_id}/favorite")
-async def toggle_favorite(house_id: str):
+def toggle_favorite(house_id: str):
     """Toggle the favorite status of a house."""
     house = store.get_house(house_id)
     if not house:
@@ -58,7 +67,7 @@ async def toggle_favorite(house_id: str):
 
 
 @router.put("/api/house/{house_id}/description")
-async def update_description(house_id: str, req: DocumentRequest):
+def update_description(house_id: str, req: DocumentRequest):
     """Replace the single stored description for a house."""
     house = store.get_house(house_id)
     if not house:
@@ -70,7 +79,7 @@ async def update_description(house_id: str, req: DocumentRequest):
 
 
 @router.delete("/api/house/{house_id}/description")
-async def delete_description(house_id: str):
+def delete_description(house_id: str):
     """Delete the stored description for a house."""
     house = store.get_house(house_id)
     if not house:
@@ -83,43 +92,58 @@ async def delete_description(house_id: str):
 
 
 @router.get("/api/house/{house_id}/description")
-async def get_description_endpoint(house_id: str):
+def get_description_endpoint(house_id: str):
     """Get the stored description for a house."""
     desc = vs.get_description(house_id)
     return {"description": desc}
 
 
 @router.post("/api/house/{house_id}/photo")
-async def upload_photo(
+def upload_photo(
     house_id: str,
     file: UploadFile = File(...),
     caption: str = Form(""),
 ):
-    """Upload a photo for a house. Stores reference in vector DB."""
+    """Upload a photo for a house. Stores the file and a reference in the vector DB.
+
+    The client supplies neither the path nor the type: ``house_id`` is sanitized because
+    it becomes a directory name, the file is streamed under ``photo_max_upload_mb``, and
+    the stored extension comes from the bytes Pillow decoded - never from the filename or
+    Content-Type.
+    """
     house = store.get_house(house_id)
     if not house:
         raise HTTPException(404, "House not found")
 
-    house_dir = settings.uploads_dir / house_id
+    limit = int(getattr(settings, "photo_max_upload_mb", 10)) * 1024 * 1024
+    house_dir = Path(settings.uploads_dir) / sanitize_filename(house_id, fallback="house")
     house_dir.mkdir(parents=True, exist_ok=True)
-    dest = house_dir / file.filename
-    with dest.open("wb") as f:
-        shutil.copyfileobj(file.file, f)
 
-    doc_id = vs.add_photo(house_id, dest, caption=caption)
+    staged = house_dir / f".{uuid.uuid4().hex}.part"        # never visible under a serving name while it is checked
+    save_stream(file.file, staged, max_bytes=limit)
+    try:
+        ext = sniff_image_extension(staged)
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
+
+    stem = Path(sanitize_filename(file.filename, fallback="photo")).stem[:60]
+    dest = house_dir / f"{stem}-{uuid.uuid4().hex[:8]}{ext}"
+    staged.replace(dest)
+
+    doc_id = vs.add_photo(house_id, dest, caption=caption[:500])
     return {"status": "uploaded", "doc_id": doc_id, "path": str(dest)}
 
 
 @router.get("/api/house/{house_id}/documents")
-async def get_documents(house_id: str):
+def get_documents(house_id: str):
     docs = vs.get_house_documents(house_id)
     return {"documents": docs}
 
 
 @router.get("/api/nri/{tract_fips}")
-async def get_nri(tract_fips: str):
+def get_nri(tract_fips: str):
     nri = store.get_nri_for_tract(tract_fips)
     if not nri:
         raise HTTPException(404, "NRI data not found for this tract")
     return nri
-
