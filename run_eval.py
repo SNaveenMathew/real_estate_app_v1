@@ -35,6 +35,7 @@ to the same server/model, but an independent or stronger judge is stronger
 evidence) in .env. Exits non-zero if anything failed or errored, so this is
 safe to wire into CI.
 """
+
 import argparse
 import atexit
 import json
@@ -59,6 +60,7 @@ def run_example(example: GoldenExample, judge, mock: bool):
     if not mock:
         try:
             from observability import initialize_observability, clear_local_trace_capture
+
             initialize_observability()
             clear_local_trace_capture()
         except Exception:
@@ -66,26 +68,32 @@ def run_example(example: GoldenExample, judge, mock: bool):
 
     if mock:
         from eval.mock_agent import mock_reply
+
         try:
             reply = mock_reply(example)
         except Exception as e:
-            return ScoreResult(example.id, "ERROR", "n/a", f"mock agent failed: {e}",
-                                extra={"traceback": traceback.format_exc()})
+            return ScoreResult(
+                example.id, "ERROR", "n/a", f"mock agent failed: {e}", extra={"traceback": traceback.format_exc()}
+            )
     else:
         try:
             if example.agent == "general":
                 from agents.general_agent import run_general_chat
-                reply, _, _, metadata = run_general_chat(example.question, history=list(example.history),
-                                                        include_metadata=True)
+
+                reply, _, _, metadata = run_general_chat(
+                    example.question, history=list(example.history), include_metadata=True
+                )
                 trace_id = metadata.get("trace_id") if metadata else None
                 trace_url = metadata.get("trace_url") if metadata else None
             else:
                 from agents.house_agent import run_house_chat
+
                 reply, _, _ = run_house_chat(example.house_id, example.question, history=list(example.history))
         except Exception as e:
             trace_id = None
             try:
                 from observability import latest_local_trace_id
+
                 trace_id = latest_local_trace_id()
             except Exception:
                 pass
@@ -123,21 +131,47 @@ def main():
     parser = argparse.ArgumentParser(description="Run the agent evaluation pipeline")
     parser.add_argument("--ids", help="comma-separated example ids to run (default: all)")
     parser.add_argument("--tags", help="comma-separated tags to filter by (default: all)")
-    parser.add_argument("--skip-fixture-build", action="store_true",
-                         help="reuse an already-built fixture DB instead of rebuilding it")
+    parser.add_argument(
+        "--skip-fixture-build", action="store_true", help="reuse an already-built fixture DB instead of rebuilding it"
+    )
     parser.add_argument("--list", action="store_true", help="list matching examples and exit")
-    parser.add_argument("--skip-house-agent", action="store_true",
-                        help="skip examples assigned to the house agent; evaluate General Chat only")
-    parser.add_argument("--house-agent-only", "--only-house-agent", dest="house_agent_only",
-                        action="store_true",
-                        help="run only examples assigned to the house agent")
-    parser.add_argument("--mock", action="store_true",
-                         help="smoke-test the harness with a scripted stub reply and a "
-                              "keyword-based judge — no model server required. "
-                              "NOT a real evaluation of the agent.")
-    parser.add_argument("--allow-partial", action="store_true",
-                        help="permit a filtered run to exit 0 even though it skipped examples. "
-                             "Without this, any subset is reported as partial and exits 2.")
+    parser.add_argument(
+        "--skip-house-agent",
+        action="store_true",
+        help="skip examples assigned to the house agent; evaluate General Chat only",
+    )
+    parser.add_argument(
+        "--house-agent-only",
+        "--only-house-agent",
+        dest="house_agent_only",
+        action="store_true",
+        help="run only examples assigned to the house agent",
+    )
+    parser.add_argument(
+        "--mock",
+        action="store_true",
+        help="smoke-test the harness with a scripted stub reply and a "
+        "keyword-based judge — no model server required. "
+        "NOT a real evaluation of the agent.",
+    )
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="permit a filtered run to exit 0 even though it skipped examples. "
+        "Without this, any subset is reported as partial and exits 2.",
+    )
+    parser.add_argument(
+        "--allow-self-judge",
+        action="store_true",
+        help="allow the model under test to judge its own answers. Off by default: a run where the "
+        "judge is the agent's weights is not independent evidence.",
+    )
+    parser.add_argument(
+        "--calibrate",
+        action="store_true",
+        help="score the known-verdict calibration answers (eval/calibration.py) and exit; catches a "
+        "scorer or judge that has drifted to always-pass. Add --mock for the deterministic half only.",
+    )
     args = parser.parse_args()
 
     examples = _filter_examples(args)
@@ -161,8 +195,33 @@ def main():
     judge = MockJudge() if args.mock else LLMJudge()
     if args.mock:
         print("*** --mock: smoke-testing the harness only. This is NOT a real evaluation. ***")
+
+    if args.calibrate:
+        from eval import calibration
+
+        rows, ok = calibration.run(judge=None if args.mock else judge)
+        print(f"{'case':<30} {'what':<50} {'got':<12} {'expected':<9} ok")
+        for row in rows:
+            print(
+                f"{row['id']:<30} {row['what'][:50]:<50} {row['verdict']:<12} {row['expected']:<9} "
+                f"{'yes' if row['ok'] else 'NO'}"
+            )
+        bad = [row for row in rows if not row["ok"]]
+        print(f"\n{len(rows) - len(bad)}/{len(rows)} calibration answers agreed with their known verdict")
+        sys.exit(0 if ok else 2)
+
+    judge_model = getattr(judge, "model", None)
+    if not args.mock and judge_model == settings.llama_server_model and not args.allow_self_judge:
+        print(
+            f"error: the judge is the model under test ({judge_model}). A model scoring its own answers is not "
+            "independent evidence: set JUDGE_LLAMA_SERVER_MODEL (and JUDGE_LLAMA_SERVER_BASE_URL) to a different "
+            "model, or pass --allow-self-judge to record a run that says so.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     else:
         from observability import ensure_phoenix_server, initialize_observability, stop_phoenix_server
+
         atexit.register(stop_phoenix_server)
         if settings.phoenix_enabled and not ensure_phoenix_server():
             settings.phoenix_enabled = False
@@ -178,17 +237,23 @@ def main():
         "filtered": filtered,
         "agent_model": settings.llama_server_model,
         "judge_model": getattr(judge, "model", "unknown"),
-        "judge_is_agent_model": getattr(judge, "model", None) == settings.llama_server_model,
+        "judge_is_agent_model": judge_model == settings.llama_server_model,
+        "judge_independent": (not args.mock) and judge_model != settings.llama_server_model,
         "mock": args.mock,
     }
     if filtered:
-        print(f"PARTIAL RUN: {len(examples)} of {len(GOLDEN_SET)} examples "
-              f"(filters: ids={bool(args.ids)} tags={bool(args.tags)} "
-              f"skip_house={args.skip_house_agent} house_only={args.house_agent_only}).", file=sys.stderr)
+        print(
+            f"PARTIAL RUN: {len(examples)} of {len(GOLDEN_SET)} examples "
+            f"(filters: ids={bool(args.ids)} tags={bool(args.tags)} "
+            f"skip_house={args.skip_house_agent} house_only={args.house_agent_only}).",
+            file=sys.stderr,
+        )
     if meta["judge_is_agent_model"] and not args.mock:
-        print(f"warning: the judge is the model under test ({meta['judge_model']}); "
-              "set JUDGE_LLAMA_SERVER_MODEL to an independent model for stronger evidence.",
-              file=sys.stderr)
+        print(
+            f"warning: the judge is the model under test ({meta['judge_model']}); "
+            "set JUDGE_LLAMA_SERVER_MODEL to an independent model for stronger evidence.",
+            file=sys.stderr,
+        )
 
     results: list[tuple[GoldenExample, ScoreResult]] = []
     print(f"\nRunning {len(examples)} example(s){' [MOCK]' if args.mock else ''}...\n")
@@ -198,36 +263,52 @@ def main():
         if not args.mock:
             try:
                 from observability import export_trace
+
                 trace_path = settings.eval_traces_dir / f"{ex.id}.json"
                 trace_id = result.extra.get("trace_id")
                 if trace_id:
-                    export_trace(trace_id, trace_path, metadata={
-                        "eval_id": ex.id,
-                        "agent": ex.agent,
-                        "answer_type": ex.answer_type,
-                        "tags": list(ex.tags),
-                        "question": ex.question,
-                        "verdict": result.verdict,
-                        "method": result.method,
-                        "reason": result.reason,
-                        "reply": result.reply,
-                        "trace_url": result.extra.get("trace_url"),
-                    })
+                    export_trace(
+                        trace_id,
+                        trace_path,
+                        metadata={
+                            "eval_id": ex.id,
+                            "agent": ex.agent,
+                            "answer_type": ex.answer_type,
+                            "tags": list(ex.tags),
+                            "question": ex.question,
+                            "verdict": result.verdict,
+                            "method": result.method,
+                            "reason": result.reason,
+                            "reply": result.reply,
+                            "trace_url": result.extra.get("trace_url"),
+                        },
+                    )
                 else:
                     trace_path.parent.mkdir(parents=True, exist_ok=True)
-                    trace_path.write_text(json.dumps({
-                        "trace_id": None,
-                        "span_count": 0,
-                        "metadata": {
-                            "eval_id": ex.id, "agent": ex.agent,
-                            "answer_type": ex.answer_type, "tags": list(ex.tags),
-                            "question": ex.question, "verdict": result.verdict,
-                            "method": result.method, "reason": result.reason,
-                            "reply": result.reply,
-                            "note": "No OpenTelemetry trace was emitted by this agent path."
-                        },
-                        "spans": []
-                    }, indent=2, ensure_ascii=False), encoding="utf-8")
+                    trace_path.write_text(
+                        json.dumps(
+                            {
+                                "trace_id": None,
+                                "span_count": 0,
+                                "metadata": {
+                                    "eval_id": ex.id,
+                                    "agent": ex.agent,
+                                    "answer_type": ex.answer_type,
+                                    "tags": list(ex.tags),
+                                    "question": ex.question,
+                                    "verdict": result.verdict,
+                                    "method": result.method,
+                                    "reason": result.reason,
+                                    "reply": result.reply,
+                                    "note": "No OpenTelemetry trace was emitted by this agent path.",
+                                },
+                                "spans": [],
+                            },
+                            indent=2,
+                            ensure_ascii=False,
+                        ),
+                        encoding="utf-8",
+                    )
                 result.extra["trace_file"] = str(trace_path)
             except Exception as exc:
                 result.extra["trace_export_error"] = str(exc)
@@ -260,8 +341,7 @@ def _print_summary(results: list[tuple[GoldenExample, ScoreResult]]):
     print(f"\n{'=' * 60}")
     print(f"{passed}/{n} passed, {failed} failed, {errored} errored, {unknown} inconclusive")
 
-    for label, method_prefix in [("assert-equal (structured)", "assert_equal"),
-                                  ("LLM judge (free-text)", "llm_judge")]:
+    for label, method_prefix in [("assert-equal (structured)", "assert_equal"), ("LLM judge (free-text)", "llm_judge")]:
         subset = [(e, r) for e, r in results if r.method.startswith(method_prefix)]
         if subset:
             p = sum(1 for _, r in subset if r.verdict == "PASS")
@@ -292,12 +372,20 @@ def _write_report(results: list[tuple[GoldenExample, ScoreResult]], mock: bool, 
         **meta,
         "results": [
             {
-                "id": ex.id, "agent": ex.agent, "tags": list(ex.tags),
-                "answer_type": ex.answer_type, "question": ex.question,
-                "verdict": r.verdict, "method": r.method, "reason": r.reason,
-                "reply": r.reply, "traceback": r.extra.get("traceback"),
-                "trace_id": r.extra.get("trace_id"), "trace_url": r.extra.get("trace_url"),
-                "trace_file": r.extra.get("trace_file"), "trace_export_error": r.extra.get("trace_export_error"),
+                "id": ex.id,
+                "agent": ex.agent,
+                "tags": list(ex.tags),
+                "answer_type": ex.answer_type,
+                "question": ex.question,
+                "verdict": r.verdict,
+                "method": r.method,
+                "reason": r.reason,
+                "reply": r.reply,
+                "traceback": r.extra.get("traceback"),
+                "trace_id": r.extra.get("trace_id"),
+                "trace_url": r.extra.get("trace_url"),
+                "trace_file": r.extra.get("trace_file"),
+                "trace_export_error": r.extra.get("trace_export_error"),
             }
             for ex, r in results
         ],
@@ -314,9 +402,13 @@ def _write_report(results: list[tuple[GoldenExample, ScoreResult]], mock: bool, 
     lines.append(f"- **command:** `{meta.get('command', '')}`")
     lines.append(f"- **agent model:** `{meta.get('agent_model')}` · **judge model:** `{meta.get('judge_model')}`")
     if meta.get("judge_is_agent_model"):
-        lines.append("- **warning:** the judge is the same model that answered — set `JUDGE_LLAMA_SERVER_MODEL` to an independent model.")
+        lines.append(
+            "- **warning:** the judge is the same model that answered — set `JUDGE_LLAMA_SERVER_MODEL` to an independent model."
+        )
     if not meta.get("complete_coverage", True):
-        lines.append(f"- **partial run:** {meta.get('count')} of {meta.get('golden_set_size')} examples — not a quality gate.")
+        lines.append(
+            f"- **partial run:** {meta.get('count')} of {meta.get('golden_set_size')} examples — not a quality gate."
+        )
     lines.append(f"- **ids:** {', '.join(meta.get('ids') or [])}")
     lines.append("")
     lines.append("| id | agent | type | verdict | method |")
@@ -338,7 +430,7 @@ def _write_report(results: list[tuple[GoldenExample, ScoreResult]], mock: bool, 
             lines.append(f"- **trace export error:** `{r.extra['trace_export_error']}`")
         if r.verdict == "ERROR" and r.extra.get("traceback"):
             lines.append(f"- **traceback:**\n```\n{r.extra['traceback']}```")
-    md_path.write_text("\n".join(lines), encoding="utf-8")   # reports are read on other machines too
+    md_path.write_text("\n".join(lines), encoding="utf-8")  # reports are read on other machines too
 
     print(f"\nReport written to:\n  {json_path}\n  {md_path}")
 
