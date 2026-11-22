@@ -5,6 +5,7 @@ middle of it, and every test bootstrap ran the whole thing with no way to see wh
 The DDL now lives here, grouped the way the catalog groups it, and ``initialize(conn)`` runs the groups
 in the same order as before. The statements themselves are unchanged - verified by comparing the built
 schema (information_schema + PRAGMA table_info) against a snapshot taken before the split."""
+
 from __future__ import annotations
 
 import duckdb
@@ -497,14 +498,57 @@ def create_app_tables(conn: duckdb.DuckDBPyConnection) -> None:
 
     # The catalog, its seed, the result cache and chat memory own their own tables (and their own migrations).
     from db import catalog_store
+
     catalog_store.ensure_tables(conn)
     catalog_store.sync_seed(conn)
 
     from services import cache as result_cache
+
     result_cache.ensure_tables(conn)
 
     from services import session_memory
+
     session_memory.ensure_tables(conn)
+
+
+# ── Join-key indexes ────────────────────────────────────────────────────────────
+# The catalog declares 25 relationships, and every analytical query and map layer joins on
+# them; without indexes DuckDB scans the whole table for each join — 740,679 crime rows, 85 k
+# tracts and 300 k+ sales. Primary keys get theirs from the constraint; these are the foreign
+# sides. Idempotent, so the cost is paid once per database file, not per connection.
+_INDEXES = (
+    ("houses", "city"),
+    ("houses", "tract_fips"),
+    ("houses", "msa_code"),
+    ("houses", "crime_city"),
+    ("house_commute", "house_id"),
+    ("house_snapshots", "house_id"),
+    ("nri_tracts", "county_fips"),
+    ("cbsa_counties", "county_fips"),
+    ("cbsa_counties", "cbsa_code"),
+    ("crime_incidents", "city"),
+    ("crime_incidents", "year"),
+    ("crime_incidents", "category"),
+    ("sold_homes", "tract_fips"),
+    ("sold_homes", "county_fips"),
+    ("sold_homes", "city"),
+    ("bike_routes", "city"),
+    ("transit_routes", "ntd_id"),
+    ("transit_ridership", "ntd_id"),
+    ("transit_ridership", "year"),
+    ("transit_safety", "ntd_id"),
+    ("zhvi", "region_name"),
+    ("zhvi", "msa_code"),
+    ("market_heat_index", "region_name"),
+    ("market_heat_index", "msa_code"),
+    ("chat_session_turns", "session_id"),
+)
+
+
+def create_indexes(conn: duckdb.DuckDBPyConnection) -> None:
+    """Create the join-key indexes the schema declares, ignoring ones that already exist."""
+    for table, column in _INDEXES:
+        conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_{column} ON {table}({column})")
 
 
 def initialize(conn: duckdb.DuckDBPyConnection) -> None:
@@ -517,3 +561,4 @@ def initialize(conn: duckdb.DuckDBPyConnection) -> None:
     create_transit_tables(conn)
     create_sales_tables(conn)
     create_app_tables(conn)
+    create_indexes(conn)  # last: chat_session_turns is created inside create_app_tables
