@@ -613,16 +613,35 @@ function appendMsg(ctx, role, content, traceUrl = null) {
   const safeContent = content == null ? 'The assistant returned no response.' : String(content);
   const html = typeof marked !== 'undefined' ? marked.parse(safeContent) : safeContent;
   div.innerHTML = `<div class="bubble">${html}</div>`;
-  if (role === 'assistant' && traceUrl) {
-    const traceBtn = document.createElement('button');
-    traceBtn.type = 'button';
-    traceBtn.className = 'btn-trace';
-    traceBtn.textContent = 'Trace';
-    traceBtn.title = 'Open this response trace in Arize Phoenix';
-    traceBtn.addEventListener('click', () => {
-      window.open(String(traceUrl), '_blank', 'noopener,noreferrer');
+  if (role === 'assistant') {
+    const actions = document.createElement('div');
+    actions.className = 'msg-actions';
+    actions.style.display = 'flex';
+    actions.style.gap = '6px';
+    actions.style.marginTop = '4px';
+
+    const thinkBtn = document.createElement('button');
+    thinkBtn.type = 'button';
+    thinkBtn.className = 'chat-thinking-tag';
+    thinkBtn.innerHTML = '<span>🧠</span> <span>Thinking Process</span>';
+    thinkBtn.title = 'View LLM thinking process in side panel';
+    thinkBtn.addEventListener('click', () => {
+      if (typeof ThinkingUI !== 'undefined') ThinkingUI.open();
     });
-    div.appendChild(traceBtn);
+    actions.appendChild(thinkBtn);
+
+    if (traceUrl) {
+      const traceBtn = document.createElement('button');
+      traceBtn.type = 'button';
+      traceBtn.className = 'btn-trace';
+      traceBtn.textContent = 'Trace';
+      traceBtn.title = 'Open this response trace in Arize Phoenix';
+      traceBtn.addEventListener('click', () => {
+        window.open(String(traceUrl), '_blank', 'noopener,noreferrer');
+      });
+      actions.appendChild(traceBtn);
+    }
+    div.appendChild(actions);
   }
   el.appendChild(div);
   el.scrollTop = el.scrollHeight;
@@ -634,7 +653,15 @@ function appendTyping(ctx) {
   const el = document.getElementById(containerId);
   const div = document.createElement('div');
   div.className = 'msg assistant typing';
-  div.innerHTML = '<div class="bubble">Thinking…</div>';
+  div.innerHTML = `
+    <div class="bubble">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span class="thinking-spinner" style="color:#2563eb;animation:pulse-bullet 1.2s infinite ease-in-out;">●</span>
+        <span>Thinking…</span>
+        <button type="button" class="chat-thinking-tag" style="margin:0;padding:2px 6px;font-size:11px;" onclick="if(typeof ThinkingUI !== 'undefined') ThinkingUI.open()">View steps</button>
+      </div>
+    </div>
+  `;
   el.appendChild(div);
   el.scrollTop = el.scrollHeight;
   return div;
@@ -649,6 +676,11 @@ async function sendHouseMessage() {
   const sendBtn = document.getElementById('house-chat-send');
   sendBtn.disabled = true;
 
+  const turnId = 'turn_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+  if (typeof ThinkingUI !== 'undefined') {
+    ThinkingUI.startTurn(turnId);
+  }
+
   // Switch to chat tab
   switchTab('chat');
   appendMsg('house', 'user', msg);
@@ -659,13 +691,16 @@ async function sendHouseMessage() {
     const resp = await fetch(`/api/house/${state.selectedHouseId}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg, history }),
+      body: JSON.stringify({ message: msg, history, turn_id: turnId }),
     });
     const data = await resp.json();
     typing.remove();
     const assistantMsg = appendMsg('house', 'assistant', data.reply, data.trace_url || null);
     renderArtifactsInChat(assistantMsg, data.artifacts);
     state.houseChatHistory[state.selectedHouseId] = data.history;
+    if (typeof ThinkingUI !== 'undefined') {
+      ThinkingUI.finishTurn(turnId, true);
+    }
 
     // Refresh description display if auto-saved
     if (data.auto_saved) {
@@ -677,6 +712,9 @@ async function sendHouseMessage() {
   } catch (e) {
     typing.remove();
     appendMsg('house', 'assistant', `Error: ${e.message}`);
+    if (typeof ThinkingUI !== 'undefined') {
+      ThinkingUI.finishTurn(turnId, false);
+    }
   } finally {
     sendBtn.disabled = false;
     input.focus();
@@ -1214,6 +1252,196 @@ function renderPointsMapArtifactInChat(messageEl, mapArtifact) {
   setTimeout(() => pointsMap.invalidateSize(), 100);
 }
 
+/* ── Thinking UI Controller ───────────────────────────────────────────── */
+const ThinkingUI = {
+  currentTurnId: null,
+  eventSource: null,
+  pollTimer: null,
+  lastState: null,
+  isOpen: false,
+
+  init() {
+    const toggleBtn = document.getElementById('btn-toggle-thinking');
+    const closeBtn = document.getElementById('btn-close-thinking');
+    if (toggleBtn) {
+      toggleBtn.addEventListener('click', () => {
+        if (this.isOpen) this.close();
+        else this.open();
+      });
+    }
+    if (closeBtn) {
+      closeBtn.addEventListener('click', () => this.close());
+    }
+  },
+
+  open() {
+    const panel = document.getElementById('thinking-panel');
+    const toggleBtn = document.getElementById('btn-toggle-thinking');
+    if (panel) panel.classList.add('open');
+    if (toggleBtn) {
+      toggleBtn.classList.add('active');
+      toggleBtn.setAttribute('aria-expanded', 'true');
+    }
+    this.isOpen = true;
+  },
+
+  close() {
+    const panel = document.getElementById('thinking-panel');
+    const toggleBtn = document.getElementById('btn-toggle-thinking');
+    if (panel) panel.classList.remove('open');
+    if (toggleBtn) {
+      toggleBtn.classList.remove('active');
+      toggleBtn.setAttribute('aria-expanded', 'false');
+    }
+    this.isOpen = false;
+  },
+
+  renderSteps(stateData) {
+    if (!stateData) return;
+    this.lastState = stateData;
+    const listEl = document.getElementById('thinking-progress-list');
+    const introEl = document.getElementById('thinking-intro-text');
+    const badgeEl = document.getElementById('thinking-status-badge');
+    if (!listEl) return;
+
+    if (introEl) introEl.style.display = 'none';
+
+    const steps = stateData.steps || [];
+    listEl.innerHTML = '';
+
+    steps.forEach(s => {
+      const div = document.createElement('div');
+      const st = s.status || 'pending';
+      div.className = `thinking-step step-${st}`;
+      div.setAttribute('data-step-id', s.id);
+      div.setAttribute('data-status', st);
+
+      let bullet = 'o';
+      let title = s.title;
+      if (st === 'completed') {
+        bullet = '✓';
+        title = s.id === 'start' ? 'Started' : s.title;
+      } else if (st === 'running') {
+        bullet = '●';
+        title = s.id === 'start' ? 'Starting' : s.title;
+      } else if (st === 'failed') {
+        bullet = '✗';
+      }
+
+      div.innerHTML = `<span class="step-bullet">${bullet}</span><span class="step-title">${escapeHtml(title)}</span>`;
+      listEl.appendChild(div);
+    });
+
+    if (badgeEl) {
+      badgeEl.className = 'thinking-status-badge';
+      if (stateData.is_complete) {
+        const hasFailed = steps.some(s => s.status === 'failed');
+        if (hasFailed) {
+          badgeEl.classList.add('failed');
+          badgeEl.textContent = 'Failed';
+        } else {
+          badgeEl.classList.add('completed');
+          badgeEl.textContent = 'Completed';
+        }
+      } else {
+        badgeEl.classList.add('running');
+        badgeEl.textContent = 'Thinking...';
+      }
+    }
+  },
+
+  startTurn(turnId) {
+    this.currentTurnId = turnId;
+    this.cleanupStream();
+    this.open();
+
+    // Optimistic first paint only: the server sends the agent's real plan for this turn within a moment,
+    // so the step list is never duplicated here.
+    const initialState = {
+      turn_id: turnId,
+      is_complete: false,
+      steps: [
+        { id: 'start', title: 'Starting', status: 'running' },
+        { id: 'result', title: 'result', status: 'pending' },
+      ],
+    };
+    this.renderSteps(initialState);
+
+    try {
+      const es = new EventSource(`/api/chat/progress/${encodeURIComponent(turnId)}/stream`);
+      this.eventSource = es;
+
+      es.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          this.renderSteps(data);
+          if (data.is_complete) {
+            this.cleanupStream();
+          }
+        } catch (err) {
+          console.warn('Failed to parse progress SSE:', err);
+        }
+      };
+
+      es.onerror = () => {
+        this.cleanupStream();
+        this.startPolling(turnId);
+      };
+    } catch (err) {
+      this.startPolling(turnId);
+    }
+  },
+
+  startPolling(turnId) {
+    if (this.pollTimer) clearInterval(this.pollTimer);
+    let misses = 0;
+    this.pollTimer = setInterval(async () => {
+      try {
+        const resp = await fetch(`/api/chat/progress/${encodeURIComponent(turnId)}`);
+        if (resp.ok) {
+          misses = 0;
+          const data = await resp.json();
+          this.renderSteps(data);
+          if (data.is_complete) {
+            this.cleanupStream();
+          }
+        } else if (resp.status === 404 && ++misses >= 25) {
+          this.cleanupStream();   // the turn never registered (the request was rejected)
+        }
+      } catch (e) {
+        // quiet fallback
+      }
+    }, 400);
+  },
+
+  cleanupStream() {
+    if (this.eventSource) {
+      this.eventSource.close();
+      this.eventSource = null;
+    }
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+  },
+
+  finishTurn(turnId, isSuccess = true) {
+    this.cleanupStream();
+    if (!this.lastState) return;
+    const steps = (this.lastState.steps || []).map(s => {
+      if (isSuccess) {
+        return { ...s, status: 'completed', title: s.id === 'start' ? 'Started' : s.title };
+      }
+      return s.status === 'running' ? { ...s, status: 'failed' } : s;
+    });
+    if (!isSuccess && !steps.some(s => s.status === 'failed') && steps.length) {
+      steps[steps.length - 1] = { ...steps[steps.length - 1], status: 'failed' };
+    }
+    this.renderSteps({ ...this.lastState, is_complete: true, steps });
+  }
+};
+window.ThinkingUI = ThinkingUI;
+
 async function sendGeneralMessage() {
   const input = document.getElementById('general-chat-input');
   const msg = input.value.trim();
@@ -1223,6 +1451,9 @@ async function sendGeneralMessage() {
   const sendBtn = document.getElementById('general-chat-send');
   sendBtn.disabled = true;
 
+  const turnId = 'turn_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+  ThinkingUI.startTurn(turnId);
+
   appendMsg('general', 'user', msg);
   const typing = appendTyping('general');
 
@@ -1230,7 +1461,7 @@ async function sendGeneralMessage() {
     const resp = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg, history: state.generalChatHistory }),
+      body: JSON.stringify({ message: msg, history: state.generalChatHistory, turn_id: turnId }),
     });
     const data = await resp.json();
     typing.remove();
@@ -1238,9 +1469,11 @@ async function sendGeneralMessage() {
     const assistantMsg = appendMsg('general', 'assistant', data.reply, assistantTraceUrl);
     renderArtifactsInChat(assistantMsg, data.artifacts);
     state.generalChatHistory = data.history;
+    ThinkingUI.finishTurn(turnId, true);
   } catch (e) {
     typing.remove();
     appendMsg('general', 'assistant', `Error: ${e.message}`);
+    ThinkingUI.finishTurn(turnId, false);
   } finally {
     sendBtn.disabled = false;
     input.focus();
@@ -1353,6 +1586,7 @@ async function findBikeRoute() {
 
 /* ── Boot ────────────────────────────────────────────────────────────── */
 loadHouses();
+ThinkingUI.init();
 map.addControl(new (BikeRouteControl())());   // BikeRouteControl() returns the control CLASS; instantiate it (was `new BikeRouteControl()`, which made Leaflet call .addTo on a class and abort the rest of this script)
 
 // Deep link from the Data page: /#general-chat opens the General Chat sidebar tab.
