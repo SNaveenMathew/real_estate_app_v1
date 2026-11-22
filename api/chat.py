@@ -8,6 +8,7 @@ import db.duckdb_store as store
 import db.vector_store as vs
 from agents.house_agent import run_house_chat
 from agents.general_agent import run_general_chat
+import main
 from agents import llm_resilience, turn_runner
 from observability import phoenix_enabled
 from api.common import ChatRequest
@@ -63,8 +64,9 @@ async def house_chat(house_id: str, req: ChatRequest):
 async def general_chat(req: ChatRequest):
     """General chat — cross-house, MSA, national risk questions."""
     try:
+        chat_fn = getattr(main, "run_general_chat", run_general_chat)
         reply, updated_history, artifacts, observability = await turn_runner.run_turn(
-            run_general_chat,
+            chat_fn,
             req.message,
             req.history,
             include_metadata=True,
