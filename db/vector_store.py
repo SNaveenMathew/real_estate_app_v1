@@ -3,8 +3,9 @@ ChromaDB vector store.
 One collection `house_documents` stores all text/image descriptions.
 Each document is tagged with house_id so we can filter per house.
 """
-import hashlib
 import base64
+import hashlib
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -19,35 +20,46 @@ _client: Optional[chromadb.ClientAPI] = None
 _collection = None
 _embeddings: Optional[OllamaEmbeddings] = None
 
+# Created once, from whichever worker thread gets there first: HTTP handlers now run
+# concurrently in FastAPI's thread pool, so the check-then-create below is a real race.
+# The guard covers creation only - Chroma serializes its own writes internally.
+_init_lock = threading.RLock()
+
 
 def _get_client():
     global _client
     if _client is None:
-        settings.chroma_dir.mkdir(parents=True, exist_ok=True)
-        _client = chromadb.PersistentClient(
-            path=str(settings.chroma_dir),
-            settings=ChromaSettings(anonymized_telemetry=False),
-        )
+        with _init_lock:
+            if _client is None:
+                settings.chroma_dir.mkdir(parents=True, exist_ok=True)
+                _client = chromadb.PersistentClient(
+                    path=str(settings.chroma_dir),
+                    settings=ChromaSettings(anonymized_telemetry=False),
+                )
     return _client
 
 
 def _get_collection():
     global _collection
     if _collection is None:
-        _collection = _get_client().get_or_create_collection(
-            name="house_documents",
-            metadata={"hnsw:space": "cosine"},
-        )
+        with _init_lock:
+            if _collection is None:
+                _collection = _get_client().get_or_create_collection(
+                    name="house_documents",
+                    metadata={"hnsw:space": "cosine"},
+                )
     return _collection
 
 
 def _get_embeddings() -> OllamaEmbeddings:
     global _embeddings
     if _embeddings is None:
-        _embeddings = OllamaEmbeddings(
-            base_url=settings.ollama_base_url,
-            model=settings.ollama_embed_model,
-        )
+        with _init_lock:
+            if _embeddings is None:
+                _embeddings = OllamaEmbeddings(
+                    base_url=settings.ollama_base_url,
+                    model=settings.ollama_embed_model,
+                )
     return _embeddings
 
 
