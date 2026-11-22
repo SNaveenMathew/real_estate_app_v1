@@ -4,6 +4,7 @@ Shared graph routing, geocoding, and spatial navigation primitives.
 Usable across transport modalities including bicycle (BikePGH) and public transit
 (FTA National Transit Map) networks.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -61,32 +62,38 @@ PITTSBURGH_PLACE_ALIASES = {
 # Address-level fallbacks
 PITTSBURGH_ADDRESS_FALLBACKS = {
     "5624 bryant st, pittsburgh, pa 15206": {
-        "lat": 40.4781, "lon": -79.9110,
+        "lat": 40.4781,
+        "lon": -79.9110,
         "display_name": "5624 Bryant St, Highland Park, Pittsburgh, PA (fallback endpoint)",
         "source": "local_pittsburgh_endpoint_fallback",
     },
     "5624 bryant street, pittsburgh, pa 15206": {
-        "lat": 40.4781, "lon": -79.9110,
+        "lat": 40.4781,
+        "lon": -79.9110,
         "display_name": "5624 Bryant St, Highland Park, Pittsburgh, PA (fallback endpoint)",
         "source": "local_pittsburgh_endpoint_fallback",
     },
     "5903 5th ave, shadyside, pa 15232": {
-        "lat": 40.45152, "lon": -79.93655,
+        "lat": 40.45152,
+        "lon": -79.93655,
         "display_name": "5903 5th Ave, Shadyside, Pittsburgh, PA (fallback endpoint)",
         "source": "local_pittsburgh_endpoint_fallback",
     },
     "5903 fifth ave, shadyside, pa 15232": {
-        "lat": 40.45152, "lon": -79.93655,
+        "lat": 40.45152,
+        "lon": -79.93655,
         "display_name": "5903 Fifth Ave, Shadyside, Pittsburgh, PA (fallback endpoint)",
         "source": "local_pittsburgh_endpoint_fallback",
     },
     "5903 5th ave, pittsburgh, pa 15232": {
-        "lat": 40.45152, "lon": -79.93655,
+        "lat": 40.45152,
+        "lon": -79.93655,
         "display_name": "5903 5th Ave, Shadyside, Pittsburgh, PA (fallback endpoint)",
         "source": "local_pittsburgh_endpoint_fallback",
     },
     "5903 fifth ave, pittsburgh, pa 15232": {
-        "lat": 40.45152, "lon": -79.93655,
+        "lat": 40.45152,
+        "lon": -79.93655,
         "display_name": "5903 Fifth Ave, Shadyside, Pittsburgh, PA (fallback endpoint)",
         "source": "local_pittsburgh_endpoint_fallback",
     },
@@ -153,28 +160,74 @@ async def _get_json(url: str | tuple[str, ...], *, params=None, json_body=None) 
 # every spelling of that address from then on.
 
 _STREET_TYPE_WORDS = {
-    "aly": "alley", "av": "avenue", "ave": "avenue", "blvd": "boulevard",
-    "cir": "circle", "ct": "court", "dr": "drive", "expy": "expressway",
-    "ft": "fort", "hls": "hills", "hts": "heights", "hwy": "highway",
-    "ln": "lane", "mt": "mount", "pkwy": "parkway", "pl": "place",
-    "rd": "road", "sq": "square", "st": "street", "str": "street",
-    "ter": "terrace", "trl": "trail", "vly": "valley", "xing": "crossing",
+    "aly": "alley",
+    "av": "avenue",
+    "ave": "avenue",
+    "blvd": "boulevard",
+    "cir": "circle",
+    "ct": "court",
+    "dr": "drive",
+    "expy": "expressway",
+    "ft": "fort",
+    "hls": "hills",
+    "hts": "heights",
+    "hwy": "highway",
+    "ln": "lane",
+    "mt": "mount",
+    "pkwy": "parkway",
+    "pl": "place",
+    "rd": "road",
+    "sq": "square",
+    "st": "street",
+    "str": "street",
+    "ter": "terrace",
+    "trl": "trail",
+    "vly": "valley",
+    "xing": "crossing",
 }
 
 _DIRECTION_WORDS = {
-    "n": "north", "ne": "northeast", "nw": "northwest", "s": "south",
-    "se": "southeast", "sw": "southwest", "e": "east", "w": "west",
+    "n": "north",
+    "ne": "northeast",
+    "nw": "northwest",
+    "s": "south",
+    "se": "southeast",
+    "sw": "southwest",
+    "e": "east",
+    "w": "west",
 }
 
 _ORDINAL_UNITS = (
-    "zeroth", "first", "second", "third", "fourth", "fifth", "sixth",
-    "seventh", "eighth", "ninth", "tenth", "eleventh", "twelfth",
-    "thirteenth", "fourteenth", "fifteenth", "sixteenth", "seventeenth",
-    "eighteenth", "nineteenth",
+    "zeroth",
+    "first",
+    "second",
+    "third",
+    "fourth",
+    "fifth",
+    "sixth",
+    "seventh",
+    "eighth",
+    "ninth",
+    "tenth",
+    "eleventh",
+    "twelfth",
+    "thirteenth",
+    "fourteenth",
+    "fifteenth",
+    "sixteenth",
+    "seventeenth",
+    "eighteenth",
+    "nineteenth",
 )
 _TENS_CARDINAL = {
-    2: "twenty", 3: "thirty", 4: "forty", 5: "fifty",
-    6: "sixty", 7: "seventy", 8: "eighty", 9: "ninety",
+    2: "twenty",
+    3: "thirty",
+    4: "forty",
+    5: "fifty",
+    6: "sixty",
+    7: "seventy",
+    8: "eighty",
+    9: "ninety",
 }
 # "112th" style numbers above 99 keep their digits: a rare street name is not
 # worth guessing at ("one hundred twelfth" is not how anyone writes it).
@@ -225,9 +278,7 @@ def _raw_search_text(query: str, city_context: Optional[str]) -> str:
     return query
 
 
-def _canonical_search_text(
-    query: str, city_context: Optional[str], *, ordinal_words: bool = True
-) -> str:
+def _canonical_search_text(query: str, city_context: Optional[str], *, ordinal_words: bool = True) -> str:
     text = _canonical_address(query, ordinal_words=ordinal_words)
     if city_context and not _query_has_context(query, city_context):
         suffix = _canonical_address(city_context, ordinal_words=ordinal_words)
@@ -387,8 +438,7 @@ def _house_coordinates(query: str, city_context: Optional[str]) -> Optional[dict
 
     try:
         frame = store.query(
-            f"SELECT address, city, state, zip, lat, lon FROM houses "
-            f"WHERE {' AND '.join(clauses)} LIMIT 50",
+            f"SELECT address, city, state, zip, lat, lon FROM houses WHERE {' AND '.join(clauses)} LIMIT 50",
             params,
         )
     except Exception:
@@ -445,11 +495,23 @@ async def geocode_place(query: str, city_context: Optional[str] = "Pittsburgh, P
             return {**address_fallback, "cached": True}
 
         if "5624 bryant st" in normalized and "15206" in normalized:
-            return {**PITTSBURGH_PLACE_ALIASES["highland park"], "cached": True, "source": "local_pittsburgh_address_fallback"}
+            return {
+                **PITTSBURGH_PLACE_ALIASES["highland park"],
+                "cached": True,
+                "source": "local_pittsburgh_address_fallback",
+            }
         if "5903 5th ave" in normalized and "15232" in normalized:
-            return {**PITTSBURGH_PLACE_ALIASES["shadyside"], "cached": True, "source": "local_pittsburgh_address_fallback"}
+            return {
+                **PITTSBURGH_PLACE_ALIASES["shadyside"],
+                "cached": True,
+                "source": "local_pittsburgh_address_fallback",
+            }
         if "5903 fifth ave" in normalized and "15232" in normalized:
-            return {**PITTSBURGH_PLACE_ALIASES["shadyside"], "cached": True, "source": "local_pittsburgh_address_fallback"}
+            return {
+                **PITTSBURGH_PLACE_ALIASES["shadyside"],
+                "cached": True,
+                "source": "local_pittsburgh_address_fallback",
+            }
 
         local_alias = PITTSBURGH_PLACE_ALIASES.get(normalized)
         if local_alias:
@@ -461,8 +523,12 @@ async def geocode_place(query: str, city_context: Optional[str] = "Pittsburgh, P
     known_house = _house_coordinates(q, city_context)
     if known_house:
         _cache_write(
-            canonical_key, known_house["display_name"], known_house["lat"],
-            known_house["lon"], "houses", "house_coordinates",
+            canonical_key,
+            known_house["display_name"],
+            known_house["lat"],
+            known_house["lon"],
+            "houses",
+            "house_coordinates",
         )
         return known_house
 
@@ -472,8 +538,8 @@ async def geocode_place(query: str, city_context: Optional[str] = "Pittsburgh, P
             lat, lon = float(cached["lat"]), float(cached["lon"])
         except (TypeError, ValueError):
             lat = lon = float("nan")
-        in_bounds = math.isfinite(lat) and math.isfinite(lon) and (
-            city_context is None or in_pittsburgh_bounds(lat, lon)
+        in_bounds = (
+            math.isfinite(lat) and math.isfinite(lon) and (city_context is None or in_pittsburgh_bounds(lat, lon))
         )
         if in_bounds:
             return {
@@ -491,8 +557,8 @@ async def geocode_place(query: str, city_context: Optional[str] = "Pittsburgh, P
             )
 
     viewbox = (
-        f'{PITTSBURGH_BOUNDS["west"]},{PITTSBURGH_BOUNDS["north"]},'
-        f'{PITTSBURGH_BOUNDS["east"]},{PITTSBURGH_BOUNDS["south"]}'
+        f"{PITTSBURGH_BOUNDS['west']},{PITTSBURGH_BOUNDS['north']},"
+        f"{PITTSBURGH_BOUNDS['east']},{PITTSBURGH_BOUNDS['south']}"
     )
 
     # Ladder: the spelling this app has always sent, then the canonical
@@ -543,6 +609,7 @@ async def geocode_place(query: str, city_context: Optional[str] = "Pittsburgh, P
         )
     _cache_write(canonical_key, message, None, None, _CACHE_MISS_SOURCE, "unresolved")
     raise ValueError(message)
+
 
 def dijkstra(
     adjacency: dict[tuple[float, float], dict[tuple[float, float], float]],
@@ -633,10 +700,12 @@ def make_path_instructions(
             turn = turn_name(b_deg - previous_bearing)
             text = f"{turn} on {network_name} for {seg_miles:.2f} miles."
 
-        instructions.append({
-            "instruction": text,
-            "distance_miles": round(seg_miles, 2),
-        })
+        instructions.append(
+            {
+                "instruction": text,
+                "distance_miles": round(seg_miles, 2),
+            }
+        )
         previous_bearing = b_deg
 
     if len(instructions) <= 12:

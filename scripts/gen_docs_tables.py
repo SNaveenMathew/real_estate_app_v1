@@ -28,6 +28,7 @@ example's *plan* (the deterministic planner, no model call) is inspected for the
 tables it needs. A table with rows but no examples is therefore visible as a gap
 rather than hidden behind prose.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -82,12 +83,14 @@ def endpoint_rows() -> list[list[str]]:
     rows = []
     for route in _walk_routes(main.app.routes):
         summary = (inspect.getdoc(route.endpoint) or "").strip().splitlines()
-        rows.append([
-            ", ".join(sorted(route.methods)),
-            f"`{route.path}`",
-            summary[0] if summary else "",
-            "async" if inspect.iscoroutinefunction(route.endpoint) else "sync",
-        ])
+        rows.append(
+            [
+                ", ".join(sorted(route.methods)),
+                f"`{route.path}`",
+                summary[0] if summary else "",
+                "async" if inspect.iscoroutinefunction(route.endpoint) else "sync",
+            ]
+        )
     rows.sort(key=lambda r: (r[1], r[0]))
     return rows
 

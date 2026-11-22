@@ -13,6 +13,7 @@ Usage:
     python setup_data.py --only market_heat_index  # load only Zillow Market Heat Index
     python setup_data.py --resolve-tracts   # re-run tract FIPS resolution
 """
+
 import sys
 import time
 import argparse
@@ -34,12 +35,12 @@ def banner(text: str):
     print(f"{'─' * 55}")
 
 
-
 def _run_commute_step(explicit: bool) -> None:
     """Compute house -> work commute estimates for houses that lack a fresh one (free routing services)."""
     import asyncio
     from config import settings
     from services import commute
+
     place = commute.get_work()
     if place is None and getattr(settings, "work_address", ""):
         try:
@@ -60,19 +61,25 @@ def _run_commute_step(explicit: bool) -> None:
     for w in snap["warnings"]:
         print(f"    - {w}")
 
-def run_all(only: str = None, resolve_tracts: bool = False,
-            no_geocoding: bool = False):
+
+def run_all(only: str = None, resolve_tracts: bool = False, no_geocoding: bool = False):
     t0 = time.time()
     print("\n🏠 Real Estate Intelligence — Data Setup")
     print(f"   DuckDB: {settings.duckdb_path}")
     print(f"   Chroma: {settings.chroma_dir}")
 
     # Ensure directories exist
-    for d in [settings.data_dir / "nri", settings.data_dir / "census",
-              settings.data_dir / "redfin", settings.data_dir / "sold",
-              settings.data_dir / "crime", settings.data_dir / "shapefiles",
-              settings.zhvi_dir, settings.market_heat_dir,
-              settings.uploads_dir]:
+    for d in [
+        settings.data_dir / "nri",
+        settings.data_dir / "census",
+        settings.data_dir / "redfin",
+        settings.data_dir / "sold",
+        settings.data_dir / "crime",
+        settings.data_dir / "shapefiles",
+        settings.zhvi_dir,
+        settings.market_heat_dir,
+        settings.uploads_dir,
+    ]:
         d.mkdir(parents=True, exist_ok=True)
 
     # Determine geo_utils backend and report to the user
@@ -80,6 +87,7 @@ def run_all(only: str = None, resolve_tracts: bool = False,
     if resolve_tracts:
         banner("Geo utilities — tract FIPS resolution")
         from services.geo_utils import geometry_source
+
         src = geometry_source()
         print(f"  Active geometry source: {src}")
         if "NRI" in src:
@@ -116,10 +124,15 @@ def run_all(only: str = None, resolve_tracts: bool = False,
     if only in (None, "crime"):
         banner("Crime (severity-weighted, per city)")
         crime_dir = settings.data_dir / "crime"
-        city_dirs = sorted(
-            p for p in crime_dir.iterdir()
-            if p.is_dir() and (any(p.glob("*.csv")) or any(p.glob("*.xlsx")) or any(p.glob("*.xls")))
-        ) if crime_dir.exists() else []
+        city_dirs = (
+            sorted(
+                p
+                for p in crime_dir.iterdir()
+                if p.is_dir() and (any(p.glob("*.csv")) or any(p.glob("*.xlsx")) or any(p.glob("*.xls")))
+            )
+            if crime_dir.exists()
+            else []
+        )
         supported = ", ".join(data_loader.CRIME_CITY_KEYS)
         if not city_dirs:
             print(f"  ✗ No city folders with data found in data/crime/")
@@ -130,8 +143,10 @@ def run_all(only: str = None, resolve_tracts: bool = False,
             unsupported = sorted(set(p.name for p in city_dirs) - set(data_loader.CRIME_CITY_KEYS))
             print(f"  Found data for: {found}")
             if unsupported:
-                print(f"  ⚠ No parser registered for: {', '.join(unsupported)} — see "
-                      f"services/crime_sources.py to add one (supported: {supported})")
+                print(
+                    f"  ⚠ No parser registered for: {', '.join(unsupported)} — see "
+                    f"services/crime_sources.py to add one (supported: {supported})"
+                )
             n = data_loader.load_crime()
             if n:
                 print(f"  ✓ {n:,} crime incidents loaded")
@@ -156,20 +171,22 @@ def run_all(only: str = None, resolve_tracts: bool = False,
         banner("CBSA County Crosswalk")
         census_dir = settings.cbsa_xlsx.parent
         cbsa_candidates = (
-            list(census_dir.glob("list*.xlsx")) +
-            list(census_dir.glob("list*.xls")) +
-            list(census_dir.glob("list*.csv"))
+            list(census_dir.glob("list*.xlsx"))
+            + list(census_dir.glob("list*.xls"))
+            + list(census_dir.glob("list*.csv"))
         )
         if not cbsa_candidates:
             print(f"  ⚠ No CBSA delineation file found in: {census_dir}")
-            print("  Download: https://www.census.gov/geographies/reference-files/time-series/demo/metro-micro/delineation-files.html")
+            print(
+                "  Download: https://www.census.gov/geographies/reference-files/time-series/demo/metro-micro/delineation-files.html"
+            )
             print("  → Save any list*.xlsx / list*.csv into data/census/")
         else:
             print(f"  Found: {cbsa_candidates[0].name}")
             n = data_loader.load_cbsa_crosswalk()
             if n:
                 print(f"  ✓ {n:,} CBSA→county mappings loaded")
-        
+
         banner("Census — Tract Populations (DECENNIALPL2020.P1)")
         if not settings.census_tract_csv.exists():
             print(f"  ⚠ File not found: {settings.census_tract_csv}")
@@ -183,12 +200,11 @@ def run_all(only: str = None, resolve_tracts: bool = False,
         banner("Census — MSA Populations (DECENNIALPL2020.P1)")
         # Auto-detect: accept settings path OR any DECENNIALPL2020_P1*.csv in the dir
         census_dir = settings.census_msa_csv.parent
-        msa_candidates = (
-            [settings.census_msa_csv] if settings.census_msa_csv.exists() else []
-        ) + sorted(census_dir.glob("DECENNIALPL2020_P1*.csv"))
+        msa_candidates = ([settings.census_msa_csv] if settings.census_msa_csv.exists() else []) + sorted(
+            census_dir.glob("DECENNIALPL2020_P1*.csv")
+        )
         seen = set()
-        msa_candidates = [p for p in msa_candidates
-                          if not (str(p) in seen or seen.add(str(p)))]
+        msa_candidates = [p for p in msa_candidates if not (str(p) in seen or seen.add(str(p)))]
         if not msa_candidates:
             print(f"  ⚠ No MSA population file found in: {census_dir}")
             print("  Download from data.census.gov → Table DECENNIALPL2020.P1")
@@ -269,6 +285,7 @@ def run_all(only: str = None, resolve_tracts: bool = False,
     if only == "geocode":
         banner("Re-geocode Pending Sold Homes")
         from services.geocoder import geocode_pending
+
         resolved = geocode_pending(verbose=True)
         print(f"  ✓ {resolved} newly resolved")
 
@@ -313,11 +330,10 @@ def run_all(only: str = None, resolve_tracts: bool = False,
             print(f"\n  Sold homes geocoding ({geo_stats['total']} total):")
             for row in geo_stats["breakdown"]:
                 src = row.get("geocode_source") or "—"
-                st  = row.get("geocode_status") or "pending"
+                st = row.get("geocode_status") or "pending"
                 print(f"    {st:<10} via {src:<20} {int(row['count']):>6,}")
             pending_count = store.query(
-                "SELECT COUNT(*) as n FROM sold_homes "
-                "WHERE geocode_status IS NULL OR geocode_status = 'pending'"
+                "SELECT COUNT(*) as n FROM sold_homes WHERE geocode_status IS NULL OR geocode_status = 'pending'"
             ).iloc[0]["n"]
             if pending_count > 0:
                 print(f"\n  ⚠ {int(pending_count)} addresses still pending geocoding")
@@ -328,9 +344,7 @@ def run_all(only: str = None, resolve_tracts: bool = False,
     # ── Tract FIPS coverage ───────────────────────────────────────────────
     try:
         total = store.query("SELECT COUNT(*) as n FROM houses").iloc[0]["n"]
-        resolved = store.query(
-            "SELECT COUNT(*) as n FROM houses WHERE tract_fips IS NOT NULL"
-        ).iloc[0]["n"]
+        resolved = store.query("SELECT COUNT(*) as n FROM houses WHERE tract_fips IS NOT NULL").iloc[0]["n"]
         if total > 0:
             pct = 100 * resolved / total
             print(f"\n  Redfin houses tract FIPS: {int(resolved)}/{int(total)} ({pct:.0f}%)")
@@ -352,8 +366,8 @@ def run_all(only: str = None, resolve_tracts: bool = False,
             al_n = int(al_df[al_df["is_arms_length"] == True]["n"].sum())
             nal_n = int(al_df[al_df["is_arms_length"] == False]["n"].sum())
             print(f"\n  Arm's-length classification ({total_sold} sold records):")
-            print(f"    ✓ Arm's-length:     {al_n:>6,} ({100*al_n//max(total_sold,1)}%)")
-            print(f"    ✗ Non-arm's-length: {nal_n:>6,} ({100*nal_n//max(total_sold,1)}%)")
+            print(f"    ✓ Arm's-length:     {al_n:>6,} ({100 * al_n // max(total_sold, 1)}%)")
+            print(f"    ✗ Non-arm's-length: {nal_n:>6,} ({100 * nal_n // max(total_sold, 1)}%)")
     except Exception:
         pass
 
@@ -366,8 +380,23 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Load data into DuckDB")
     parser.add_argument(
         "--only",
-        choices=["nri", "census", "redfin", "sold", "crime", "zhvi", "market_heat_index",
-                 "geocode", "repair", "match", "bike", "bike_lanes", "commute", "fta", "transit"],
+        choices=[
+            "nri",
+            "census",
+            "redfin",
+            "sold",
+            "crime",
+            "zhvi",
+            "market_heat_index",
+            "geocode",
+            "repair",
+            "match",
+            "bike",
+            "bike_lanes",
+            "commute",
+            "fta",
+            "transit",
+        ],
         help=(
             "Load only a specific dataset, or run a maintenance task:\n"
             "  nri               — FEMA National Risk Index\n"
@@ -385,13 +414,14 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
-        "--resolve-tracts", action="store_true",
+        "--resolve-tracts",
+        action="store_true",
         help="Resolve census tract FIPS for houses via spatial join or Census API",
     )
     parser.add_argument(
-        "--no-geocoding", action="store_true",
+        "--no-geocoding",
+        action="store_true",
         help="Skip geocoding step for sold homes (useful for dry runs)",
     )
     args = parser.parse_args()
-    run_all(only=args.only, resolve_tracts=args.resolve_tracts,
-            no_geocoding=args.no_geocoding)
+    run_all(only=args.only, resolve_tracts=args.resolve_tracts, no_geocoding=args.no_geocoding)

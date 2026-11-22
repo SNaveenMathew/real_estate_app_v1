@@ -21,6 +21,7 @@ database - that refusal is the feature, because copying over a live DuckDB file 
 database gets corrupted. It also keeps the current file as ``<name>.pre-restore-<ts>``
 before replacing it.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -50,9 +51,12 @@ def verify(path: Path) -> dict:
         raise FileNotFoundError(path)
     conn = duckdb.connect(str(path), read_only=True)
     try:
-        tables = [r[0] for r in conn.execute(
-            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main' ORDER BY table_name"
-        ).fetchall()]
+        tables = [
+            r[0]
+            for r in conn.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main' ORDER BY table_name"
+            ).fetchall()
+        ]
         counts = {}
         for name in ("houses", "sold_homes", "nri_tracts"):
             if name in tables:
@@ -72,7 +76,7 @@ def backup(db_path: Path | None = None, out_dir: Path | None = None, label: str 
 
     try:
         store.checkpoint(db_path)
-    except Exception as exc:                    # the app is running and holds the lock
+    except Exception as exc:  # the app is running and holds the lock
         print(f"warning: could not CHECKPOINT ({exc}); copying the file as it stands", file=sys.stderr)
 
     suffix = f"-{label}" if label else ""
@@ -80,7 +84,7 @@ def backup(db_path: Path | None = None, out_dir: Path | None = None, label: str 
     part = dest.with_suffix(".duckdb.part")
     shutil.copy2(db_path, part)
     wal = Path(str(db_path) + ".wal")
-    if wal.exists():                            # a checkpointed database has no WAL, but copy it if it lingers
+    if wal.exists():  # a checkpointed database has no WAL, but copy it if it lingers
         shutil.copy2(wal, Path(str(part) + ".wal"))
     info = verify(part)
     part.replace(dest)
@@ -92,12 +96,13 @@ def restore(backup_path: Path, db_path: Path | None = None, *, force: bool = Fal
     """Replace the database with a backup, keeping the current file as a safety copy."""
     backup_path = Path(backup_path)
     db_path = Path(db_path or settings.duckdb_path)
-    verify(backup_path)                          # never restore something unreadable
+    verify(backup_path)  # never restore something unreadable
 
     if db_path.exists():
         try:
             import duckdb
-            probe = duckdb.connect(str(db_path))   # fails fast if another process holds it
+
+            probe = duckdb.connect(str(db_path))  # fails fast if another process holds it
             probe.close()
         except Exception as exc:
             raise SystemExit(
@@ -126,7 +131,9 @@ def list_backups(out_dir: Path | None = None) -> list[Path]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Back up, verify or restore the app's DuckDB file")
-    parser.add_argument("--db", type=Path, default=settings.duckdb_path, help="database file (default: settings.duckdb_path)")
+    parser.add_argument(
+        "--db", type=Path, default=settings.duckdb_path, help="database file (default: settings.duckdb_path)"
+    )
     parser.add_argument("--out", type=Path, default=DEFAULT_BACKUP_DIR, help="backup directory")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -152,7 +159,9 @@ def main(argv: list[str] | None = None) -> int:
         if not rows:
             print(f"no backups in {args.out}")
         for p in rows:
-            print(f"{p.name:44s} {p.stat().st_size / 1e6:8.1f} MB  {time.strftime('%Y-%m-%d %H:%M', time.localtime(p.stat().st_mtime))}")
+            print(
+                f"{p.name:44s} {p.stat().st_size / 1e6:8.1f} MB  {time.strftime('%Y-%m-%d %H:%M', time.localtime(p.stat().st_mtime))}"
+            )
     elif args.cmd == "verify":
         print(verify(args.file))
     elif args.cmd == "restore":

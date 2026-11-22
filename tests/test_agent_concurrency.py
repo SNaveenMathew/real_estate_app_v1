@@ -3,6 +3,7 @@
 Models are stateless stubs, so any cross-talk can only come from shared state in the application code (the scope, the
 artifact collector, caches, the database connection, the schema registry).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -51,6 +52,7 @@ def wired(fx, monkeypatch):
     import agents.general_agent as ga
     import agents.house_agent as ha
     import agents.tools as tools
+
     lr.reset()
     monkeypatch.setattr(settings, "agent_max_concurrent_turns", 4)
     monkeypatch.setattr(settings, "agent_queue_timeout_s", 60.0)
@@ -66,9 +68,13 @@ def wired(fx, monkeypatch):
 
 def test_concurrent_general_turns_each_get_their_own_answer(wired):
     from agents.general_agent import run_general_chat
+
     land = f"{wired.expected[PIT]['area_sq_mi']:.2f}"
-    questions = {"What is the population of Pittsburgh?": "24000", "Verify the land areas of Pittsburgh and Indianapolis": land,
-                 "How many houses are there?": None}
+    questions = {
+        "What is the population of Pittsburgh?": "24000",
+        "Verify the land areas of Pittsburgh and Indianapolis": land,
+        "How many houses are there?": None,
+    }
 
     async def main():
         jobs = [(q, tr.run_turn(run_general_chat, q)) for q in list(questions) * 8]
@@ -86,8 +92,11 @@ def test_concurrent_general_turns_each_get_their_own_answer(wired):
 def test_concurrent_house_turns_never_leak_one_houses_scope_into_anothers(wired):
     from agents.house_agent import run_house_chat
     import agents.house_agent as ha
+
     program = "final_result = query_database(request='How many houses are there?')"
-    ha._get_house_code_agent = lambda: types.SimpleNamespace(invoke=lambda m, **k: types.SimpleNamespace(content=program))
+    ha._get_house_code_agent = lambda: types.SimpleNamespace(
+        invoke=lambda m, **k: types.SimpleNamespace(content=program)
+    )
 
     async def main():
         jobs = [(hid, tr.run_turn(run_house_chat, hid, "How many houses are there?")) for hid in ("h1", "h2", "h3") * 6]
@@ -99,7 +108,7 @@ def test_concurrent_house_turns_never_leak_one_houses_scope_into_anothers(wired)
         reply = out[0]
         assert f"houses.house_id = '{hid}'" in reply, (hid, reply[:300])
         for other in {"h1", "h2", "h3"} - {hid}:
-            assert f"house_id = '{other}'" not in reply, (hid, other)           # another turn's scope never leaked in
+            assert f"house_id = '{other}'" not in reply, (hid, other)  # another turn's scope never leaked in
 
 
 def test_the_scope_is_empty_again_on_every_thread_afterwards(wired):

@@ -1,4 +1,5 @@
 """HTTP API endpoints for system stats and client configuration."""
+
 from __future__ import annotations
 
 from fastapi import APIRouter
@@ -34,4 +35,3 @@ def get_client_config():
     return {
         "cartoApiKey": settings.carto_api_key,
     }
-

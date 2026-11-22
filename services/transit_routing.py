@@ -4,6 +4,7 @@ Transit shortest path routing engine using the locally ingested FTA National Tra
 Provides graph-based multimodal transit routing with transfers across agencies
 and modes (bus, light rail, heavy rail, commuter rail, etc.).
 """
+
 from __future__ import annotations
 
 import json
@@ -202,8 +203,10 @@ async def route_transit(
         actual_route_miles += d
 
         is_trans = meta.get("is_transfer", False)
-        line_key = "TRANSFER" if is_trans else (
-            meta.get("route_id") or meta.get("route_short_name") or meta.get("route_long_name")
+        line_key = (
+            "TRANSFER"
+            if is_trans
+            else (meta.get("route_id") or meta.get("route_short_name") or meta.get("route_long_name"))
         )
 
         if line_key == current_line:
@@ -223,10 +226,12 @@ async def route_transit(
     start_disp = start_info.get("display_name", start)
     end_disp = end_info.get("display_name", end)
 
-    maneuvers.append({
-        "instruction": f"Start near {start_disp} (walk {start_snap_miles:.2f} mi to transit stop).",
-        "distance_miles": round(start_snap_miles, 2),
-    })
+    maneuvers.append(
+        {
+            "instruction": f"Start near {start_disp} (walk {start_snap_miles:.2f} mi to transit stop).",
+            "distance_miles": round(start_snap_miles, 2),
+        }
+    )
 
     transfer_count = 0
     used_lines_dict = {}
@@ -234,14 +239,20 @@ async def route_transit(
     for line_key, seg_dist, meta in segments:
         if meta.get("is_transfer"):
             transfer_count += 1
-            maneuvers.append({
-                "instruction": f"Walk {round(seg_dist * 5280):d} ft ({seg_dist:.2f} mi) to transfer connection.",
-                "distance_miles": round(seg_dist, 2),
-            })
+            maneuvers.append(
+                {
+                    "instruction": f"Walk {round(seg_dist * 5280):d} ft ({seg_dist:.2f} mi) to transfer connection.",
+                    "distance_miles": round(seg_dist, 2),
+                }
+            )
         else:
             route_name = meta.get("route_short_name") or meta.get("route_long_name") or "Transit Line"
             route_type = meta.get("route_type_name") or "Transit"
-            long_desc = f" ({meta.get('route_long_name')})" if meta.get("route_long_name") and meta.get("route_long_name") != route_name else ""
+            long_desc = (
+                f" ({meta.get('route_long_name')})"
+                if meta.get("route_long_name") and meta.get("route_long_name") != route_name
+                else ""
+            )
             line_label = f"{route_type} {route_name}{long_desc}"
 
             used_lines_dict[line_label] = {
@@ -253,18 +264,22 @@ async def route_transit(
             }
 
             est_ride_mins = round((seg_dist / AVERAGE_TRANSIT_SPEED_MPH) * 60)
-            maneuvers.append({
-                "instruction": f"Board {line_label} and ride for {seg_dist:.2f} mi (~{max(1, est_ride_mins)} mins).",
-                "distance_miles": round(seg_dist, 2),
-                "route_name": route_name,
-                "route_type": route_type,
-                "route_color": meta.get("route_color"),
-            })
+            maneuvers.append(
+                {
+                    "instruction": f"Board {line_label} and ride for {seg_dist:.2f} mi (~{max(1, est_ride_mins)} mins).",
+                    "distance_miles": round(seg_dist, 2),
+                    "route_name": route_name,
+                    "route_type": route_type,
+                    "route_color": meta.get("route_color"),
+                }
+            )
 
-    maneuvers.append({
-        "instruction": f"Alight and arrive near {end_disp} (walk {end_snap_miles:.2f} mi to destination).",
-        "distance_miles": round(end_snap_miles, 2),
-    })
+    maneuvers.append(
+        {
+            "instruction": f"Alight and arrive near {end_disp} (walk {end_snap_miles:.2f} mi to destination).",
+            "distance_miles": round(end_snap_miles, 2),
+        }
+    )
 
     transit_lines_used = list(used_lines_dict.values())
 

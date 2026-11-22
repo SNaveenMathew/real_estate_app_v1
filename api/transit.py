@@ -1,4 +1,5 @@
 """HTTP API endpoints for public transit routing."""
+
 from __future__ import annotations
 
 import traceback

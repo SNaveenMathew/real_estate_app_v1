@@ -6,6 +6,7 @@ Usage:
     python diagnose_msa.py           # show all X-coded rows with best candidates
     python diagnose_msa.py --apply   # apply suggested fixes automatically
 """
+
 import sys
 import re
 import unicodedata
@@ -18,27 +19,28 @@ import db.duckdb_store as store
 
 # ── Same normalizer as data_loader.py ────────────────────────────────────────
 
+
 def normalize(name: str) -> str:
     name = str(name).strip()
-    name = re.sub(r'\s+(Metro|Micro)\s+Area$', '', name, flags=re.IGNORECASE)
-    name = re.sub(r'-{2,}', '-', name)
-    name = re.sub(r'\s+', ' ', name).strip()
-    decomposed = unicodedata.normalize('NFD', name)
-    return ''.join(c for c in decomposed if unicodedata.category(c) != 'Mn').lower()
+    name = re.sub(r"\s+(Metro|Micro)\s+Area$", "", name, flags=re.IGNORECASE)
+    name = re.sub(r"-{2,}", "-", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    decomposed = unicodedata.normalize("NFD", name)
+    return "".join(c for c in decomposed if unicodedata.category(c) != "Mn").lower()
 
 
 def first_city_state(norm: str):
-    m = re.match(r'^(.*),\s*([a-z]{2}(?:-[a-z]{2})*)$', norm)
+    m = re.match(r"^(.*),\s*([a-z]{2}(?:-[a-z]{2})*)$", norm)
     if not m:
-        return norm, ''
-    first_city  = m.group(1).split('-')[0].strip()
-    first_state = m.group(2).split('-')[0]
+        return norm, ""
+    first_city = m.group(1).split("-")[0].strip()
+    first_state = m.group(2).split("-")[0]
     return first_city, first_state
 
 
 def all_words(norm: str) -> set:
     """All significant words (>2 chars) in a normalized name, for fuzzy scoring."""
-    return {w for w in re.split(r'[\s,\-]+', norm) if len(w) > 2}
+    return {w for w in re.split(r"[\s,\-]+", norm) if len(w) > 2}
 
 
 def similarity_score(norm_a: str, norm_b: str) -> float:
@@ -51,6 +53,7 @@ def similarity_score(norm_a: str, norm_b: str) -> float:
 
 # ── Load data ─────────────────────────────────────────────────────────────────
 
+
 def load_cbsa() -> dict:
     """Load all CBSA titles → codes from the database."""
     df = store.query("""
@@ -59,8 +62,7 @@ def load_cbsa() -> dict:
         WHERE cbsa_title IS NOT NULL
         ORDER BY cbsa_code
     """)
-    return {row['cbsa_code']: row['cbsa_title']
-            for _, row in df.iterrows()}
+    return {row["cbsa_code"]: row["cbsa_title"] for _, row in df.iterrows()}
 
 
 def find_best_candidate(census_name: str, cbsa_by_code: dict) -> tuple:
@@ -71,7 +73,7 @@ def find_best_candidate(census_name: str, cbsa_by_code: dict) -> tuple:
     norm_census = normalize(census_name)
     city_c, state_c = first_city_state(norm_census)
 
-    best_code  = None
+    best_code = None
     best_title = None
     best_strat = None
     best_score = 0.0
@@ -82,33 +84,32 @@ def find_best_candidate(census_name: str, cbsa_by_code: dict) -> tuple:
 
         # Exact match (shouldn't happen for X-codes, but check anyway)
         if norm_census == norm_cbsa:
-            return code, title, 'exact', 1.0
+            return code, title, "exact", 1.0
 
         # City+state match
         if city_c == city_cb and state_c == state_cb:
-            return code, title, 'city+state', 0.95
+            return code, title, "city+state", 0.95
 
         # Same state + Jaccard similarity > 0.5
         if state_c and state_c == state_cb:
             score = similarity_score(norm_census, norm_cbsa)
             if score > best_score:
                 best_score = score
-                best_code  = code
+                best_code = code
                 best_title = title
-                best_strat = f'fuzzy({score:.2f})'
+                best_strat = f"fuzzy({score:.2f})"
 
     if best_score >= 0.4:
         return best_code, best_title, best_strat, best_score
-    return None, None, 'no_match', 0.0
+    return None, None, "no_match", 0.0
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+
 def main(apply: bool = False):
     print("Loading X-coded MSA rows...")
-    x_rows = store.query(
-        "SELECT msa_code, name, population FROM census_msa WHERE msa_code LIKE 'X%' ORDER BY name"
-    )
+    x_rows = store.query("SELECT msa_code, name, population FROM census_msa WHERE msa_code LIKE 'X%' ORDER BY name")
     if x_rows.empty:
         print("✓ No X-coded rows found — all MSAs are matched!")
         return
@@ -119,26 +120,28 @@ def main(apply: bool = False):
     print(f"Loaded {len(cbsa_by_code)} distinct CBSA entries from cbsa_counties\n")
 
     suggestions: list[dict] = []
-    no_match:    list[str]  = []
+    no_match: list[str] = []
 
     print(f"{'Census name':<55} {'Strategy':<15} {'Best CBSA candidate'}")
     print("─" * 130)
 
     for _, row in x_rows.iterrows():
-        name    = row['name']
-        old_key = row['msa_code']
+        name = row["name"]
+        old_key = row["msa_code"]
         code, title, strat, score = find_best_candidate(name, cbsa_by_code)
 
         if code:
             print(f"  {name:<55} {strat:<15} [{code}] {title}")
-            suggestions.append({
-                'old_key': old_key,
-                'name':    name,
-                'new_code': code,
-                'cbsa_title': title,
-                'strategy': strat,
-                'score': score,
-            })
+            suggestions.append(
+                {
+                    "old_key": old_key,
+                    "name": name,
+                    "new_code": code,
+                    "cbsa_title": title,
+                    "strategy": strat,
+                    "score": score,
+                }
+            )
         else:
             print(f"  {name:<55} {'NO MATCH':<15} (not in 2023 CBSA delineation file)")
             no_match.append(name)
@@ -157,16 +160,11 @@ def main(apply: bool = False):
         conn = store.get_conn()
         applied = 0
         for s in suggestions:
-            conn.execute(
-                "UPDATE census_msa SET msa_code = ? WHERE msa_code = ?",
-                [s['new_code'], s['old_key']]
-            )
+            conn.execute("UPDATE census_msa SET msa_code = ? WHERE msa_code = ?", [s["new_code"], s["old_key"]])
             applied += 1
         print(f"✓ Applied {applied} fixes")
 
-        remaining = store.query(
-            "SELECT COUNT(*) as n FROM census_msa WHERE msa_code LIKE 'X%'"
-        ).iloc[0]['n']
+        remaining = store.query("SELECT COUNT(*) as n FROM census_msa WHERE msa_code LIKE 'X%'").iloc[0]["n"]
         print(f"  Remaining X-codes: {int(remaining)}")
 
     elif suggestions and not apply:
@@ -174,9 +172,8 @@ def main(apply: bool = False):
         print("  python diagnose_msa.py --apply")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--apply', action='store_true',
-                        help='Apply the suggested msa_code fixes to the database')
+    parser.add_argument("--apply", action="store_true", help="Apply the suggested msa_code fixes to the database")
     args = parser.parse_args()
     main(apply=args.apply)

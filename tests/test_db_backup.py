@@ -1,4 +1,5 @@
 """Backups, WAL recovery accounting, and the checkpoint that close() performs."""
+
 import sys
 from pathlib import Path
 
@@ -34,7 +35,7 @@ def test_backup_then_restore_round_trips(tmp_path):
     dest = db_backup.backup(db, tmp_path / "backups", label="test")
     assert dest.exists()
     assert dest.name.endswith("-test.duckdb")
-    assert not dest.with_suffix(".duckdb.part").exists()          # only renamed after verify
+    assert not dest.with_suffix(".duckdb.part").exists()  # only renamed after verify
     info = db_backup.verify(dest)
     assert info["rows"]["houses"] == 1
 
@@ -57,7 +58,7 @@ def test_restore_refuses_something_that_is_not_a_database(tmp_path):
 
     with pytest.raises(Exception):
         db_backup.restore(bad, db)
-    assert _house_count(db) == 1                                   # untouched
+    assert _house_count(db) == 1  # untouched
 
 
 def test_backup_refuses_a_missing_database(tmp_path):

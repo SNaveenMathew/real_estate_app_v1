@@ -10,6 +10,7 @@ The server must be running before this script is invoked:
 
 Exit code 0 = all pass, 1 = failures.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -27,7 +28,7 @@ args, _ = parser.parse_known_args()
 BASE = args.base.rstrip("/")
 
 _GREEN = "\033[32m"
-_RED   = "\033[31m"
+_RED = "\033[31m"
 _RESET = "\033[0m"
 PASS = f"{_GREEN}PASS{_RESET}"
 FAIL = f"{_RED}FAIL{_RESET}"
@@ -96,30 +97,28 @@ check("GET /static/data.css returns 200", r.status_code == 200)
 section("2. Data-source API — public links and refresh contract")
 
 r = requests.get(f"{BASE}/api/data-sources")
-check("GET /api/data-sources returns 200", r.status_code == 200,
-      r.text[:120] if r.status_code != 200 else "")
+check("GET /api/data-sources returns 200", r.status_code == 200, r.text[:120] if r.status_code != 200 else "")
 sources = r.json().get("sources", []) if r.status_code == 200 else []
 source_keys = {s.get("key") for s in sources}
-check("data-source registry includes core sources",
-      {"redfin", "nri", "census_tracts", "sold", "bike", "zhvi", "market_heat_index"} <= source_keys,
-      f"keys={sorted(k for k in source_keys if k)}")
-check("registered sources expose public links",
-      bool(sources) and all(s.get("source_url") for s in sources))
+check(
+    "data-source registry includes core sources",
+    {"redfin", "nri", "census_tracts", "sold", "bike", "zhvi", "market_heat_index"} <= source_keys,
+    f"keys={sorted(k for k in source_keys if k)}",
+)
+check("registered sources expose public links", bool(sources) and all(s.get("source_url") for s in sources))
 
 # This checks request validation without changing any source files or tables.
 r = requests.post(
     f"{BASE}/api/data-sources/redfin/refresh",
     files={"file": ("invalid.txt", io.BytesIO(b"not a Redfin export"), "text/plain")},
 )
-check("refresh rejects unsupported file types", 400 <= r.status_code < 500,
-      f"got {r.status_code}")
+check("refresh rejects unsupported file types", 400 <= r.status_code < 500, f"got {r.status_code}")
 
 # ─── 2b. Catalog API — built-in sources ──────────────────────────────────────
 section("2b. Catalog API — built-in sources visible")
 
 r = requests.get(f"{BASE}/api/onboarding/catalog")
-check("GET /api/onboarding/catalog returns 200", r.status_code == 200,
-      r.text[:80] if r.status_code != 200 else "")
+check("GET /api/onboarding/catalog returns 200", r.status_code == 200, r.text[:80] if r.status_code != 200 else "")
 cat = r.json()
 check("catalog has 'tables' key", "tables" in cat)
 tables_before = {t["name"]: t for t in cat.get("tables", [])}
@@ -131,7 +130,9 @@ check("built-in 'market_heat_index' table present", "market_heat_index" in table
 check("catalog has 'relationships' key", "relationships" in cat)
 rels_before = cat.get("relationships", [])
 check("at least one built-in relationship", len(rels_before) > 0)
-rel_keys_before = {f"{r.get('left_table')}:{r.get('left_expr')}={r.get('right_table')}:{r.get('right_expr')}" for r in rels_before}
+rel_keys_before = {
+    f"{r.get('left_table')}:{r.get('left_expr')}={r.get('right_table')}:{r.get('right_expr')}" for r in rels_before
+}
 check("zhvi relationships registered", "houses:zip=zhvi:region_name" in rel_keys_before)
 check("market_heat_index relationships registered", "houses:zip=market_heat_index:region_name" in rel_keys_before)
 check("catalog has 'domains' key", "domains" in cat)
@@ -143,16 +144,14 @@ r = requests.post(
     f"{BASE}/api/onboarding/datasets",
     files={"file": ("walkability.csv", io.BytesIO(_csv_bytes()), "text/csv")},
 )
-check("POST /datasets (upload CSV) returns 202", r.status_code == 202,
-      r.text[:120] if r.status_code != 202 else "")
+check("POST /datasets (upload CSV) returns 202", r.status_code == 202, r.text[:120] if r.status_code != 202 else "")
 snap = wait_job(r.json()["job_id"]) if r.status_code == 202 else {}
 check("upload job finished", snap.get("state") == "done", str(snap.get("error") or ""))
 ds = snap.get("result") or {}
 dataset_id = ds.get("dataset_id", "")
 check("response has dataset_id", bool(dataset_id))
 # Upload runs type-inference immediately so status is 'draft', not 'staged'
-check("status is 'draft' or 'staged' after upload",
-      ds.get("status") in ("staged", "draft"), f"got: {ds.get('status')}")
+check("status is 'draft' or 'staged' after upload", ds.get("status") in ("staged", "draft"), f"got: {ds.get('status')}")
 check("row_count > 0", (ds.get("row_count") or 0) > 0)
 check("columns list non-empty", len(ds.get("columns") or []) > 0)
 
@@ -164,10 +163,8 @@ check("GET /datasets returns 200", r.status_code == 200)
 body = r.json()
 # Server returns an envelope: {"datasets": [...], "formats": [...], "domains": [...], ...}
 check("response envelope has 'datasets' key", "datasets" in body)
-check("envelope has 'formats' and 'domains'",
-      "formats" in body and "domains" in body)
-check("uploaded dataset appears in list",
-      any(d.get("dataset_id") == dataset_id for d in body.get("datasets", [])))
+check("envelope has 'formats' and 'domains'", "formats" in body and "domains" in body)
+check("uploaded dataset appears in list", any(d.get("dataset_id") == dataset_id for d in body.get("datasets", [])))
 
 # ─── 5. Update description ────────────────────────────────────────────────────
 section("5. Update description")
@@ -177,17 +174,28 @@ desc_payload = {
     "grain": "one row per census block group",
     "domain": "mobility",
     "columns": [
-        {"name": "natwalkind", "description": "National Walkability Index (1-20)",
-         "synonyms": ["walkability", "walk score"], "unit": "index"},
-        {"name": "d3b", "description": "Street intersection density",
-         "synonyms": ["intersection density"], "unit": "intersections/sq mi"},
-        {"name": "lead_pct", "description": "Estimated % of lead service lines",
-         "synonyms": ["lead service line"], "unit": "percent"},
+        {
+            "name": "natwalkind",
+            "description": "National Walkability Index (1-20)",
+            "synonyms": ["walkability", "walk score"],
+            "unit": "index",
+        },
+        {
+            "name": "d3b",
+            "description": "Street intersection density",
+            "synonyms": ["intersection density"],
+            "unit": "intersections/sq mi",
+        },
+        {
+            "name": "lead_pct",
+            "description": "Estimated % of lead service lines",
+            "synonyms": ["lead service line"],
+            "unit": "percent",
+        },
     ],
 }
 r = requests.put(f"{BASE}/api/onboarding/datasets/{dataset_id}", json=desc_payload)
-check("PUT /datasets/{id} returns 200", r.status_code == 200,
-      r.text[:120] if r.status_code != 200 else "")
+check("PUT /datasets/{id} returns 200", r.status_code == 200, r.text[:120] if r.status_code != 200 else "")
 ds2 = r.json()
 check("description persisted", "walkability" in (ds2.get("description") or "").lower())
 
@@ -195,8 +203,7 @@ check("description persisted", "walkability" in (ds2.get("description") or "").l
 section("6. Draft wording (optional LLM)")
 
 r = requests.post(f"{BASE}/api/onboarding/datasets/{dataset_id}/draft")
-check("draft endpoint returns 200", r.status_code == 200,
-      r.text[:120] if r.status_code != 200 else "")
+check("draft endpoint returns 200", r.status_code == 200, r.text[:120] if r.status_code != 200 else "")
 draft = r.json() if r.status_code == 200 else {}
 check("draft response has dataset_id", draft.get("dataset_id") == dataset_id)
 
@@ -204,25 +211,21 @@ check("draft response has dataset_id", draft.get("dataset_id") == dataset_id)
 section("7. Analyze — propose table and relationships")
 
 r = requests.post(f"{BASE}/api/onboarding/datasets/{dataset_id}/analyze")
-check("POST /datasets/{id}/analyze returns 202", r.status_code == 202,
-      r.text[:120] if r.status_code != 202 else "")
+check("POST /datasets/{id}/analyze returns 202", r.status_code == 202, r.text[:120] if r.status_code != 202 else "")
 snap = wait_job(r.json()["job_id"]) if r.status_code == 202 else {}
 check("analyze job finished", snap.get("state") == "done", str(snap.get("error") or ""))
 ds3 = snap.get("result") or {}
 proposals = ds3.get("proposals") or []
 check("at least one proposal produced", len(proposals) > 0)
 table_proposals = [p for p in proposals if p.get("kind") == "table"]
-rel_proposals   = [p for p in proposals if p.get("kind") == "relationship"]
-check("table proposal present", len(table_proposals) > 0,
-      f"got kinds: {[p.get('kind') for p in proposals]}")
+rel_proposals = [p for p in proposals if p.get("kind") == "relationship"]
+check("table proposal present", len(table_proposals) > 0, f"got kinds: {[p.get('kind') for p in proposals]}")
 check("relationship proposal(s) present", len(rel_proposals) > 0)
-nri_links = [p for p in rel_proposals
-             if "nri_tracts" in json.dumps(p.get("payload", {}))]
-check("link to nri_tracts discovered via GEOID derivation", len(nri_links) > 0,
-      f"nri_links={len(nri_links)}")
+nri_links = [p for p in rel_proposals if "nri_tracts" in json.dumps(p.get("payload", {}))]
+check("link to nri_tracts discovered via GEOID derivation", len(nri_links) > 0, f"nri_links={len(nri_links)}")
 
 table_pid = table_proposals[0]["proposal_id"] if table_proposals else None
-rel_pids  = [p["proposal_id"] for p in rel_proposals]
+rel_pids = [p["proposal_id"] for p in rel_proposals]
 
 # ─── 8. Catalog overlay before approval ──────────────────────────────────────
 section("8. Catalog overlay (draft view before approval)")
@@ -237,10 +240,12 @@ check("overlay tables non-empty", len(overlay.get("tables", [])) > 0)
 section("9. Approve table proposal")
 
 if table_pid:
-    r = requests.post(f"{BASE}/api/onboarding/proposals/{table_pid}/decision",
-                      json={"decision": "approve"})
-    check("POST /proposals/{id}/decision (table) returns 200",
-          r.status_code == 200, r.text[:120] if r.status_code != 200 else "")
+    r = requests.post(f"{BASE}/api/onboarding/proposals/{table_pid}/decision", json={"decision": "approve"})
+    check(
+        "POST /proposals/{id}/decision (table) returns 200",
+        r.status_code == 200,
+        r.text[:120] if r.status_code != 200 else "",
+    )
     result = r.json()
     check("result indicates approved", "approved" in str(result).lower())
 else:
@@ -252,8 +257,7 @@ section("10. Approve relationship proposals")
 approved_rels = 0
 approved_rel_keys: list[str] = []
 for pid in rel_pids:
-    r = requests.post(f"{BASE}/api/onboarding/proposals/{pid}/decision",
-                      json={"decision": "approve"})
+    r = requests.post(f"{BASE}/api/onboarding/proposals/{pid}/decision", json={"decision": "approve"})
     if r.status_code == 200:
         approved_rels += 1
         matching = next((p for p in rel_proposals if p["proposal_id"] == pid), None)
@@ -263,8 +267,7 @@ for pid in rel_pids:
             rk = payload.get("key") or payload.get("rel_key") or ""
             if rk:
                 approved_rel_keys.append(rk)
-check("at least one relationship approved",
-      approved_rels > 0, f"approved {approved_rels}/{len(rel_pids)}")
+check("at least one relationship approved", approved_rels > 0, f"approved {approved_rels}/{len(rel_pids)}")
 
 # ─── 11. New dataset live in catalog ─────────────────────────────────────────
 section("11. New dataset live in catalog immediately")
@@ -277,9 +280,11 @@ new_names = set(tables_after) - set(tables_before)
 check("new table now live in catalog", len(new_names) > 0, f"new: {new_names}")
 
 rels_after = cat2.get("relationships", [])
-check("approved relationship(s) live in catalog",
-      len(rels_after) > len(rels_before),
-      f"was {len(rels_before)}, now {len(rels_after)}")
+check(
+    "approved relationship(s) live in catalog",
+    len(rels_after) > len(rels_before),
+    f"was {len(rels_before)}, now {len(rels_after)}",
+)
 
 # ─── 12. Dataset detail reflects published status ────────────────────────────
 section("12. Dataset detail reflects published status")
@@ -287,18 +292,20 @@ section("12. Dataset detail reflects published status")
 r = requests.get(f"{BASE}/api/onboarding/datasets/{dataset_id}")
 check("GET /datasets/{id} returns 200", r.status_code == 200)
 detail = r.json()
-check("dataset status is 'published'", detail.get("status") == "published",
-      f"status={detail.get('status')}")
-check("approved table proposal in detail",
-      any(p.get("status") == "approved" and p.get("kind") == "table"
-          for p in detail.get("proposals", [])))
+check("dataset status is 'published'", detail.get("status") == "published", f"status={detail.get('status')}")
+check(
+    "approved table proposal in detail",
+    any(p.get("status") == "approved" and p.get("kind") == "table" for p in detail.get("proposals", [])),
+)
 
 # ─── 13. Published table is agent-visible ────────────────────────────────────
 section("13. Published table is agent-visible in catalog")
 
-check("new table has agent_visible=True",
-      any(tables_after[n].get("agent_visible") is True for n in new_names if n in tables_after),
-      f"new_names={new_names}")
+check(
+    "new table has agent_visible=True",
+    any(tables_after[n].get("agent_visible") is True for n in new_names if n in tables_after),
+    f"new_names={new_names}",
+)
 
 # ─── 14. Revoke a relationship ───────────────────────────────────────────────
 section("14. Revoke a relationship")
@@ -315,65 +322,56 @@ if not target_rel_key:
             break
 
 if target_rel_key:
-    r = requests.post(f"{BASE}/api/onboarding/relationships/revoke",
-                      json={"rel_key": target_rel_key})
-    check("POST /relationships/revoke returns 200", r.status_code == 200,
-          r.text[:120] if r.status_code != 200 else "")
+    r = requests.post(f"{BASE}/api/onboarding/relationships/revoke", json={"rel_key": target_rel_key})
+    check("POST /relationships/revoke returns 200", r.status_code == 200, r.text[:120] if r.status_code != 200 else "")
     time.sleep(0.3)
     r2 = requests.get(f"{BASE}/api/onboarding/catalog")
     rels_post_revoke = r2.json().get("relationships", [])
-    check("revoked relationship gone from catalog",
-          not any((rel.get("key") or rel.get("rel_key")) == target_rel_key for rel in rels_post_revoke),
-          f"rel_key={target_rel_key}")
+    check(
+        "revoked relationship gone from catalog",
+        not any((rel.get("key") or rel.get("rel_key")) == target_rel_key for rel in rels_post_revoke),
+        f"rel_key={target_rel_key}",
+    )
 else:
-    check("non-builtin relationship available to revoke", False,
-          "no non-builtin rel found; were any approved?")
+    check("non-builtin relationship available to revoke", False, "no non-builtin rel found; were any approved?")
 
 # ─── 15. Retire dataset ──────────────────────────────────────────────────────
 section("15. Retire dataset")
 
 r = requests.post(f"{BASE}/api/onboarding/datasets/{dataset_id}/retire")
-check("POST /datasets/{id}/retire returns 200", r.status_code == 200,
-      r.text[:120] if r.status_code != 200 else "")
+check("POST /datasets/{id}/retire returns 200", r.status_code == 200, r.text[:120] if r.status_code != 200 else "")
 time.sleep(0.3)
 r2 = requests.get(f"{BASE}/api/onboarding/catalog")
 remaining = {t["name"] for t in r2.json().get("tables", [])}
-check("retired table removed from live catalog",
-      not (new_names & remaining), f"still present: {new_names & remaining}")
+check("retired table removed from live catalog", not (new_names & remaining), f"still present: {new_names & remaining}")
 
 # ─── 16. Upload validation ───────────────────────────────────────────────────
 section("16. Upload validation — hostile / unsupported inputs")
 
-r = requests.post(f"{BASE}/api/onboarding/datasets",
-                  files={"file": ("empty.csv", io.BytesIO(b""), "text/csv")})
-check("empty CSV upload rejected (4xx)", 400 <= r.status_code < 500,
-      f"got {r.status_code}")
+r = requests.post(f"{BASE}/api/onboarding/datasets", files={"file": ("empty.csv", io.BytesIO(b""), "text/csv")})
+check("empty CSV upload rejected (4xx)", 400 <= r.status_code < 500, f"got {r.status_code}")
 
 # Server returns 415 Unsupported Media Type for unknown extensions
-r = requests.post(f"{BASE}/api/onboarding/datasets",
-                  files={"file": ("bad.exe", io.BytesIO(b"MZ"), "application/octet-stream")})
-check("unsupported extension upload rejected (4xx)", 400 <= r.status_code < 500,
-      f"got {r.status_code}")
+r = requests.post(
+    f"{BASE}/api/onboarding/datasets", files={"file": ("bad.exe", io.BytesIO(b"MZ"), "application/octet-stream")}
+)
+check("unsupported extension upload rejected (4xx)", 400 <= r.status_code < 500, f"got {r.status_code}")
 
 evil_csv = b'=CMD("calc"),value\n1,2\n3,4\n'
-r = requests.post(f"{BASE}/api/onboarding/datasets",
-                  files={"file": ("evil.csv", io.BytesIO(evil_csv), "text/csv")})
+r = requests.post(f"{BASE}/api/onboarding/datasets", files={"file": ("evil.csv", io.BytesIO(evil_csv), "text/csv")})
 if r.status_code == 202:
     evil_ds = wait_job(r.json()["job_id"]).get("result") or {}
     cols = [c["name"] for c in (evil_ds.get("columns") or [])]
-    check("formula-injection header sanitised (no '=' in col name)",
-          not any("=" in c for c in cols), f"cols: {cols}")
+    check("formula-injection header sanitised (no '=' in col name)", not any("=" in c for c in cols), f"cols: {cols}")
     requests.post(f"{BASE}/api/onboarding/datasets/{evil_ds['dataset_id']}/retire")
 else:
-    check("formula-injection upload rejected (also valid)", 400 <= r.status_code < 500,
-          f"got {r.status_code}")
+    check("formula-injection upload rejected (also valid)", 400 <= r.status_code < 500, f"got {r.status_code}")
 
 # ─── 17. LLM status endpoint ─────────────────────────────────────────────────
 section("17. LLM / catalog model status endpoint")
 
 r = requests.get(f"{BASE}/api/onboarding/llm/status")
-check("GET /api/onboarding/llm/status returns 200", r.status_code == 200,
-      r.text[:80] if r.status_code != 200 else "")
+check("GET /api/onboarding/llm/status returns 200", r.status_code == 200, r.text[:80] if r.status_code != 200 else "")
 status = r.json()
 check("status has 'enabled' field", "enabled" in status)
 check("status has 'tiers' field", "tiers" in status, f"keys: {list(status.keys())}")
@@ -382,8 +380,11 @@ check("status has 'tiers' field", "tiers" in status, f"keys: {list(status.keys()
 section("18. Core app endpoints")
 
 r = requests.get(f"{BASE}/api/houses")
-check("GET /api/houses returns 200", r.status_code == 200,
-      f"got {r.status_code}: {r.text[:60]}" if r.status_code != 200 else "")
+check(
+    "GET /api/houses returns 200",
+    r.status_code == 200,
+    f"got {r.status_code}: {r.text[:60]}" if r.status_code != 200 else "",
+)
 
 # Layer endpoints use west/south/east/north bbox params
 _bbox = {"west": -80.5, "south": 40.0, "east": -79.5, "north": 41.0}
@@ -400,8 +401,9 @@ check("GET /metrics (Prometheus) returns 200", r.status_code == 200)
 section("19. Crime heat layer — year filter")
 
 _layers_r = requests.get(f"{BASE}/api/layers")
-check("GET /api/layers returns 200 for year_options check",
-      _layers_r.status_code == 200, f"got {_layers_r.status_code}")
+check(
+    "GET /api/layers returns 200 for year_options check", _layers_r.status_code == 200, f"got {_layers_r.status_code}"
+)
 
 if _layers_r.status_code == 200:
     _crime_spec = next(
@@ -410,77 +412,81 @@ if _layers_r.status_code == 200:
     )
     check("crime_incidents layer present in layer list", _crime_spec is not None)
     _year_opts = (_crime_spec or {}).get("year_options", [])
-    check("crime_incidents spec includes year_options list",
-          isinstance(_year_opts, list) and len(_year_opts) > 0,
-          f"year_options={_year_opts!r}")
-    check("year_options is sorted ascending",
-          _year_opts == sorted(_year_opts),
-          f"year_options={_year_opts!r}")
-    check("year_options contains only integers",
-          all(isinstance(y, int) for y in _year_opts),
-          f"types={[type(y).__name__ for y in _year_opts[:5]]!r}")
+    check(
+        "crime_incidents spec includes year_options list",
+        isinstance(_year_opts, list) and len(_year_opts) > 0,
+        f"year_options={_year_opts!r}",
+    )
+    check("year_options is sorted ascending", _year_opts == sorted(_year_opts), f"year_options={_year_opts!r}")
+    check(
+        "year_options contains only integers",
+        all(isinstance(y, int) for y in _year_opts),
+        f"types={[type(y).__name__ for y in _year_opts[:5]]!r}",
+    )
     # Pick a middle year that should be well-populated
     _pick_year = 2019 if 2019 in _year_opts else (_year_opts[len(_year_opts) // 2] if _year_opts else None)
 else:
     _pick_year = 2019
 
 # Filtered call — should succeed and echo the requested year
-_r_year = requests.get(f"{BASE}/api/layers/crime_incidents",
-                       params={**_bbox, "year": _pick_year, "grid_deg": 0.01})
-check(f"GET /api/layers/crime_incidents?year={_pick_year} returns 200",
-      _r_year.status_code == 200,
-      f"got {_r_year.status_code}: {_r_year.text[:80]}" if _r_year.status_code != 200 else "")
+_r_year = requests.get(f"{BASE}/api/layers/crime_incidents", params={**_bbox, "year": _pick_year, "grid_deg": 0.01})
+check(
+    f"GET /api/layers/crime_incidents?year={_pick_year} returns 200",
+    _r_year.status_code == 200,
+    f"got {_r_year.status_code}: {_r_year.text[:80]}" if _r_year.status_code != 200 else "",
+)
 
 if _r_year.status_code == 200:
     _d_year = _r_year.json()
-    check("year-filtered response echoes year field",
-          _d_year.get("year") == _pick_year,
-          f"year={_d_year.get('year')!r}")
-    check("year-filtered response has points list",
-          isinstance(_d_year.get("points"), list),
-          f"keys={list(_d_year)}")
-    check("year-filtered response includes max_year_weight >= max_weight",
-          _d_year.get("max_year_weight") is not None and _d_year.get("max_year_weight") >= _d_year.get("max_weight", 0),
-          f"max_year_weight={_d_year.get('max_year_weight')!r}, max_weight={_d_year.get('max_weight')!r}")
+    check(
+        "year-filtered response echoes year field", _d_year.get("year") == _pick_year, f"year={_d_year.get('year')!r}"
+    )
+    check("year-filtered response has points list", isinstance(_d_year.get("points"), list), f"keys={list(_d_year)}")
+    check(
+        "year-filtered response includes max_year_weight >= max_weight",
+        _d_year.get("max_year_weight") is not None and _d_year.get("max_year_weight") >= _d_year.get("max_weight", 0),
+        f"max_year_weight={_d_year.get('max_year_weight')!r}, max_weight={_d_year.get('max_weight')!r}",
+    )
 
 # Unfiltered call — should return more incidents than the year-filtered one
-_r_all = requests.get(f"{BASE}/api/layers/crime_incidents",
-                      params={**_bbox, "grid_deg": 0.01})
+_r_all = requests.get(f"{BASE}/api/layers/crime_incidents", params={**_bbox, "grid_deg": 0.01})
 if _r_all.status_code == 200 and _r_year.status_code == 200:
     _cnt_all = _r_all.json().get("incident_count", 0)
     _cnt_year = _r_year.json().get("incident_count", 0)
-    check("unfiltered call returns more incidents than year-filtered call",
-          _cnt_all > _cnt_year,
-          f"all={_cnt_all}, year={_cnt_year}")
-    check("unfiltered response echoes year=null",
-          _r_all.json().get("year") is None,
-          f"year={_r_all.json().get('year')!r}")
+    check(
+        "unfiltered call returns more incidents than year-filtered call",
+        _cnt_all > _cnt_year,
+        f"all={_cnt_all}, year={_cnt_year}",
+    )
+    check(
+        "unfiltered response echoes year=null", _r_all.json().get("year") is None, f"year={_r_all.json().get('year')!r}"
+    )
 else:
-    check("both filtered and unfiltered calls succeeded", False,
-          f"all={_r_all.status_code}, year={_r_year.status_code}")
+    check(
+        "both filtered and unfiltered calls succeeded", False, f"all={_r_all.status_code}, year={_r_year.status_code}"
+    )
 
 # Non-existent year — must return empty points, not an error
-_r_empty = requests.get(f"{BASE}/api/layers/crime_incidents",
-                        params={**_bbox, "year": 1900, "grid_deg": 0.01})
-check("?year=1900 (no data) returns 200 with empty points",
-      _r_empty.status_code == 200 and _r_empty.json().get("points") == [],
-      f"status={_r_empty.status_code}, points={_r_empty.json().get('points')!r}"
-      if _r_empty.status_code == 200 else f"status={_r_empty.status_code}")
+_r_empty = requests.get(f"{BASE}/api/layers/crime_incidents", params={**_bbox, "year": 1900, "grid_deg": 0.01})
+check(
+    "?year=1900 (no data) returns 200 with empty points",
+    _r_empty.status_code == 200 and _r_empty.json().get("points") == [],
+    f"status={_r_empty.status_code}, points={_r_empty.json().get('points')!r}"
+    if _r_empty.status_code == 200
+    else f"status={_r_empty.status_code}",
+)
 
 # Non-integer year — must be rejected by API validation
-_r_bad = requests.get(f"{BASE}/api/layers/crime_incidents",
-                      params={**_bbox, "year": "notanumber"})
-check("?year=notanumber rejected with 422",
-      _r_bad.status_code == 422,
-      f"got {_r_bad.status_code}")
+_r_bad = requests.get(f"{BASE}/api/layers/crime_incidents", params={**_bbox, "year": "notanumber"})
+check("?year=notanumber rejected with 422", _r_bad.status_code == 422, f"got {_r_bad.status_code}")
 
 # Year query on layer without year column — must be rejected with 422
-_r_no_year = requests.get(f"{BASE}/api/layers/sold_homes",
-                          params={**_bbox, "year": 2020})
-check("?year=2020 on sold_homes (no year col) rejected with 422",
-      _r_no_year.status_code == 422,
-      f"got {_r_no_year.status_code}")
-
+_r_no_year = requests.get(f"{BASE}/api/layers/sold_homes", params={**_bbox, "year": 2020})
+check(
+    "?year=2020 on sold_homes (no year col) rejected with 422",
+    _r_no_year.status_code == 422,
+    f"got {_r_no_year.status_code}",
+)
 
 
 # ─── 20. House Chat — artifact contract ──────────────────────────────────────
@@ -494,8 +500,7 @@ if _r_houses.status_code == 200:
     if _features:
         _house_id = _features[0]["properties"].get("house_id")
 
-check("house list available for chat test", _house_id is not None,
-      f"status={_r_houses.status_code}")
+check("house list available for chat test", _house_id is not None, f"status={_r_houses.status_code}")
 
 if _house_id:
     # Ask for NRI risk — get_nri_risk_data() always emits a chart artifact
@@ -503,32 +508,32 @@ if _house_id:
         f"{BASE}/api/house/{_house_id}/chat",
         json={"message": "What is the FEMA risk rating for this home?", "history": []},
     )
-    check("POST /api/house/{id}/chat returns 200",
-          _r_chat.status_code == 200,
-          f"got {_r_chat.status_code}: {_r_chat.text[:80]}" if _r_chat.status_code != 200 else "")
+    check(
+        "POST /api/house/{id}/chat returns 200",
+        _r_chat.status_code == 200,
+        f"got {_r_chat.status_code}: {_r_chat.text[:80]}" if _r_chat.status_code != 200 else "",
+    )
 
     if _r_chat.status_code == 200:
         _chat_body = _r_chat.json()
-        check("house chat response has 'reply' field",
-              bool(_chat_body.get("reply")))
-        check("house chat response has 'history' list",
-              isinstance(_chat_body.get("history"), list))
-        check("house chat response has 'artifacts' key",
-              "artifacts" in _chat_body,
-              f"keys={list(_chat_body)}")
+        check("house chat response has 'reply' field", bool(_chat_body.get("reply")))
+        check("house chat response has 'history' list", isinstance(_chat_body.get("history"), list))
+        check("house chat response has 'artifacts' key", "artifacts" in _chat_body, f"keys={list(_chat_body)}")
         _arts = _chat_body.get("artifacts", [])
-        check("house chat 'artifacts' is a list",
-              isinstance(_arts, list),
-              f"type={type(_arts).__name__}")
+        check("house chat 'artifacts' is a list", isinstance(_arts, list), f"type={type(_arts).__name__}")
         # NRI query should produce at least one artifact (a chart of top hazards)
-        check("house chat NRI query produces at least one artifact",
-              len(_arts) >= 1,
-              f"got {len(_arts)} artifact(s): {[a.get('type') for a in _arts]}")
+        check(
+            "house chat NRI query produces at least one artifact",
+            len(_arts) >= 1,
+            f"got {len(_arts)} artifact(s): {[a.get('type') for a in _arts]}",
+        )
         if _arts:
             _first = _arts[0]
-            check("artifact has a 'type' field",
-                  _first.get("type") in ("chart", "table", "map"),
-                  f"type={_first.get('type')!r}")
+            check(
+                "artifact has a 'type' field",
+                _first.get("type") in ("chart", "table", "map"),
+                f"type={_first.get('type')!r}",
+            )
 
 # ─── 21. General Chat — artifact contract ────────────────────────────────────
 section("21. General Chat — artifact contract (issue #5)")
@@ -537,37 +542,38 @@ _r_gen = requests.post(
     f"{BASE}/api/chat",
     json={"message": "Show me the average house price by city", "history": []},
 )
-check("POST /api/chat returns 200",
-      _r_gen.status_code == 200,
-      f"got {_r_gen.status_code}: {_r_gen.text[:80]}" if _r_gen.status_code != 200 else "")
+check(
+    "POST /api/chat returns 200",
+    _r_gen.status_code == 200,
+    f"got {_r_gen.status_code}: {_r_gen.text[:80]}" if _r_gen.status_code != 200 else "",
+)
 
 if _r_gen.status_code == 200:
     _gen_body = _r_gen.json()
-    check("general chat response has 'reply' field",
-          bool(_gen_body.get("reply")))
-    check("general chat response has 'artifacts' key",
-          "artifacts" in _gen_body,
-          f"keys={list(_gen_body)}")
+    check("general chat response has 'reply' field", bool(_gen_body.get("reply")))
+    check("general chat response has 'artifacts' key", "artifacts" in _gen_body, f"keys={list(_gen_body)}")
     _gen_arts = _gen_body.get("artifacts", [])
-    check("general chat 'artifacts' is a list",
-          isinstance(_gen_arts, list),
-          f"type={type(_gen_arts).__name__}")
-    check("general chat aggregation query produces at least one artifact",
-          len(_gen_arts) >= 1,
-          f"got {len(_gen_arts)} artifact(s): {[a.get('type') for a in _gen_arts]}")
+    check("general chat 'artifacts' is a list", isinstance(_gen_arts, list), f"type={type(_gen_arts).__name__}")
+    check(
+        "general chat aggregation query produces at least one artifact",
+        len(_gen_arts) >= 1,
+        f"got {len(_gen_arts)} artifact(s): {[a.get('type') for a in _gen_arts]}",
+    )
     if _gen_arts:
         _gen_first = _gen_arts[0]
-        check("general chat artifact has valid 'type'",
-              _gen_first.get("type") in ("chart", "table", "map"),
-              f"type={_gen_first.get('type')!r}")
+        check(
+            "general chat artifact has valid 'type'",
+            _gen_first.get("type") in ("chart", "table", "map"),
+            f"type={_gen_first.get('type')!r}",
+        )
         # avg-by-city is a 1-dimension / 1-measure query → should be a chart
-        check("avg-price-by-city produces chart or table artifact",
-              _gen_first.get("type") in ("chart", "table"),
-              f"type={_gen_first.get('type')!r}")
+        check(
+            "avg-price-by-city produces chart or table artifact",
+            _gen_first.get("type") in ("chart", "table"),
+            f"type={_gen_first.get('type')!r}",
+        )
 
-    check("general chat response has 'observability' field",
-          "observability" in _gen_body,
-          f"keys={list(_gen_body)}")
+    check("general chat response has 'observability' field", "observability" in _gen_body, f"keys={list(_gen_body)}")
 
 # ─── 22. Zillow Data (ZHVI & Market Heat Index) contract ─────────────────────
 section("22. Zillow Data (ZHVI & Market Heat Index) contract")
@@ -590,9 +596,11 @@ if _house_id:
         f"{BASE}/api/house/{_house_id}/chat",
         json={"message": "Can you estimate the price of this house using sales and ZHVI data?", "history": []},
     )
-    check("POST /api/house/{id}/chat (price estimation) returns 200",
-          _r_est.status_code == 200,
-          f"got {_r_est.status_code}: {_r_est.text[:80]}" if _r_est.status_code != 200 else "")
+    check(
+        "POST /api/house/{id}/chat (price estimation) returns 200",
+        _r_est.status_code == 200,
+        f"got {_r_est.status_code}: {_r_est.text[:80]}" if _r_est.status_code != 200 else "",
+    )
     if _r_est.status_code == 200:
         _est_body = _r_est.json()
         check("price estimation reply is non-empty", bool(_est_body.get("reply")))

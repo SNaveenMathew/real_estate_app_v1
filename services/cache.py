@@ -49,6 +49,7 @@ semantic concepts — walkability, transit connectivity, and whatever else the c
 left, cached questions in the middle, the tables/CTEs they read on the right, so the connectedness
 is visible at the abstraction level and clickable down to the individual statement.
 """
+
 from __future__ import annotations
 
 import datetime
@@ -107,17 +108,19 @@ _BASE_TABLE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Store plumbing
 # ---------------------------------------------------------------------------
 
+
 def ensure_tables(conn) -> None:
     """Create the cache tables on the shared connection (called from db.duckdb_store._ensure_schema)."""
     for stmt in _DDL:
         try:
             conn.execute(stmt)
-        except Exception as exc:                       # an older DuckDB without IF NOT EXISTS on indexes
+        except Exception as exc:  # an older DuckDB without IF NOT EXISTS on indexes
             logger.debug("cache DDL skipped (%s): %s", type(exc).__name__, exc)
 
 
 def _conn():
     from db import duckdb_store as store
+
     return store.get_conn()
 
 
@@ -156,11 +159,13 @@ def _iso(value: Any) -> str:
 
 
 _WORD = re.compile(r"[a-z0-9_]+")
-_STOPWORDS = frozenset("""
+_STOPWORDS = frozenset(
+    """
 a an and are as at be been but by can could did do does for from had has have how i if in into is it its
 me my of on or our over show than that the their them then there these they this to us was we were what
 when where which who why will with would you your please tell give list all any about
-""".split())
+""".split()
+)
 
 
 def normalize_text(text: Any) -> str:
@@ -169,8 +174,7 @@ def normalize_text(text: Any) -> str:
 
 
 def _tokens(text: Any) -> set[str]:
-    return {t for t in _WORD.findall(str(text or "").lower())
-            if len(t) > 2 and t not in _STOPWORDS}
+    return {t for t in _WORD.findall(str(text or "").lower()) if len(t) > 2 and t not in _STOPWORDS}
 
 
 def token_similarity(a: Any, b: Any) -> float:
@@ -207,6 +211,7 @@ _VER: dict[str, Any] = {"value": "", "at": 0.0}
 def _catalog_version(conn) -> str:
     try:
         from db import catalog_store
+
         return str(catalog_store.get_version(conn))
     except Exception:
         return "?"
@@ -246,10 +251,14 @@ def data_version(force: bool = False) -> str:
             return _VER["value"]
     try:
         conn = _conn()
-        names = [r[0] for r in _rows(
-            conn,
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = 'main' AND table_type = 'BASE TABLE' ORDER BY table_name")]
+        names = [
+            r[0]
+            for r in _rows(
+                conn,
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'main' AND table_type = 'BASE TABLE' ORDER BY table_name",
+            )
+        ]
         parts = [f"catalog:{_catalog_version(conn)}", f"epoch:{_epoch(conn)}"]
         for name in names:
             if not _BASE_TABLE.match(name) or name.startswith("cache_"):
@@ -260,7 +269,7 @@ def data_version(force: bool = False) -> str:
                 count = -1
             parts.append(f"{name}:{count}")
         value = _hash("|".join(parts))
-    except Exception as exc:                            # no fingerprint -> no caching, never a wrong hit
+    except Exception as exc:  # no fingerprint -> no caching, never a wrong hit
         logger.debug("cache: cannot compute data_version (%s)", exc)
         return ""
     with _VER_LOCK:
@@ -271,6 +280,7 @@ def data_version(force: bool = False) -> str:
 # ---------------------------------------------------------------------------
 # Prompt / context cache
 # ---------------------------------------------------------------------------
+
 
 def _content_text(message: Any) -> str:
     content = getattr(message, "content", message)
@@ -290,15 +300,13 @@ def _content_text(message: Any) -> str:
 def _messages_text(messages: Iterable[Any]) -> str:
     rendered = []
     for message in messages or []:
-        role = (getattr(message, "type", None) or getattr(message, "role", None)
-                or type(message).__name__)
+        role = getattr(message, "type", None) or getattr(message, "role", None) or type(message).__name__
         rendered.append(f"{role}: {_content_text(message)}")
     return "\n\n".join(rendered)
 
 
 def _model_identity(client: Any) -> tuple[str, str]:
-    model = (getattr(client, "model_name", None) or getattr(client, "model", None)
-             or type(client).__name__)
+    model = getattr(client, "model_name", None) or getattr(client, "model", None) or type(client).__name__
     temperature = getattr(client, "temperature", None)
     return str(model), str(temperature)
 
@@ -326,7 +334,7 @@ def prompt_label(messages: Iterable[Any]) -> str:
     """The last human message, trimmed — enough for the Cache page to identify the call."""
     label = ""
     for message in messages or []:
-        role = (getattr(message, "type", None) or getattr(message, "role", None) or "")
+        role = getattr(message, "type", None) or getattr(message, "role", None) or ""
         if str(role) in ("human", "user"):
             label = _content_text(message)
     label = " ".join(str(label).split())
@@ -348,7 +356,8 @@ def lookup_prompt(cache_key: str) -> Optional[str]:
             "SELECT response FROM cache_entries "
             "WHERE cache_key = ? AND kind = 'prompt' AND data_version = ? "
             "AND (? = 0 OR epoch(created_at) >= ?)",
-            [cache_key, version, cutoff, cutoff]).fetchone()
+            [cache_key, version, cutoff, cutoff],
+        ).fetchone()
         if row is None or not row[0]:
             _evict_expired(conn)
             return None
@@ -359,8 +368,9 @@ def lookup_prompt(cache_key: str) -> Optional[str]:
         return None
 
 
-def store_prompt(cache_key: str, scope: str, label: str, request_text: str,
-                 response: str, meta: Optional[dict] = None) -> None:
+def store_prompt(
+    cache_key: str, scope: str, label: str, request_text: str, response: str, meta: Optional[dict] = None
+) -> None:
     """Upsert one completion.  Never raises."""
     if not cache_key or not response or not _conn_ready():
         return
@@ -374,8 +384,16 @@ def store_prompt(cache_key: str, scope: str, label: str, request_text: str,
                (cache_key, kind, scope, signature, label, request_text, response, meta_json,
                 data_version, hits, created_at, last_hit_at)
                VALUES (?, 'prompt', ?, '', ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, NULL)""",
-            [cache_key, scope, label[:300], request_text[:4000], response,
-             json.dumps(meta or {}, ensure_ascii=False, default=str)[:8000], version])
+            [
+                cache_key,
+                scope,
+                label[:300],
+                request_text[:4000],
+                response,
+                json.dumps(meta or {}, ensure_ascii=False, default=str)[:8000],
+                version,
+            ],
+        )
         _maybe_evict(conn)
     except Exception as exc:
         logger.debug("cache: prompt store failed (%s)", exc)
@@ -384,6 +402,7 @@ def store_prompt(cache_key: str, scope: str, label: str, request_text: str,
 # ---------------------------------------------------------------------------
 # Semantic cache
 # ---------------------------------------------------------------------------
+
 
 def semantic_signature(query_plan: Any, scope: Optional[Iterable[Any]] = None) -> Optional[str]:
     """The identity of a question's *meaning*, as decided by the deterministic planner.
@@ -405,10 +424,18 @@ def semantic_signature(query_plan: Any, scope: Optional[Iterable[Any]] = None) -
     filters = sorted(str(f) for f in (getattr(query_plan, "filters", None) or []))
     if scope is None:
         from agents import query_scope
+
         scope = query_scope.current()
     scope_filters = sorted(f.render() for f in scope)
-    return _hash("sig", ",".join(keys), ",".join(tables), operation, "&".join(entities),
-                 "&".join(filters), "&".join(scope_filters))
+    return _hash(
+        "sig",
+        ",".join(keys),
+        ",".join(tables),
+        operation,
+        "&".join(entities),
+        "&".join(filters),
+        "&".join(scope_filters),
+    )
 
 
 def lookup_semantic(scope: str, request_text: str, signature: Optional[str]) -> Optional[dict]:
@@ -433,18 +460,19 @@ def lookup_semantic(scope: str, request_text: str, signature: Optional[str]) -> 
                WHERE kind = 'semantic' AND scope = ? AND signature = ? AND data_version = ?
                  AND (? = 0 OR epoch(created_at) >= ?)
                ORDER BY created_at DESC LIMIT ?""",
-            [scope, signature, version, cutoff, cutoff, limit]).fetchall()
+            [scope, signature, version, cutoff, cutoff, limit],
+        ).fetchall()
     except Exception as exc:
         logger.debug("cache: semantic lookup failed (%s)", exc)
         return None
 
     normalized = normalize_text(request_text)
-    best = None                                     # (similarity, row)
+    best = None  # (similarity, row)
     for row in candidates:
         cache_key, stored_text, response, label, hits, created_at = row
         if not response:
             continue
-        if normalize_text(stored_text) == normalized:            # identical wording: a certain match
+        if normalize_text(stored_text) == normalized:  # identical wording: a certain match
             best = (1.0, row)
             break
         similarity = token_similarity(request_text, stored_text)
@@ -455,12 +483,18 @@ def lookup_semantic(scope: str, request_text: str, signature: Optional[str]) -> 
 
     similarity, (cache_key, stored_text, response, label, hits, created_at) = best
     _touch(_conn(), "cache_entries", "cache_key", cache_key)
-    return {"response": response, "label": label or stored_text, "similarity": round(similarity, 3),
-            "hits": int(hits or 0) + 1, "created_at": _iso(created_at)}
+    return {
+        "response": response,
+        "label": label or stored_text,
+        "similarity": round(similarity, 3),
+        "hits": int(hits or 0) + 1,
+        "created_at": _iso(created_at),
+    }
 
 
-def store_semantic(scope: str, request_text: str, signature: Optional[str], response: str,
-                   meta: Optional[dict] = None) -> None:
+def store_semantic(
+    scope: str, request_text: str, signature: Optional[str], response: str, meta: Optional[dict] = None
+) -> None:
     """Upsert one answered question under its planner signature.  Never raises."""
     if not signature or not response or not request_text.strip() or not _conn_ready():
         return
@@ -476,8 +510,17 @@ def store_semantic(scope: str, request_text: str, signature: Optional[str], resp
                (cache_key, kind, scope, signature, label, request_text, response, meta_json,
                 data_version, hits, created_at, last_hit_at)
                VALUES (?, 'semantic', ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, NULL)""",
-            [cache_key, scope, signature, label, request_text[:4000], response,
-             json.dumps(meta or {}, ensure_ascii=False, default=str)[:8000], version])
+            [
+                cache_key,
+                scope,
+                signature,
+                label,
+                request_text[:4000],
+                response,
+                json.dumps(meta or {}, ensure_ascii=False, default=str)[:8000],
+                version,
+            ],
+        )
         _maybe_evict(conn)
     except Exception as exc:
         logger.debug("cache: semantic store failed (%s)", exc)
@@ -487,10 +530,10 @@ def store_semantic(scope: str, request_text: str, signature: Optional[str], resp
 # SQL / CTE result cache
 # ---------------------------------------------------------------------------
 
+
 def sql_cache_available(params=None) -> bool:
     """Prepared parameters make a statement's result depend on more than its text, so those are skipped."""
-    return (enabled() and bool(getattr(settings, "cache_sql_enabled", True))
-            and not params and _conn_ready())
+    return enabled() and bool(getattr(settings, "cache_sql_enabled", True)) and not params and _conn_ready()
 
 
 def _sql_hash(sql_text: str) -> str:
@@ -499,8 +542,8 @@ def _sql_hash(sql_text: str) -> str:
 
 def _tables_in_sql(sql_text: str) -> list[str]:
     import re as _re
-    pattern = _re.compile(
-        r"\b(?:FROM|JOIN)\s+(?:[A-Za-z_][A-Za-z0-9_]*\.)?([A-Za-z_][A-Za-z0-9_]*)", _re.I)
+
+    pattern = _re.compile(r"\b(?:FROM|JOIN)\s+(?:[A-Za-z_][A-Za-z0-9_]*\.)?([A-Za-z_][A-Za-z0-9_]*)", _re.I)
     return sorted({m.group(1).lower() for m in pattern.finditer(str(sql_text))})
 
 
@@ -520,7 +563,8 @@ def lookup_sql(sql_text: str) -> Optional[tuple]:
             """SELECT columns_json, result_json, row_count, truncated FROM cache_sql_results
                WHERE sql_hash = ? AND data_version = ?
                  AND (? = 0 OR epoch(created_at) >= ?)""",
-            [key, version, cutoff, cutoff]).fetchone()
+            [key, version, cutoff, cutoff],
+        ).fetchone()
         if row is None:
             return None
         columns_json, result_json, row_count, truncated = row
@@ -528,6 +572,7 @@ def lookup_sql(sql_text: str) -> Optional[tuple]:
             return None
         import pandas as pd
         from io import StringIO
+
         frame = pd.read_json(StringIO(result_json), orient="split")
         columns = json.loads(columns_json) if columns_json else list(frame.columns)
         frame.columns = columns
@@ -560,10 +605,18 @@ def store_sql(sql_text: str, frame, truncated: bool, request_text: str = "") -> 
                (sql_hash, sql_text, request_text, columns_json, result_json, row_count, truncated,
                 tables_json, data_version, hits, created_at, last_hit_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, NULL)""",
-            [_sql_hash(sql_text), str(sql_text)[:20000], str(request_text)[:2000],
-             json.dumps([str(c) for c in frame.columns], ensure_ascii=False), payload,
-             int(len(frame)), bool(truncated),
-             json.dumps(_tables_in_sql(sql_text), ensure_ascii=False), version])
+            [
+                _sql_hash(sql_text),
+                str(sql_text)[:20000],
+                str(request_text)[:2000],
+                json.dumps([str(c) for c in frame.columns], ensure_ascii=False),
+                payload,
+                int(len(frame)),
+                bool(truncated),
+                json.dumps(_tables_in_sql(sql_text), ensure_ascii=False),
+                version,
+            ],
+        )
         _maybe_evict(conn)
     except Exception as exc:
         logger.debug("cache: sql store failed (%s)", exc)
@@ -579,8 +632,9 @@ _WRITES = {"n": 0}
 def _touch(conn, table: str, key_column: str, key: str) -> None:
     """Record one hit (never fatal: a counter is not worth failing a served answer over)."""
     try:
-        conn.execute(f"UPDATE {table} SET hits = hits + 1, last_hit_at = CURRENT_TIMESTAMP "
-                     f"WHERE {key_column} = ?", [key])
+        conn.execute(
+            f"UPDATE {table} SET hits = hits + 1, last_hit_at = CURRENT_TIMESTAMP WHERE {key_column} = ?", [key]
+        )
     except Exception:
         pass
 
@@ -613,7 +667,9 @@ def _maybe_evict(conn) -> None:
                 conn.execute(
                     f"DELETE FROM {table} WHERE {key} IN ("
                     f"  SELECT {key} FROM {table} ORDER BY COALESCE(last_hit_at, created_at) ASC "
-                    f"  LIMIT ?)", [int(total) - limit])
+                    f"  LIMIT ?)",
+                    [int(total) - limit],
+                )
         except Exception:
             pass
 
@@ -641,35 +697,40 @@ def invalidate(kind: Optional[str] = None) -> dict:
 # Reading the cache (stats + the Cache page's graph model)
 # ---------------------------------------------------------------------------
 
+
 def _totals(conn, table: str, where: str = "", params: Iterable[Any] = ()) -> dict:
     clause = f" WHERE {where}" if where else ""
     try:
         row = conn.execute(
-            f"SELECT COUNT(*), COALESCE(SUM(hits), 0), MIN(created_at), MAX(created_at) "
-            f"FROM {table}{clause}", list(params)).fetchone()
+            f"SELECT COUNT(*), COALESCE(SUM(hits), 0), MIN(created_at), MAX(created_at) FROM {table}{clause}",
+            list(params),
+        ).fetchone()
     except Exception:
         return {"entries": 0, "hits": 0, "oldest": "", "newest": ""}
-    return {"entries": int(row[0] or 0), "hits": int(row[1] or 0),
-            "oldest": _iso(row[2]), "newest": _iso(row[3])}
+    return {"entries": int(row[0] or 0), "hits": int(row[1] or 0), "oldest": _iso(row[2]), "newest": _iso(row[3])}
 
 
 def stats() -> dict:
     """Counters for the Cache page header and the health endpoint.  Never raises."""
-    out = {"enabled": enabled(), "data_version": "", "prompt": {}, "semantic": {}, "sql": {},
-           "total_entries": 0}
+    out = {"enabled": enabled(), "data_version": "", "prompt": {}, "semantic": {}, "sql": {}, "total_entries": 0}
     if not _conn_ready():
         return out
     conn = _conn()
     out["data_version"] = data_version()
-    out["prompt"] = {"enabled": bool(getattr(settings, "cache_prompt_enabled", True)),
-                     **_totals(conn, "cache_entries", "kind = 'prompt'")}
-    out["semantic"] = {"enabled": bool(getattr(settings, "cache_semantic_enabled", True)),
-                       **_totals(conn, "cache_entries", "kind = 'semantic'")}
-    out["sql"] = {"enabled": bool(getattr(settings, "cache_sql_enabled", True)),
-                  **_totals(conn, "cache_sql_results")}
+    out["prompt"] = {
+        "enabled": bool(getattr(settings, "cache_prompt_enabled", True)),
+        **_totals(conn, "cache_entries", "kind = 'prompt'"),
+    }
+    out["semantic"] = {
+        "enabled": bool(getattr(settings, "cache_semantic_enabled", True)),
+        **_totals(conn, "cache_entries", "kind = 'semantic'"),
+    }
+    out["sql"] = {"enabled": bool(getattr(settings, "cache_sql_enabled", True)), **_totals(conn, "cache_sql_results")}
     out["total_entries"] = out["prompt"]["entries"] + out["semantic"]["entries"] + out["sql"]["entries"]
-    out["thresholds"] = {"semantic": float(getattr(settings, "cache_semantic_threshold", 0.85) or 0.85),
-                         "ttl_s": _ttl_s()}
+    out["thresholds"] = {
+        "semantic": float(getattr(settings, "cache_semantic_threshold", 0.85) or 0.85),
+        "ttl_s": _ttl_s(),
+    }
     return out
 
 
@@ -698,12 +759,25 @@ def entries(kind: Optional[str] = None, limit: int = 300, query: str = "") -> li
                            data_version, hits, created_at, last_hit_at,
                            LENGTH(response) AS response_len
                     FROM cache_entries{clause}
-                    ORDER BY COALESCE(last_hit_at, created_at) DESC LIMIT ?""", params).fetchall():
-                out.append({"cache_key": row[0], "kind": row[1], "scope": row[2], "signature": row[3],
-                            "label": row[4], "request_text": row[5],
-                            "meta": _loads(row[6], {}), "data_version": row[7],
-                            "hits": int(row[8] or 0), "created_at": _iso(row[9]),
-                            "last_hit_at": _iso(row[10]), "response_length": int(row[11] or 0)})
+                    ORDER BY COALESCE(last_hit_at, created_at) DESC LIMIT ?""",
+                params,
+            ).fetchall():
+                out.append(
+                    {
+                        "cache_key": row[0],
+                        "kind": row[1],
+                        "scope": row[2],
+                        "signature": row[3],
+                        "label": row[4],
+                        "request_text": row[5],
+                        "meta": _loads(row[6], {}),
+                        "data_version": row[7],
+                        "hits": int(row[8] or 0),
+                        "created_at": _iso(row[9]),
+                        "last_hit_at": _iso(row[10]),
+                        "response_length": int(row[11] or 0),
+                    }
+                )
         if kind in (None, "sql"):
             params = [limit]
             clause = ""
@@ -714,15 +788,30 @@ def entries(kind: Optional[str] = None, limit: int = 300, query: str = "") -> li
                 f"""SELECT sql_hash, sql_text, request_text, row_count, truncated, tables_json,
                            data_version, hits, created_at, last_hit_at
                     FROM cache_sql_results{clause}
-                    ORDER BY COALESCE(last_hit_at, created_at) DESC LIMIT ?""", params).fetchall():
-                out.append({"cache_key": row[0], "kind": "sql", "scope": "sql",
-                            "signature": "", "label": (row[2] or row[1] or "")[:300],
-                            "request_text": row[2] or "", "sql": row[1],
-                            "meta": {"tables": _loads(row[5], []), "row_count": int(row[3] or 0),
-                                     "truncated": bool(row[4])},
-                            "data_version": row[6], "hits": int(row[7] or 0),
-                            "created_at": _iso(row[8]), "last_hit_at": _iso(row[9]),
-                            "response_length": int(row[3] or 0)})
+                    ORDER BY COALESCE(last_hit_at, created_at) DESC LIMIT ?""",
+                params,
+            ).fetchall():
+                out.append(
+                    {
+                        "cache_key": row[0],
+                        "kind": "sql",
+                        "scope": "sql",
+                        "signature": "",
+                        "label": (row[2] or row[1] or "")[:300],
+                        "request_text": row[2] or "",
+                        "sql": row[1],
+                        "meta": {
+                            "tables": _loads(row[5], []),
+                            "row_count": int(row[3] or 0),
+                            "truncated": bool(row[4]),
+                        },
+                        "data_version": row[6],
+                        "hits": int(row[7] or 0),
+                        "created_at": _iso(row[8]),
+                        "last_hit_at": _iso(row[9]),
+                        "response_length": int(row[3] or 0),
+                    }
+                )
     except Exception as exc:
         logger.debug("cache: entries query failed (%s)", exc)
         return []
@@ -738,24 +827,45 @@ def get_entry(cache_key: str) -> Optional[dict]:
         row = conn.execute(
             """SELECT cache_key, kind, scope, label, request_text, response, meta_json,
                       data_version, hits, created_at, last_hit_at
-               FROM cache_entries WHERE cache_key = ?""", [cache_key]).fetchone()
+               FROM cache_entries WHERE cache_key = ?""",
+            [cache_key],
+        ).fetchone()
         if row is not None:
-            return {"cache_key": row[0], "kind": row[1], "scope": row[2], "label": row[3],
-                    "request_text": row[4] or "", "response": row[5] or "",
-                    "meta": _loads(row[6], {}), "data_version": row[7], "hits": int(row[8] or 0),
-                    "created_at": _iso(row[9]), "last_hit_at": _iso(row[10])}
+            return {
+                "cache_key": row[0],
+                "kind": row[1],
+                "scope": row[2],
+                "label": row[3],
+                "request_text": row[4] or "",
+                "response": row[5] or "",
+                "meta": _loads(row[6], {}),
+                "data_version": row[7],
+                "hits": int(row[8] or 0),
+                "created_at": _iso(row[9]),
+                "last_hit_at": _iso(row[10]),
+            }
         row = conn.execute(
             """SELECT sql_hash, sql_text, request_text, row_count, truncated, tables_json,
                       data_version, hits, created_at, last_hit_at
-               FROM cache_sql_results WHERE sql_hash = ?""", [cache_key]).fetchone()
+               FROM cache_sql_results WHERE sql_hash = ?""",
+            [cache_key],
+        ).fetchone()
         if row is None:
             return None
-        return {"cache_key": row[0], "kind": "sql", "scope": "sql", "label": (row[2] or "")[:300],
-                "request_text": row[2] or "", "sql": row[1] or "", "response": "",
-                "meta": {"tables": _loads(row[5], []), "row_count": int(row[3] or 0),
-                         "truncated": bool(row[4])},
-                "data_version": row[6], "hits": int(row[7] or 0),
-                "created_at": _iso(row[8]), "last_hit_at": _iso(row[9])}
+        return {
+            "cache_key": row[0],
+            "kind": "sql",
+            "scope": "sql",
+            "label": (row[2] or "")[:300],
+            "request_text": row[2] or "",
+            "sql": row[1] or "",
+            "response": "",
+            "meta": {"tables": _loads(row[5], []), "row_count": int(row[3] or 0), "truncated": bool(row[4])},
+            "data_version": row[6],
+            "hits": int(row[7] or 0),
+            "created_at": _iso(row[8]),
+            "last_hit_at": _iso(row[9]),
+        }
     except Exception as exc:
         logger.debug("cache: reading one entry failed (%s)", exc)
         return None
@@ -786,8 +896,15 @@ def graph(include_empty: bool = True) -> dict:
     vocabulary the graph is drawn in — not a hardcoded list.  Level 2 is the cached questions that
     the planner attributed to those concepts.  Level 3 is the tables/CTEs those questions read.
     """
-    out: dict = {"stats": stats(), "abstractions": [], "questions": [], "tables": [],
-                 "roles": [], "edges": [], "domains": []}
+    out: dict = {
+        "stats": stats(),
+        "abstractions": [],
+        "questions": [],
+        "tables": [],
+        "roles": [],
+        "edges": [],
+        "domains": [],
+    }
     if not _conn_ready():
         return out
     conn = _conn()
@@ -795,6 +912,7 @@ def graph(include_empty: bool = True) -> dict:
     catalog = {"tables": [], "concepts": [], "domains": []}
     try:
         import db.schema_catalog as schema_catalog
+
         catalog = schema_catalog.describe_catalog()
     except Exception as exc:
         logger.debug("cache: catalog unavailable for the graph (%s)", exc)
@@ -809,10 +927,18 @@ def graph(include_empty: bool = True) -> dict:
         for row in conn.execute(
             """SELECT cache_key, kind, scope, label, request_text, meta_json, hits, created_at,
                       LENGTH(response) AS response_len
-               FROM cache_entries ORDER BY COALESCE(last_hit_at, created_at) DESC LIMIT 1000""").fetchall():
-            item = {"cache_key": row[0], "scope": row[2], "label": row[3] or "", "request_text": row[4] or "",
-                    "meta": _loads(row[5], {}), "hits": int(row[6] or 0), "created_at": _iso(row[7]),
-                    "response_length": int(row[8] or 0)}
+               FROM cache_entries ORDER BY COALESCE(last_hit_at, created_at) DESC LIMIT 1000"""
+        ).fetchall():
+            item = {
+                "cache_key": row[0],
+                "scope": row[2],
+                "label": row[3] or "",
+                "request_text": row[4] or "",
+                "meta": _loads(row[5], {}),
+                "hits": int(row[6] or 0),
+                "created_at": _iso(row[7]),
+                "response_length": int(row[8] or 0),
+            }
             (prompt_rows if row[1] == "prompt" else semantic_rows).append(item)
     except Exception as exc:
         logger.debug("cache: graph rows unavailable (%s)", exc)
@@ -826,9 +952,18 @@ def graph(include_empty: bool = True) -> dict:
             continue
         tables = [t for t in (concept.get("tables") or []) if t in table_meta] or list(concept.get("tables") or [])
         domain = (table_meta.get(tables[0], {}).get("domain") if tables else None) or "other"
-        node = {"id": f"c:{key}", "kind": "concept", "key": key, "label": _concept_label(concept),
-                "description": concept.get("description", ""), "domain": domain, "tables": tables,
-                "origin": concept.get("origin", "builtin"), "questions": 0, "hits": 0}
+        node = {
+            "id": f"c:{key}",
+            "kind": "concept",
+            "key": key,
+            "label": _concept_label(concept),
+            "description": concept.get("description", ""),
+            "domain": domain,
+            "tables": tables,
+            "origin": concept.get("origin", "builtin"),
+            "questions": 0,
+            "hits": 0,
+        }
         out["abstractions"].append(node)
         concept_ids.add(key)
 
@@ -839,12 +974,19 @@ def graph(include_empty: bool = True) -> dict:
 
     # ── question nodes ────────────────────────────────────────────────────
     for row in semantic_rows:
-        node = {"id": f"q:{row['cache_key']}", "kind": "question", "label": row["label"] or row["request_text"],
-                "request_text": row["request_text"], "concepts": row["concepts"],
-                "tables": [t for t in (row["meta"].get("tables") or [])],
-                "operation": row["meta"].get("operation", ""), "hits": row["hits"],
-                "created_at": row["created_at"], "cache_key": row["cache_key"],
-                "scope": row["scope"]}
+        node = {
+            "id": f"q:{row['cache_key']}",
+            "kind": "question",
+            "label": row["label"] or row["request_text"],
+            "request_text": row["request_text"],
+            "concepts": row["concepts"],
+            "tables": [t for t in (row["meta"].get("tables") or [])],
+            "operation": row["meta"].get("operation", ""),
+            "hits": row["hits"],
+            "created_at": row["created_at"],
+            "cache_key": row["cache_key"],
+            "scope": row["scope"],
+        }
         out["questions"].append(node)
 
     # ── table nodes ───────────────────────────────────────────────────────
@@ -853,10 +995,18 @@ def graph(include_empty: bool = True) -> dict:
         for name in node["tables"]:
             if not _BASE_TABLE.match(name):
                 continue
-            used_tables.setdefault(name, {"id": f"t:{name}", "kind": "table", "label": name,
-                                          "domain": table_meta.get(name, {}).get("domain", "other"),
-                                          "rows": table_meta.get(name, {}).get("rows"),
-                                          "questions": 0, "hits": 0})
+            used_tables.setdefault(
+                name,
+                {
+                    "id": f"t:{name}",
+                    "kind": "table",
+                    "label": name,
+                    "domain": table_meta.get(name, {}).get("domain", "other"),
+                    "rows": table_meta.get(name, {}).get("rows"),
+                    "questions": 0,
+                    "hits": 0,
+                },
+            )
             used_tables[name]["questions"] += 1
             used_tables[name]["hits"] += node["hits"]
     out["tables"] = sorted(used_tables.values(), key=lambda t: (t["domain"], t["label"]))
@@ -884,16 +1034,32 @@ def graph(include_empty: bool = True) -> dict:
     # ── prompt-cache family: roles -> calls ───────────────────────────────
     roles: dict[str, dict] = {}
     for row in prompt_rows:
-        node = roles.setdefault(row["scope"] or "model",
-                                {"id": f"r:{row['scope'] or 'model'}", "kind": "role",
-                                 "label": row["scope"] or "model", "calls": 0, "hits": 0})
+        node = roles.setdefault(
+            row["scope"] or "model",
+            {
+                "id": f"r:{row['scope'] or 'model'}",
+                "kind": "role",
+                "label": row["scope"] or "model",
+                "calls": 0,
+                "hits": 0,
+            },
+        )
         node["calls"] += 1
         node["hits"] += row["hits"]
     out["roles"] = sorted(roles.values(), key=lambda r: -r["calls"])
-    out["prompt_calls"] = [{"id": f"p:{r['cache_key']}", "kind": "prompt", "label": r["label"],
-                            "role": r["scope"], "hits": r["hits"], "created_at": r["created_at"],
-                            "cache_key": r["cache_key"], "response_length": r["response_length"]}
-                           for r in prompt_rows]
+    out["prompt_calls"] = [
+        {
+            "id": f"p:{r['cache_key']}",
+            "kind": "prompt",
+            "label": r["label"],
+            "role": r["scope"],
+            "hits": r["hits"],
+            "created_at": r["created_at"],
+            "cache_key": r["cache_key"],
+            "response_length": r["response_length"],
+        }
+        for r in prompt_rows
+    ]
     for call in out["prompt_calls"]:
         edges.append({"source": f"r:{call['role']}", "target": call["id"], "kind": "made"})
     return out

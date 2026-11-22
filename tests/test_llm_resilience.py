@@ -1,4 +1,5 @@
 """agents/llm_resilience.py and the graceful degradation it enables in the tool layer and both chat agents."""
+
 from __future__ import annotations
 
 import sys
@@ -50,16 +51,33 @@ def fresh_breaker():
     lr.reset()
 
 
-class APIConnectionError(Exception): pass          # noqa: E701 - named like the openai / httpx classes on purpose
-class ReadTimeout(Exception): pass                 # noqa: E701
+class APIConnectionError(Exception):
+    pass  # noqa: E701 - named like the openai / httpx classes on purpose
 
 
-@pytest.mark.parametrize("exc,transient", [
-    (ConnectionRefusedError("refused"), True), (TimeoutError("t"), True), (APIConnectionError("Connection error."), True),
-    (ReadTimeout("The read operation timed out"), True), (HttpError(500), True), (HttpError(503), True), (HttpError(429), True),
-    (HttpError(408), True), (HttpError(400), False), (HttpError(401), False), (HttpError(404), False),
-    (ValueError("context length exceeded"), False), (KeyError("x"), False), (RuntimeError("something else"), False),
-])
+class ReadTimeout(Exception):
+    pass  # noqa: E701
+
+
+@pytest.mark.parametrize(
+    "exc,transient",
+    [
+        (ConnectionRefusedError("refused"), True),
+        (TimeoutError("t"), True),
+        (APIConnectionError("Connection error."), True),
+        (ReadTimeout("The read operation timed out"), True),
+        (HttpError(500), True),
+        (HttpError(503), True),
+        (HttpError(429), True),
+        (HttpError(408), True),
+        (HttpError(400), False),
+        (HttpError(401), False),
+        (HttpError(404), False),
+        (ValueError("context length exceeded"), False),
+        (KeyError("x"), False),
+        (RuntimeError("something else"), False),
+    ],
+)
 def test_only_the_services_failures_are_transient(exc, transient):
     assert lr.is_transient(exc) is transient
 
@@ -74,7 +92,7 @@ def test_the_breaker_opens_after_the_threshold_then_fails_instantly_without_call
     assert client.calls == 3 and lr.breaker().state == "open"
     with pytest.raises(lr.ModelUnavailable) as err:
         lr.invoke(client, [])
-    assert client.calls == 3 and "not responding" in str(err.value)             # failed fast: the client was not touched
+    assert client.calls == 3 and "not responding" in str(err.value)  # failed fast: the client was not touched
 
 
 def test_after_the_cooldown_exactly_one_probe_is_allowed_and_its_outcome_decides():
@@ -87,10 +105,10 @@ def test_after_the_cooldown_exactly_one_probe_is_allowed_and_its_outcome_decides
     clock.now += 29
     with pytest.raises(lr.ModelUnavailable):
         lr.invoke(bad, [])
-    assert bad.calls == 2                                                       # still cooling down
+    assert bad.calls == 2  # still cooling down
     clock.now += 2
     with pytest.raises(lr.ModelUnavailable):
-        lr.invoke(bad, [])                                                      # the probe: fails -> re-opens
+        lr.invoke(bad, [])  # the probe: fails -> re-opens
     assert bad.calls == 3 and lr.breaker().state == "open"
     clock.now += 31
     good = Client(["fine"])
@@ -120,7 +138,7 @@ def test_only_one_probe_runs_at_a_time():
     t = threading.Thread(target=probe)
     t.start()
     assert started.wait(5)
-    with pytest.raises(lr.ModelUnavailable):                                    # a second caller while the probe is in flight
+    with pytest.raises(lr.ModelUnavailable):  # a second caller while the probe is in flight
         lr.invoke(Slow(), [])
     release.set()
     t.join()
@@ -143,9 +161,9 @@ def test_a_bad_request_is_the_callers_problem_not_an_outage():
     lr.configure_breaker(1, 30, Clock())
     client = Client([HttpError(400)] * 3)
     for _ in range(3):
-        with pytest.raises(HttpError):                                          # re-raised UNCHANGED
+        with pytest.raises(HttpError):  # re-raised UNCHANGED
             lr.invoke(client, [])
-    assert lr.breaker().state == "closed" and client.calls == 3                 # the service answered: it is up
+    assert lr.breaker().state == "closed" and client.calls == 3  # the service answered: it is up
 
 
 def test_status_reports_the_breaker_for_health_checks():
@@ -166,7 +184,7 @@ def test_a_failing_optional_role_cannot_disable_the_primary_models():
             lr.invoke(optional, [], role="semantic_fallback", breaker_name="semantic")
     assert lr.breaker("semantic").state == "open"
     primary = Client(["written answer"])
-    assert lr.invoke(primary, [], role="code_agent").content == "written answer"        # the chat models are unaffected
+    assert lr.invoke(primary, [], role="code_agent").content == "written answer"  # the chat models are unaffected
     assert lr.breaker("chat").state == "closed" and primary.calls == 1
 
 
@@ -216,7 +234,8 @@ def test_a_turn_created_elsewhere_can_be_adopted_by_a_worker_thread():
                 seen.append("cancelled")
 
     t = threading.Thread(target=worker)
-    t.start(); t.join()
+    t.start()
+    t.join()
     assert seen == ["ran", "cancelled"]
 
 
@@ -232,6 +251,7 @@ def models_down(fx, monkeypatch):
     import agents.general_agent as ga
     import agents.house_agent as ha
     import agents.tools as tools
+
     down = Client([ConnectionError("llama-server connection refused")] * 200)
     monkeypatch.setattr(ga, "_get_code_agent", lambda: down)
     monkeypatch.setattr(ga, "_get_response_agent", lambda: down)
@@ -244,12 +264,17 @@ def models_down(fx, monkeypatch):
 
 def chat(message):
     from agents.general_agent import run_general_chat
+
     return run_general_chat(message)[0]
 
 
 def test_with_every_model_down_a_plannable_question_is_still_answered(models_down):
     reply = chat("What is the population of Pittsburgh?")
-    assert reply.startswith("(The language model service is not responding") and "Pittsburgh, PA Metro Area" in reply and "24000" in reply
+    assert (
+        reply.startswith("(The language model service is not responding")
+        and "Pittsburgh, PA Metro Area" in reply
+        and "24000" in reply
+    )
 
 
 def test_with_every_model_down_a_derived_measure_needs_no_model_at_all(models_down, fx):
@@ -268,13 +293,14 @@ def test_the_breaker_stops_the_hammering_after_the_threshold(models_down):
     assert calls_after_first <= 3 + 1 and lr.breaker().state == "open"
     for _ in range(5):
         chat("What is the population of Pittsburgh?")
-    assert models_down.calls == calls_after_first                               # open breaker: zero further model calls
+    assert models_down.calls == calls_after_first  # open breaker: zero further model calls
     assert first.startswith("(The language model service")
 
 
 def test_a_question_that_needs_the_model_says_so_and_is_not_retried(models_down):
     import agents.tools as tools
     from agents import answer_status
+
     out = tools.query_database.invoke({"request": "list tract population in the Pittsburgh metro"})
     body = out.split("[RESULT]\n", 1)[1]
     assert answer_status.status_code(body) == "model_unavailable" and not answer_status.is_retryable(body)
@@ -282,6 +308,7 @@ def test_a_question_that_needs_the_model_says_so_and_is_not_retried(models_down)
 
 def test_a_cancelled_turn_is_not_converted_into_an_error_message(models_down, fx, monkeypatch):
     import agents.tools as tools
+
     cancelled = Client(["SELECT COUNT(houses.house_id) FROM houses"])
     monkeypatch.setattr(tools, "_agent", cancelled)
     with lr.turn() as t:
@@ -293,6 +320,7 @@ def test_a_cancelled_turn_is_not_converted_into_an_error_message(models_down, fx
 
 def test_house_chat_degrades_too(models_down):
     from agents.house_agent import run_house_chat
+
     reply = run_house_chat("h1", "what is the list price?")[0]
     assert reply.startswith("(The language model service is not responding") or "not responding" in reply
 
@@ -300,6 +328,7 @@ def test_house_chat_degrades_too(models_down):
 def test_chat_clients_are_built_with_bounded_retries():
     from config import settings
     import agents.tools as tools
+
     tools._agent = None
     try:
         assert tools.get_code_agent().max_retries == settings.llm_max_retries
@@ -315,11 +344,11 @@ def test_a_dead_semantic_proposer_never_stops_the_chat_model_from_being_called(f
     from config import settings
 
     monkeypatch.setattr(settings, "semantic_fallback_enabled", True)
-    monkeypatch.setattr(sf, "_client", Client([ConnectionError("refused")] * 50))          # nothing is listening
+    monkeypatch.setattr(sf, "_client", Client([ConnectionError("refused")] * 50))  # nothing is listening
     sf.reset_cache()
     stub = Client(["SELECT COUNT(houses.house_id) FROM houses WHERE houses.city = 'Pittsburgh'"])
     monkeypatch.setattr(tools, "_agent", stub)
-    for i in range(6):                                                                       # unplannable requests hit the proposer
+    for i in range(6):  # unplannable requests hit the proposer
         out = tools.query_database.invoke({"request": f"a question nothing in the catalog can match number {i}"})
         assert "NOT_ANSWERED[unplannable]" in out
     out = tools.query_database.invoke({"request": "How many houses are in Pittsburgh?"})

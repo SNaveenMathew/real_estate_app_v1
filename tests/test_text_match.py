@@ -3,6 +3,7 @@
 ``REFERENCE_*`` below are the original implementations, kept verbatim as the oracle.  If this test fails, planning
 behaviour has changed for every request, not just the one being edited.
 """
+
 from __future__ import annotations
 
 import random
@@ -31,8 +32,35 @@ def REFERENCE_SPANS(text: str, alias: str):
     return [(m.start(), m.end(), len(a.split())) for m in re.finditer(pattern, t)]
 
 
-VOCAB = ["a", "b", "aa", "pa", "pittsburgh", "metro", "area", "of", "the", "s", "msa", "population", "42003", "x1",
-         "st", "louis", "café", "ñandú", "O'Hare", "e-mail", "x_y", "A", "PA", "Pittsburgh", "square", "mile", "miles"]
+VOCAB = [
+    "a",
+    "b",
+    "aa",
+    "pa",
+    "pittsburgh",
+    "metro",
+    "area",
+    "of",
+    "the",
+    "s",
+    "msa",
+    "population",
+    "42003",
+    "x1",
+    "st",
+    "louis",
+    "café",
+    "ñandú",
+    "O'Hare",
+    "e-mail",
+    "x_y",
+    "A",
+    "PA",
+    "Pittsburgh",
+    "square",
+    "mile",
+    "miles",
+]
 SEPARATORS = [" ", " ", " ", ", ", "-", "'", "_", "  ", "\t", " & ", ". ", "/", "--"]
 
 
@@ -58,7 +86,7 @@ def test_phrase_spans_match_reference_on_random_inputs():
     for _ in range(30000):
         text = _random_text(rng)
         toks = REFERENCE_NORMALIZE(text).split()
-        if toks and rng.random() < 0.75:                 # mostly aliases that really occur (incl. repeats/overlaps)
+        if toks and rng.random() < 0.75:  # mostly aliases that really occur (incl. repeats/overlaps)
             i = rng.randrange(len(toks))
             j = min(len(toks), i + rng.randint(1, 4))
             alias = " ".join(toks[i:j])
@@ -70,14 +98,25 @@ def test_phrase_spans_match_reference_on_random_inputs():
         assert text_match.has_phrase(text, alias) == bool(expected), (text, alias)
         checked += 1
         hits += bool(expected)
-    assert checked == 30000 and hits > 8000            # the oracle comparison must exercise real matches
+    assert checked == 30000 and hits > 8000  # the oracle comparison must exercise real matches
 
 
-@pytest.mark.parametrize("text,alias", [
-    ("a a a", "a a"), ("a a a a", "a a"), ("aaa aa a", "a"), ("", "x"), ("x", ""), ("   ", "  "),
-    ("Pittsburgh, PA Metro Area", "pittsburgh pa"), ("Pittsburgh's population", "s population"),
-    ("x-ray x ray", "x ray"), ("42003010300", "42003010300"), ("sold-home records", "sold home records"),
-])
+@pytest.mark.parametrize(
+    "text,alias",
+    [
+        ("a a a", "a a"),
+        ("a a a a", "a a"),
+        ("aaa aa a", "a"),
+        ("", "x"),
+        ("x", ""),
+        ("   ", "  "),
+        ("Pittsburgh, PA Metro Area", "pittsburgh pa"),
+        ("Pittsburgh's population", "s population"),
+        ("x-ray x ray", "x ray"),
+        ("42003010300", "42003010300"),
+        ("sold-home records", "sold home records"),
+    ],
+)
 def test_edge_cases_match_reference(text, alias):
     assert text_match.phrase_spans(text, alias) == REFERENCE_SPANS(text, alias)
 
@@ -85,9 +124,11 @@ def test_edge_cases_match_reference(text, alias):
 def test_semantic_matches_identical_under_both_matchers(tmp_path_factory, monkeypatch):
     """Catalog-level equivalence: concept matching (incl. overrides) must not change for any phrasing."""
     import census_fixture
+
     fx = census_fixture.activate(tmp_path_factory.mktemp("tm"))
     try:
         import db.schema_catalog as schema
+
         rng = random.Random(3)
         aliases = [a for item in schema._glossary().values() for a in item.get("aliases", [])]
         queries = []

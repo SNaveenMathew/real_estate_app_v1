@@ -15,6 +15,7 @@ zeros; types are then inferred column by column.  Column names are turned into s
 identifiers (the original header is kept as ``source_name``) because the SQL guardrails reject
 words such as ``update`` or ``load`` anywhere in a query.
 """
+
 from __future__ import annotations
 
 import csv
@@ -28,23 +29,116 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-TABULAR = {".csv": "csv", ".tsv": "csv", ".txt": "csv", ".xlsx": "excel", ".xlsm": "excel",
-           ".xls": "excel", ".json": "json", ".jsonl": "json", ".ndjson": "json", ".parquet": "parquet"}
+TABULAR = {
+    ".csv": "csv",
+    ".tsv": "csv",
+    ".txt": "csv",
+    ".xlsx": "excel",
+    ".xlsm": "excel",
+    ".xls": "excel",
+    ".json": "json",
+    ".jsonl": "json",
+    ".ndjson": "json",
+    ".parquet": "parquet",
+}
 GEO = {".geojson": "geo", ".gpkg": "geo", ".shp": "geo", ".zip": "geo", ".kml": "geo"}
 SUPPORTED_EXTENSIONS = sorted({**TABULAR, **GEO})
 
 # Words the SQL guardrails (agents/tools.py::_FORBIDDEN, services/guardrails.py) reject anywhere in a
 # query, plus common SQL keywords. Identifiers matching these get a suffix.
 RESERVED_WORDS = {
-    "insert", "update", "delete", "drop", "create", "alter", "truncate", "copy", "export", "attach",
-    "detach", "install", "load", "call", "pragma", "replace", "grant", "revoke", "import",
-    "select", "from", "where", "group", "order", "by", "limit", "offset", "table", "join", "on", "as",
-    "and", "or", "not", "null", "true", "false", "union", "all", "distinct", "case", "when", "then",
-    "else", "end", "with", "values", "in", "is", "like", "between", "having", "index", "primary",
-    "key", "default", "check", "column", "constraint", "user", "using", "left", "right", "inner",
-    "outer", "cross", "natural", "exists", "any", "some", "over", "window", "partition", "row",
-    "rows", "range", "current_date", "current_time", "current_timestamp", "desc", "asc", "cast",
-    "interval", "date", "time", "timestamp", "year", "month", "day", "hour", "minute", "second",
+    "insert",
+    "update",
+    "delete",
+    "drop",
+    "create",
+    "alter",
+    "truncate",
+    "copy",
+    "export",
+    "attach",
+    "detach",
+    "install",
+    "load",
+    "call",
+    "pragma",
+    "replace",
+    "grant",
+    "revoke",
+    "import",
+    "select",
+    "from",
+    "where",
+    "group",
+    "order",
+    "by",
+    "limit",
+    "offset",
+    "table",
+    "join",
+    "on",
+    "as",
+    "and",
+    "or",
+    "not",
+    "null",
+    "true",
+    "false",
+    "union",
+    "all",
+    "distinct",
+    "case",
+    "when",
+    "then",
+    "else",
+    "end",
+    "with",
+    "values",
+    "in",
+    "is",
+    "like",
+    "between",
+    "having",
+    "index",
+    "primary",
+    "key",
+    "default",
+    "check",
+    "column",
+    "constraint",
+    "user",
+    "using",
+    "left",
+    "right",
+    "inner",
+    "outer",
+    "cross",
+    "natural",
+    "exists",
+    "any",
+    "some",
+    "over",
+    "window",
+    "partition",
+    "row",
+    "rows",
+    "range",
+    "current_date",
+    "current_time",
+    "current_timestamp",
+    "desc",
+    "asc",
+    "cast",
+    "interval",
+    "date",
+    "time",
+    "timestamp",
+    "year",
+    "month",
+    "day",
+    "hour",
+    "minute",
+    "second",
 }
 
 
@@ -59,12 +153,13 @@ class ReadResult:
     sheet: str | None = None
     sheets: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
-    geometry: dict | None = None      # {"kinds": [...], "points_only": bool} for spatial files
+    geometry: dict | None = None  # {"kinds": [...], "points_only": bool} for spatial files
 
 
 # ---------------------------------------------------------------------------
 # Identifier helpers
 # ---------------------------------------------------------------------------
+
 
 def sanitize_identifier(raw: Any, taken: set[str]) -> str:
     s = unicodedata.normalize("NFKD", str(raw)).encode("ascii", "ignore").decode()
@@ -106,6 +201,7 @@ def qi(name: str) -> str:
 # Format detection + per-format readers
 # ---------------------------------------------------------------------------
 
+
 def detect_format(path: Path, ext: str | None = None) -> str:
     ext = (ext or path.suffix).lower()
     if ext == ".json":
@@ -121,7 +217,8 @@ def detect_format(path: Path, ext: str | None = None) -> str:
     if ext in GEO:
         return GEO[ext]
     raise DatasetReadError(
-        f"'{ext or 'no extension'}' files are not supported. Supported types: {', '.join(SUPPORTED_EXTENSIONS)}.")
+        f"'{ext or 'no extension'}' files are not supported. Supported types: {', '.join(SUPPORTED_EXTENSIONS)}."
+    )
 
 
 def list_sheets(path: Path) -> list[str]:
@@ -161,8 +258,7 @@ def _read_csv(path: Path, ext: str, skiprows: int | None, notes: list[str]) -> p
                     delim = csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
                 except Exception:
                     delim = ","
-            df = pd.read_csv(path, encoding=enc, sep=delim, dtype=str, low_memory=False,
-                             skiprows=skiprows or None)
+            df = pd.read_csv(path, encoding=enc, sep=delim, dtype=str, low_memory=False, skiprows=skiprows or None)
             if enc != "utf-8-sig":
                 notes.append("Read with latin-1 encoding (the file is not valid UTF-8).")
             return df
@@ -175,7 +271,9 @@ def _read_csv(path: Path, ext: str, skiprows: int | None, notes: list[str]) -> p
     raise DatasetReadError("The file could not be decoded as UTF-8 or Latin-1 text.")
 
 
-def _read_excel(path: Path, sheet: str | None, skiprows: int | None, notes: list[str]) -> tuple[pd.DataFrame, str, list[str]]:
+def _read_excel(
+    path: Path, sheet: str | None, skiprows: int | None, notes: list[str]
+) -> tuple[pd.DataFrame, str, list[str]]:
     try:
         xl = pd.ExcelFile(path)
     except ImportError as exc:
@@ -194,7 +292,7 @@ def _read_excel(path: Path, sheet: str | None, skiprows: int | None, notes: list
     header = []
     for i, v in enumerate(raw.iloc[hdr]):
         header.append(str(v).strip() if pd.notna(v) and str(v).strip() else f"column_{i + 1}")
-    body = raw.iloc[hdr + 1:].reset_index(drop=True)
+    body = raw.iloc[hdr + 1 :].reset_index(drop=True)
     body.columns = header
     return body, target, sheets
 
@@ -224,7 +322,7 @@ def _read_json(path: Path, ext: str) -> pd.DataFrame:
 def _read_geo(path: Path, ext: str, notes: list[str]) -> tuple[pd.DataFrame, dict]:
     try:
         import geopandas as gpd
-    except ImportError as exc:   # pragma: no cover - geopandas is a core dependency
+    except ImportError as exc:  # pragma: no cover - geopandas is a core dependency
         raise DatasetReadError(f"Spatial files need geopandas: {exc}")
     target = f"zip://{path}" if ext == ".zip" else str(path)
     try:
@@ -256,13 +354,16 @@ def _read_geo(path: Path, ext: str, notes: list[str]) -> tuple[pd.DataFrame, dic
     df["max_lon"], df["max_lat"] = bounds["maxx"].values, bounds["maxy"].values
     df["geometry_json"] = [json.dumps(g.__geo_interface__, ensure_ascii=False) for g in geoms]
     if kinds != ["Point"]:
-        notes.append(f"Geometry types: {', '.join(kinds)}. lat/lon hold a representative point of each "
-                     "feature, so they are approximate for lines and polygons.")
+        notes.append(
+            f"Geometry types: {', '.join(kinds)}. lat/lon hold a representative point of each "
+            "feature, so they are approximate for lines and polygons."
+        )
     return df, {"kinds": kinds, "points_only": kinds == ["Point"]}
 
 
-def read_dataset(path: str | Path, filename: str | None = None, *, sheet: str | None = None,
-                 skiprows: int | None = None) -> ReadResult:
+def read_dataset(
+    path: str | Path, filename: str | None = None, *, sheet: str | None = None, skiprows: int | None = None
+) -> ReadResult:
     """Read any supported file into a text-typed DataFrame (see module docstring)."""
     path = Path(path)
     ext = Path(filename or path.name).suffix.lower()
@@ -280,6 +381,7 @@ def read_dataset(path: str | Path, filename: str | None = None, *, sheet: str | 
     elif fmt == "parquet":
         try:
             import geopandas as gpd
+
             gdf = gpd.read_parquet(path)
             df = pd.DataFrame(gdf.drop(columns=gdf.geometry.name))
             df["geometry_json"] = [json.dumps(g.__geo_interface__) if g is not None else None for g in gdf.geometry]
@@ -300,8 +402,11 @@ def read_dataset(path: str | Path, filename: str | None = None, *, sheet: str | 
 # Type inference
 # ---------------------------------------------------------------------------
 
-_ID_HINT = re.compile(r"(^|_)(id|ids|code|fips|geoid\w*|zip\w*|postal\w*|parid|parcel\w*|tract\w*|"
-                      r"cbsa\w*|msa\w*|apn|account|phone|statefp|countyfp|tractce|blkgrpce)($|_)", re.I)
+_ID_HINT = re.compile(
+    r"(^|_)(id|ids|code|fips|geoid\w*|zip\w*|postal\w*|parid|parcel\w*|tract\w*|"
+    r"cbsa\w*|msa\w*|apn|account|phone|statefp|countyfp|tractce|blkgrpce)($|_)",
+    re.I,
+)
 _DATE_HINT = re.compile(r"(date|time|_at$|_on$|timestamp|dt$)", re.I)
 _BOOL_TOKENS = {"true", "false", "yes", "no", "y", "n", "t", "f"}
 
@@ -315,6 +420,7 @@ def _clean_numeric_series(s: pd.Series) -> pd.Series:
     obj = s.astype(object)
     try:
         from services.data_loader import _clean_numeric
+
         cleaned = _clean_numeric(obj.astype(str).str.replace(r"[%\s]", "", regex=True).astype(object))
         return pd.to_numeric(cleaned, errors="coerce")
     except Exception:
@@ -359,7 +465,7 @@ def infer_series(name: str, s: pd.Series) -> tuple[pd.Series, str]:
         full = _clean_numeric_series(txt.fillna(""))
         full = full.where(txt.notna(), np.nan)
         nn = full.dropna()
-        if len(nn) and bool((nn % 1 == 0).all()) and float(nn.abs().max()) < 2 ** 53:
+        if len(nn) and bool((nn % 1 == 0).all()) and float(nn.abs().max()) < 2**53:
             return full.astype("Int64"), "integer"
         return full.astype("float64"), "float"
 

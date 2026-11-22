@@ -8,6 +8,7 @@ DataFrames rather than hand-built ones, so the numeric/datetime dtype
 checks in classify_dataframe are exercised against what DuckDB actually
 hands back, not an idealized pandas frame.
 """
+
 import pandas as pd
 import pytest
 
@@ -16,8 +17,10 @@ from agents import artifacts as A
 
 # ── classify_dataframe: map ─────────────────────────────────────────────────
 
+
 def test_classify_dataframe_detects_map_from_lat_lon(reference_data):
     import db.duckdb_store as store
+
     df = store.query("SELECT house_id, city, lat, lon FROM houses ORDER BY house_id")
     artifact = A.classify_dataframe(df, request="show houses on a map")
     assert artifact["type"] == "map"
@@ -31,18 +34,22 @@ def test_classify_dataframe_detects_map_from_lat_lon(reference_data):
 
 
 def test_classify_dataframe_map_ignores_rows_with_missing_coordinates():
-    df = pd.DataFrame({
-        "city": ["A", "B", "C"],
-        "lat": [40.1, None, 40.3],
-        "lon": [-80.1, -80.2, None],
-    })
+    df = pd.DataFrame(
+        {
+            "city": ["A", "B", "C"],
+            "lat": [40.1, None, 40.3],
+            "lon": [-80.1, -80.2, None],
+        }
+    )
     artifact = A.classify_dataframe(df, request="map it")
     assert artifact["type"] == "map"
     assert len(artifact["points"]) == 1  # only the first row has both coordinates
 
 
 def test_classify_dataframe_map_hint_falls_back_when_no_coordinates():
-    df = pd.DataFrame({"city": ["Pittsburgh", "Philadelphia", "Cleveland"], "avg_price": [250000.0, 410000.0, 180000.0]})
+    df = pd.DataFrame(
+        {"city": ["Pittsburgh", "Philadelphia", "Cleveland"], "avg_price": [250000.0, 410000.0, 180000.0]}
+    )
     artifact = A.classify_dataframe(df, request="chart it", presentation="map")
     # No lat/lon columns exist anywhere in the result -- a "map" hint must
     # never be forced into existence; it degrades to whatever the shape
@@ -53,8 +60,10 @@ def test_classify_dataframe_map_hint_falls_back_when_no_coordinates():
 
 # ── classify_dataframe: chart ────────────────────────────────────────────────
 
+
 def test_classify_dataframe_detects_chart_from_one_dimension_one_measure(reference_data):
     import db.duckdb_store as store
+
     df = store.query("SELECT city, AVG(price) AS avg_price FROM houses GROUP BY city ORDER BY city")
     artifact = A.classify_dataframe(df, request="average price by city")
     assert artifact["type"] == "chart"
@@ -68,14 +77,21 @@ def test_classify_dataframe_year_like_integer_column_is_a_dimension_not_a_measur
     # "year" is numeric-dtype but is something you plot rows *by*, not a
     # measure to sum/average -- without this, {city, year, avg_price}
     # would look like 2 measures + 0 dimensions and never chart at all.
-    df = pd.DataFrame({
-        "city": ["Pittsburgh", "Pittsburgh", "Philadelphia", "Philadelphia"],
-        "year": [2023, 2024, 2023, 2024],
-        "avg_price": [240000, 250000, 400000, 410000],
-    })
+    df = pd.DataFrame(
+        {
+            "city": ["Pittsburgh", "Pittsburgh", "Philadelphia", "Philadelphia"],
+            "year": [2023, 2024, 2023, 2024],
+            "avg_price": [240000, 250000, 400000, 410000],
+        }
+    )
     artifact = A.classify_dataframe(df, request="chart price by city and year", presentation="chart")
     assert artifact["type"] == "chart"
-    assert artifact["categories"] == ["Pittsburgh / 2023", "Pittsburgh / 2024", "Philadelphia / 2023", "Philadelphia / 2024"]
+    assert artifact["categories"] == [
+        "Pittsburgh / 2023",
+        "Pittsburgh / 2024",
+        "Philadelphia / 2023",
+        "Philadelphia / 2024",
+    ]
 
 
 def test_classify_dataframe_line_chart_for_temporal_dimension_sorts_ascending():
@@ -96,8 +112,10 @@ def test_classify_dataframe_chart_handles_nan_and_inf_as_null_points():
 
 # ── classify_dataframe: table (fallback) ────────────────────────────────────
 
+
 def test_classify_dataframe_falls_back_to_table_for_wide_shape(reference_data):
     import db.duckdb_store as store
+
     df = store.query("SELECT house_id, address, city, price FROM houses ORDER BY house_id LIMIT 3")
     artifact = A.classify_dataframe(df, request="list houses")
     assert artifact["type"] == "table"
@@ -118,6 +136,7 @@ def test_classify_dataframe_table_marks_truncation(monkeypatch):
 
 
 # ── classify_dataframe: skip / hint edge cases ───────────────────────────────
+
 
 def test_classify_dataframe_returns_none_for_single_row():
     df = pd.DataFrame({"n": [6]})
@@ -156,6 +175,7 @@ def test_classify_dataframe_never_raises_on_bad_input():
 
 # ── artifact bus ─────────────────────────────────────────────────────────────
 
+
 def test_reset_emit_collect_roundtrip():
     A.reset_artifacts()
     A.emit_artifact({"type": "table", "rows": []})
@@ -174,19 +194,24 @@ def test_emit_artifact_ignores_falsy_values():
 
 # ── wiring: query_database emits through the same path House Chat uses ─────
 
+
 def test_query_database_emits_chart_artifact_for_qualifying_result(reference_data, monkeypatch):
     import agents.tools as tools
 
-    monkeypatch.setattr(tools, "generate_sql", lambda *a, **kw: "SELECT city, AVG(price) AS avg_price FROM houses GROUP BY city")
+    monkeypatch.setattr(
+        tools, "generate_sql", lambda *a, **kw: "SELECT city, AVG(price) AS avg_price FROM houses GROUP BY city"
+    )
     monkeypatch.setattr(tools, "_validate_sql_against_plan", lambda sql, plan: None)
 
     A.reset_artifacts()
-    result = tools.query_database.invoke({
-        # The semantic catalog intentionally recognizes "list price" (not the
-        # unqualified phrase "price") for current house listings.
-        "request": "average list price by city",
-        "presentation": "chart",
-    })
+    result = tools.query_database.invoke(
+        {
+            # The semantic catalog intentionally recognizes "list price" (not the
+            # unqualified phrase "price") for current house listings.
+            "request": "average list price by city",
+            "presentation": "chart",
+        }
+    )
     assert "avg_price" in result.lower() or "AVG" in result
     produced = A.collect_artifacts()
     assert len(produced) == 1
@@ -207,6 +232,7 @@ def test_query_database_defaults_to_auto_presentation(reference_data, monkeypatc
 
 
 # ── wiring: find_bike_route normalizes into the same generic envelope ──────
+
 
 def test_find_bike_route_emits_bike_route_map_artifact(monkeypatch):
     import agents.tools as tools
@@ -249,7 +275,11 @@ def test_find_bike_route_emits_crime_analysis_map_when_present(monkeypatch):
 
     analysis_payload = {"filtered_bike_network": {"type": "FeatureCollection", "features": []}, "start": {}, "end": {}}
     fake_result = {
-        "route": {"shape": [[40.44, -80.0], [40.45, -80.01]], "bbox": {}, "used_infrastructure": {"type": "FeatureCollection", "features": []}},
+        "route": {
+            "shape": [[40.44, -80.0], [40.45, -80.01]],
+            "bbox": {},
+            "used_infrastructure": {"type": "FeatureCollection", "features": []},
+        },
         "summary": {"length": 1.0, "time": 500},
         "instructions": [],
         "facilities": {"facility_segments": []},
@@ -268,9 +298,14 @@ def test_find_bike_route_emits_crime_analysis_map_when_present(monkeypatch):
     monkeypatch.setattr(tools.bike_routing, "route_bike", fake_route_bike)
 
     A.reset_artifacts()
-    tools.find_bike_route.invoke({
-        "start": "A", "end": "B", "city": "Pittsburgh, PA", "avoid_crime_dense_areas": True,
-    })
+    tools.find_bike_route.invoke(
+        {
+            "start": "A",
+            "end": "B",
+            "city": "Pittsburgh, PA",
+            "avoid_crime_dense_areas": True,
+        }
+    )
     produced = A.collect_artifacts()
     assert len(produced) == 2
     assert produced[0]["type"] == "map" and produced[0]["map_kind"] == "bike_crime_analysis"

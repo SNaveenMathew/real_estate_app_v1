@@ -15,6 +15,7 @@ effect), computed house -> work. Transit is schedule-based (weekday morning) whe
 Threading: the application shares one DuckDB connection on the event-loop thread. Everything here that
 touches DuckDB runs on that thread; only pure-HTTP work (routing, geocoding) runs in worker threads.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -122,8 +123,13 @@ def _nominatim_lookup(client: httpx.Client, text: str) -> Place | None:
         params["email"] = _cfg("nominatim_email")
     try:
         # Nominatim's usage policy: identify the application, at most 1 request/second. One lookup per user action.
-        r = client.get(f"{base}/search", params=params,
-                       headers={"User-Agent": str(_cfg("nominatim_user_agent", "RealEstateIntelligence/1.0 (local personal app)"))})
+        r = client.get(
+            f"{base}/search",
+            params=params,
+            headers={
+                "User-Agent": str(_cfg("nominatim_user_agent", "RealEstateIntelligence/1.0 (local personal app)"))
+            },
+        )
         rows = r.json()
         if not rows:
             return None
@@ -147,13 +153,16 @@ def geocode_work_address(text: str, http: httpx.Client | None = None) -> Place:
         if http is None:
             client.close()
     if not place:
-        raise RoutingError(f"Could not find \"{text}\". Add the city and state, or enter coordinates like 40.4406, -79.9959.")
+        raise RoutingError(
+            f'Could not find "{text}". Add the city and state, or enter coordinates like 40.4406, -79.9959.'
+        )
     return place
 
 
 # ---------------------------------------------------------------------------
 # Routing clients (OSRM for drive/bike/walk, OpenTripPlanner for transit)
 # ---------------------------------------------------------------------------
+
 
 class _Http:
     """Polite HTTP: a minimum interval between requests, bounded retries with backoff."""
@@ -186,7 +195,7 @@ class _Http:
                     continue
                 r.raise_for_status()
                 return r.json()
-            except (httpx.TransportError, ValueError) as exc:     # timeouts, connection errors, bad JSON
+            except (httpx.TransportError, ValueError) as exc:  # timeouts, connection errors, bad JSON
                 last = exc
                 if attempt < retries:
                     time.sleep(1.5 * (attempt + 1))
@@ -205,19 +214,28 @@ class _Http:
 class OsrmClient:
     """OSRM (Project-OSRM/osrm-backend). One profile per server; the profile name in the path is a placeholder."""
 
-    def __init__(self, base_url: str, *, timeout: float = 25.0, min_interval: float = 1.0, table_max: int = 90,
-                 http: httpx.Client | None = None):
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        timeout: float = 25.0,
+        min_interval: float = 1.0,
+        table_max: int = 90,
+        http: httpx.Client | None = None,
+    ):
         self.base = base_url.rstrip("/")
         self.table_max = max(1, int(table_max))
-        self.last_error = ""            # why the most recent request failed (surfaced to the user as a warning)
+        self.last_error = ""  # why the most recent request failed (surfaced to the user as a warning)
         self._h = _Http(timeout, min_interval, http)
 
     @staticmethod
     def _coords(places: list[Place]) -> str:
-        return ";".join(f"{p.lon:.6f},{p.lat:.6f}" for p in places)            # OSRM wants lon,lat
+        return ";".join(f"{p.lon:.6f},{p.lat:.6f}" for p in places)  # OSRM wants lon,lat
 
     def route(self, a: Place, b: Place) -> Leg | None:
-        data = self._h.request("GET", f"{self.base}/route/v1/driving/{self._coords([a, b])}", params={"overview": "false"})
+        data = self._h.request(
+            "GET", f"{self.base}/route/v1/driving/{self._coords([a, b])}", params={"overview": "false"}
+        )
         if data.get("code") == "Ok" and data.get("routes"):
             r = data["routes"][0]
             return Leg(float(r["duration"]), float(r["distance"]) if r.get("distance") is not None else None)
@@ -235,12 +253,18 @@ class OsrmClient:
 
     def _table(self, sources: list[Place], dest: Place) -> list[Leg | None]:
         n = len(sources)
-        params = {"sources": ";".join(str(i) for i in range(n)), "destinations": str(n), "annotations": "duration,distance"}
+        params = {
+            "sources": ";".join(str(i) for i in range(n)),
+            "destinations": str(n),
+            "annotations": "duration,distance",
+        }
         try:
-            data = self._h.request("GET", f"{self.base}/table/v1/driving/{self._coords(sources + [dest])}", params=params)
+            data = self._h.request(
+                "GET", f"{self.base}/table/v1/driving/{self._coords(sources + [dest])}", params=params
+            )
         except RoutingError as exc:
             self.last_error = str(exc)
-            return self._route_each(sources, dest)         # some servers disable /table: fall back to /route
+            return self._route_each(sources, dest)  # some servers disable /table: fall back to /route
         if data.get("code") != "Ok":
             return self._route_each(sources, dest)
         durations, distances = data.get("durations") or [], data.get("distances") or []
@@ -255,7 +279,7 @@ class OsrmClient:
         """Travel time/distance from every source to ``dest``, in as few requests as the server allows."""
         out: list[Leg | None] = []
         for i in range(0, len(sources), self.table_max):
-            out += self._table(sources[i:i + self.table_max], dest)
+            out += self._table(sources[i : i + self.table_max], dest)
         return out
 
     def close(self) -> None:
@@ -276,8 +300,16 @@ class OtpClient:
     treat transit as experimental until you have seen it work against your own instance.
     """
 
-    def __init__(self, base_url: str, *, api: str = "graphql", depart_time: str = "08:00", timeout: float = 60.0,
-                 workers: int = 4, http: httpx.Client | None = None):
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        api: str = "graphql",
+        depart_time: str = "08:00",
+        timeout: float = 60.0,
+        workers: int = 4,
+        http: httpx.Client | None = None,
+    ):
         self.base, self.api, self.depart, self.workers = base_url.rstrip("/"), api.lower(), depart_time, max(1, workers)
         self.last_error = ""
         self._h = _Http(timeout, 0.0, http)
@@ -286,17 +318,25 @@ class OtpClient:
         date = date or next_weekday()
         if self.api == "rest":
             hh, mm = (int(x) for x in self.depart.split(":"))
-            params = {"fromPlace": f"{a.lat},{a.lon}", "toPlace": f"{b.lat},{b.lon}", "mode": "TRANSIT,WALK",
-                      "date": date.strftime("%m-%d-%Y"), "time": f"{hh % 12 or 12}:{mm:02d}{'am' if hh < 12 else 'pm'}",
-                      "arriveBy": "false", "numItineraries": "1"}
+            params = {
+                "fromPlace": f"{a.lat},{a.lon}",
+                "toPlace": f"{b.lat},{b.lon}",
+                "mode": "TRANSIT,WALK",
+                "date": date.strftime("%m-%d-%Y"),
+                "time": f"{hh % 12 or 12}:{mm:02d}{'am' if hh < 12 else 'pm'}",
+                "arriveBy": "false",
+                "numItineraries": "1",
+            }
             data = self._h.request("GET", f"{self.base}/otp/routers/default/plan", params=params)
             its = ((data.get("plan") or {}).get("itineraries")) or []
             if not its:
                 return None
             return float(its[0]["duration"]), int(its[0].get("transfers", 0) or 0)
-        query = ("{ plan(from: {lat: %.6f, lon: %.6f}, to: {lat: %.6f, lon: %.6f}, date: \"%s\", time: \"%s\", "
-                 "transportModes: [{mode: TRANSIT}, {mode: WALK}], numItineraries: 1) "
-                 "{ itineraries { duration legs { mode } } } }") % (a.lat, a.lon, b.lat, b.lon, date.isoformat(), self.depart)
+        query = (
+            '{ plan(from: {lat: %.6f, lon: %.6f}, to: {lat: %.6f, lon: %.6f}, date: "%s", time: "%s", '
+            "transportModes: [{mode: TRANSIT}, {mode: WALK}], numItineraries: 1) "
+            "{ itineraries { duration legs { mode } } } }"
+        ) % (a.lat, a.lon, b.lat, b.lon, date.isoformat(), self.depart)
         data = self._h.request("POST", f"{self.base}/otp/gtfs/v1", json={"query": query})
         its = (((data.get("data") or {}).get("plan") or {}).get("itineraries")) or []
         if not its:
@@ -312,6 +352,7 @@ class OtpClient:
             except (RoutingError, KeyError, ValueError, TypeError) as exc:
                 self.last_error = _short(exc)
                 return None
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.workers) as pool:
             return list(pool.map(one, sources))
 
@@ -323,12 +364,16 @@ def enabled_modes() -> list[str]:
     want = [m.strip().lower() for m in str(_cfg("commute_modes", "drive,bike,walk")).split(",") if m.strip()]
     modes = [m for m in MODE_ORDER if m in want and m != "transit"]
     if str(_cfg("otp_base_url", "")).strip():
-        modes.append("transit")           # configuring OpenTripPlanner is what turns transit on
+        modes.append("transit")  # configuring OpenTripPlanner is what turns transit on
     return modes
 
 
 def _mode_urls() -> dict[str, str]:
-    return {"drive": str(_cfg("osrm_drive_url", "")), "bike": str(_cfg("osrm_bike_url", "")), "walk": str(_cfg("osrm_foot_url", ""))}
+    return {
+        "drive": str(_cfg("osrm_drive_url", "")),
+        "bike": str(_cfg("osrm_bike_url", "")),
+        "walk": str(_cfg("osrm_foot_url", "")),
+    }
 
 
 def build_clients(modes: list[str]) -> dict[str, Any]:
@@ -340,8 +385,11 @@ def build_clients(modes: list[str]) -> dict[str, Any]:
         if mode in modes and url.strip():
             clients[mode] = OsrmClient(url, timeout=timeout, min_interval=gap, table_max=table_max)
     if "transit" in modes and str(_cfg("otp_base_url", "")).strip():
-        clients["transit"] = OtpClient(str(_cfg("otp_base_url")), api=str(_cfg("otp_api", "graphql")),
-                                       depart_time=str(_cfg("commute_depart_time", "08:00")))
+        clients["transit"] = OtpClient(
+            str(_cfg("otp_base_url")),
+            api=str(_cfg("otp_api", "graphql")),
+            depart_time=str(_cfg("commute_depart_time", "08:00")),
+        )
     return clients
 
 
@@ -361,6 +409,7 @@ def is_public_url(url: str) -> bool:
 # Work location + freshness
 # ---------------------------------------------------------------------------
 
+
 def get_work() -> Place | None:
     v = store.get_setting(WORK_SETTING)
     if not v:
@@ -379,8 +428,14 @@ def clear_work() -> None:
 
 def work_key(place: Place, modes: list[str]) -> str:
     """Identifies the inputs the stored numbers depend on; a change makes every stored row stale."""
-    parts = [f"{place.lat:.5f}", f"{place.lon:.5f}", ",".join(modes), *(_mode_urls()[m] for m in ("drive", "bike", "walk")),
-             str(_cfg("otp_base_url", "")), str(_cfg("commute_drive_factor", 1.0))]
+    parts = [
+        f"{place.lat:.5f}",
+        f"{place.lon:.5f}",
+        ",".join(modes),
+        *(_mode_urls()[m] for m in ("drive", "bike", "walk")),
+        str(_cfg("otp_base_url", "")),
+        str(_cfg("commute_drive_factor", 1.0)),
+    ]
     return hashlib.sha1("|".join(parts).encode()).hexdigest()[:12]
 
 
@@ -388,17 +443,39 @@ def work_key(place: Place, modes: list[str]) -> str:
 # Computing (network in worker threads, DuckDB on the loop thread)
 # ---------------------------------------------------------------------------
 
-_COLS = ["house_id", "work_key", "work_label", "drive_min", "drive_miles", "bike_min", "bike_miles", "walk_min",
-         "walk_miles", "transit_min", "transit_transfers", "straight_line_miles", "status", "source"]
+_COLS = [
+    "house_id",
+    "work_key",
+    "work_label",
+    "drive_min",
+    "drive_miles",
+    "bike_min",
+    "bike_miles",
+    "walk_min",
+    "walk_miles",
+    "transit_min",
+    "transit_transfers",
+    "straight_line_miles",
+    "status",
+    "source",
+]
 
 
-def compute_chunk(chunk: list[tuple[str, float, float]], dest: Place, modes: list[str], clients: dict[str, Any],
-                  key: str) -> tuple[list[dict], list[str]]:
+def compute_chunk(
+    chunk: list[tuple[str, float, float]], dest: Place, modes: list[str], clients: dict[str, Any], key: str
+) -> tuple[list[dict], list[str]]:
     """Commute rows for one chunk of houses. Pure HTTP; a failing mode never sinks the others."""
     factor = float(_cfg("commute_drive_factor", 1.0))
-    rows = {hid: {c: None for c in _COLS} | {"house_id": hid, "work_key": key, "work_label": dest.label,
-                                             "straight_line_miles": round(haversine_miles(lat, lon, dest.lat, dest.lon), 2)}
-            for hid, lat, lon in chunk}
+    rows = {
+        hid: {c: None for c in _COLS}
+        | {
+            "house_id": hid,
+            "work_key": key,
+            "work_label": dest.label,
+            "straight_line_miles": round(haversine_miles(lat, lon, dest.lat, dest.lon), 2),
+        }
+        for hid, lat, lon in chunk
+    }
     expected: dict[str, set[str]] = {hid: set() for hid in rows}
     got: dict[str, set[str]] = {hid: set() for hid in rows}
     warnings: list[str] = []
@@ -406,7 +483,11 @@ def compute_chunk(chunk: list[tuple[str, float, float]], dest: Place, modes: lis
         client = clients.get(mode)
         if client is None:
             continue
-        eligible = [(hid, Place(lat, lon)) for hid, lat, lon in chunk if rows[hid]["straight_line_miles"] <= MODE_MAX_MILES[mode]]
+        eligible = [
+            (hid, Place(lat, lon))
+            for hid, lat, lon in chunk
+            if rows[hid]["straight_line_miles"] <= MODE_MAX_MILES[mode]
+        ]
         if not eligible:
             continue
         for hid, _ in eligible:
@@ -431,8 +512,15 @@ def compute_chunk(chunk: list[tuple[str, float, float]], dest: Place, modes: lis
                 rows[hid][f"{mode}_min"] = round(seconds / 60.0, 1)
                 rows[hid][f"{mode}_miles"] = round(res.meters / METERS_PER_MILE, 2) if res.meters is not None else None
     for hid, row in rows.items():
-        row["status"] = ("out_of_range" if not expected[hid] else "ok" if got[hid] >= expected[hid]
-                         else "partial" if got[hid] else "failed")
+        row["status"] = (
+            "out_of_range"
+            if not expected[hid]
+            else "ok"
+            if got[hid] >= expected[hid]
+            else "partial"
+            if got[hid]
+            else "failed"
+        )
         row["source"] = "+".join(sorted(got[hid], key=MODE_ORDER.index)) or None
     return list(rows.values()), warnings
 
@@ -443,7 +531,8 @@ def _write_rows(rows: list[dict]) -> None:
     conn = store.get_conn()
     conn.executemany(
         f"INSERT OR REPLACE INTO house_commute ({', '.join(_COLS)}) VALUES ({', '.join('?' for _ in _COLS)})",
-        [[r[c] for c in _COLS] for r in rows])
+        [[r[c] for c in _COLS] for r in rows],
+    )
 
 
 def _houses_to_compute(scope: str, key: str) -> list[tuple[str, float, float]]:
@@ -458,7 +547,7 @@ def _houses_to_compute(scope: str, key: str) -> list[tuple[str, float, float]]:
 
 @dataclass
 class Job:
-    state: str = "idle"            # idle | running | done | error
+    state: str = "idle"  # idle | running | done | error
     scope: str = ""
     total: int = 0
     done: int = 0
@@ -469,9 +558,16 @@ class Job:
     warnings: list[str] = field(default_factory=list)
 
     def snapshot(self) -> dict:
-        return {"state": self.state, "scope": self.scope, "total": self.total, "done": self.done, "failed": self.failed,
-                "message": self.message, "warnings": list(self.warnings),
-                "elapsed_s": round((self.finished_at or time.time()) - self.started_at, 1) if self.started_at else 0.0}
+        return {
+            "state": self.state,
+            "scope": self.scope,
+            "total": self.total,
+            "done": self.done,
+            "failed": self.failed,
+            "message": self.message,
+            "warnings": list(self.warnings),
+            "elapsed_s": round((self.finished_at or time.time()) - self.started_at, 1) if self.started_at else 0.0,
+        }
 
 
 _JOB = Job()
@@ -519,7 +615,7 @@ async def refresh_now(scope: str = "missing", *, _claimed: bool = False) -> dict
         size = max(1, int(_cfg("osrm_table_max", 90)))
         try:
             for i in range(0, len(houses), size):
-                chunk = houses[i:i + size]
+                chunk = houses[i : i + size]
                 rows, warns = await asyncio.to_thread(compute_chunk, chunk, place, modes, clients, key)
                 _write_rows(rows)
                 job.done += len(chunk)
@@ -531,10 +627,10 @@ async def refresh_now(scope: str = "missing", *, _claimed: bool = False) -> dict
             for c in clients.values():
                 c.close()
         job.state, job.finished_at = "done", time.time()
-        job.message = (f"Computed {job.done} house(s)" if job.done else "Nothing to compute: every house is up to date.")
+        job.message = f"Computed {job.done} house(s)" if job.done else "Nothing to compute: every house is up to date."
         if job.failed:
             job.message += f"; {job.failed} could not be fully estimated"
-    except Exception as exc:                       # never leave the job stuck in "running"
+    except Exception as exc:  # never leave the job stuck in "running"
         job.state, job.finished_at, job.message = "error", time.time(), _short(exc)
     finally:
         _RUNNING = False
@@ -556,21 +652,39 @@ def start_refresh(scope: str = "missing") -> dict:
 # Reading (API, House Chat)
 # ---------------------------------------------------------------------------
 
+
 def status() -> dict:
     place, modes = get_work(), enabled_modes()
     key = work_key(place, modes) if place else None
     conn = store.get_conn()
-    houses, with_xy = conn.execute("SELECT COUNT(*), COUNT(*) FILTER (WHERE lat IS NOT NULL AND lon IS NOT NULL) FROM houses").fetchone()
+    houses, with_xy = conn.execute(
+        "SELECT COUNT(*), COUNT(*) FILTER (WHERE lat IS NOT NULL AND lon IS NOT NULL) FROM houses"
+    ).fetchone()
     fresh = conn.execute("SELECT COUNT(*) FROM house_commute WHERE work_key = ?", [key]).fetchone()[0] if key else 0
     urls = _mode_urls()
-    providers = {m: {"url": urls[m], "public": is_public_url(urls[m])} for m in ("drive", "bike", "walk") if m in modes and urls[m]}
+    providers = {
+        m: {"url": urls[m], "public": is_public_url(urls[m])}
+        for m in ("drive", "bike", "walk")
+        if m in modes and urls[m]
+    }
     if "transit" in modes:
         providers["transit"] = {"url": str(_cfg("otp_base_url")), "public": is_public_url(str(_cfg("otp_base_url")))}
-    return {"configured": place is not None, "work": place.as_dict() if place else None, "env_address": str(_cfg("work_address", "")),
-            "modes": modes, "transit_configured": "transit" in modes, "providers": providers,
-            "drive_factor": float(_cfg("commute_drive_factor", 1.0)),
-            "counts": {"houses": houses, "with_coordinates": with_xy, "fresh": fresh, "to_compute": max(0, with_xy - fresh) if place else 0},
-            "job": job_snapshot()}
+    return {
+        "configured": place is not None,
+        "work": place.as_dict() if place else None,
+        "env_address": str(_cfg("work_address", "")),
+        "modes": modes,
+        "transit_configured": "transit" in modes,
+        "providers": providers,
+        "drive_factor": float(_cfg("commute_drive_factor", 1.0)),
+        "counts": {
+            "houses": houses,
+            "with_coordinates": with_xy,
+            "fresh": fresh,
+            "to_compute": max(0, with_xy - fresh) if place else 0,
+        },
+        "job": job_snapshot(),
+    }
 
 
 def _fetch_dicts(sql: str, params: list | None = None) -> list[dict]:
@@ -608,7 +722,10 @@ def summary() -> dict:
     if not place:
         return {"work": None, "rows": {}}
     key = work_key(place, enabled_modes())
-    rows = _fetch_dicts("SELECT house_id, drive_min, drive_miles, bike_min, walk_min, transit_min FROM house_commute WHERE work_key = ?", [key])
+    rows = _fetch_dicts(
+        "SELECT house_id, drive_min, drive_miles, bike_min, walk_min, transit_min FROM house_commute WHERE work_key = ?",
+        [key],
+    )
     return {"work": place.as_dict(), "rows": {r["house_id"]: {k: r[k] for k in r if k != "house_id"} for r in rows}}
 
 
@@ -619,8 +736,10 @@ def describe_for_chat(house_id: str) -> str:
         return "No work location is set, so there is no commute estimate. The user can set one in the Commute tab of the sidebar."
     row = commute_for_house(house_id)
     if not row:
-        return ("A work location is set, but the commute for this house has not been computed yet. "
-                "The user can open the Commute tab and choose Compute.")
+        return (
+            "A work location is set, but the commute for this house has not been computed yet. "
+            "The user can open the Commute tab and choose Compute."
+        )
     est = {}
     for mode in MODE_ORDER:
         mins = row.get(f"{mode}_min")
@@ -632,12 +751,18 @@ def describe_for_chat(house_id: str) -> str:
                 item["transfers"] = int(row["transit_transfers"])
             est[mode] = item
     house = store.get_house(house_id) or {}
-    return json.dumps({
-        "work_location": place.label or f"{place.lat:.4f}, {place.lon:.4f}",
-        "estimates": est or "none of the travel modes could be estimated for this house",
-        "straight_line_miles": row.get("straight_line_miles"),
-        "basis": ("Drive/bike/walk are free-flow estimates from OpenStreetMap routing (OSRM) with no traffic or signal timing; "
-                  "transit, when present, is schedule-based for a weekday morning."),
-        "up_to_date": row["fresh"], "computed_at": row["computed_at"],
-        "redfin_scores": {k: house.get(k) for k in ("walk_score", "bike_score", "transit_score")},
-    }, indent=2)
+    return json.dumps(
+        {
+            "work_location": place.label or f"{place.lat:.4f}, {place.lon:.4f}",
+            "estimates": est or "none of the travel modes could be estimated for this house",
+            "straight_line_miles": row.get("straight_line_miles"),
+            "basis": (
+                "Drive/bike/walk are free-flow estimates from OpenStreetMap routing (OSRM) with no traffic or signal timing; "
+                "transit, when present, is schedule-based for a weekday morning."
+            ),
+            "up_to_date": row["fresh"],
+            "computed_at": row["computed_at"],
+            "redfin_scores": {k: house.get(k) for k in ("walk_score", "bike_score", "transit_score")},
+        },
+        indent=2,
+    )

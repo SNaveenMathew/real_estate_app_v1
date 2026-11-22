@@ -1,4 +1,5 @@
 """agents/turn_runner.py and the chat endpoints: a turn must not freeze the server, and must be bounded and cancellable."""
+
 from __future__ import annotations
 
 import asyncio
@@ -45,11 +46,13 @@ def test_a_slow_turn_does_not_block_the_event_loop():
         lag = await _max_loop_lag(0.5)
         await turn
         return lag
-    assert run(main()) < 0.1                       # the loop kept running while the "agent" slept for 0.6 s
+
+    assert run(main()) < 0.1  # the loop kept running while the "agent" slept for 0.6 s
 
 
 def test_teeth_the_old_blocking_pattern_froze_the_loop():
     """What the handlers used to do: call the blocking agent directly inside ``async def``."""
+
     async def main():
         async def old_handler():
             time.sleep(0.6)
@@ -58,11 +61,13 @@ def test_teeth_the_old_blocking_pattern_froze_the_loop():
         lag = await _max_loop_lag(0.5)
         await turn
         return lag
+
     assert run(main()) >= 0.5
 
 
 def test_the_turn_runs_on_a_worker_thread_with_the_callers_context():
     from agents import query_scope as qs
+
     seen = {}
 
     def work():
@@ -84,6 +89,7 @@ def test_results_and_exceptions_pass_through_unchanged():
         assert await tr.run_turn(lambda a, b=0: a + b, 2, b=3) == 5
         with pytest.raises(KeyError):
             await tr.run_turn(lambda: {}["nope"])
+
     run(main())
 
 
@@ -105,7 +111,7 @@ def test_concurrency_is_bounded_and_extra_turns_wait_their_turn(monkeypatch):
         return time.perf_counter() - t0
 
     elapsed = run(main())
-    assert peak[0] == 2 and elapsed >= 0.4                    # 6 turns, 2 at a time, 0.15 s each => 3 rounds
+    assert peak[0] == 2 and elapsed >= 0.4  # 6 turns, 2 at a time, 0.15 s each => 3 rounds
 
 
 def test_a_turn_that_cannot_get_a_slot_is_told_the_assistant_is_busy():
@@ -113,8 +119,9 @@ def test_a_turn_that_cannot_get_a_slot_is_told_the_assistant_is_busy():
         hold = [asyncio.create_task(tr.run_turn(time.sleep, 0.8)) for _ in range(2)]
         await asyncio.sleep(0.05)
         with pytest.raises(tr.Busy):
-            await tr.run_turn(lambda: None)                  # queue timeout is 0.3 s
+            await tr.run_turn(lambda: None)  # queue timeout is 0.3 s
         await asyncio.gather(*hold)
+
     run(main())
 
 
@@ -125,7 +132,7 @@ def test_the_deadline_returns_promptly_and_stops_a_cooperative_turn(monkeypatch)
     def cooperative():
         try:
             while True:
-                lr.check_cancelled()                        # what every model call does first
+                lr.check_cancelled()  # what every model call does first
                 time.sleep(0.02)
         except lr.TurnCancelled:
             stopped.set()
@@ -138,7 +145,7 @@ def test_the_deadline_returns_promptly_and_stops_a_cooperative_turn(monkeypatch)
         return time.perf_counter() - t0
 
     assert run(main()) < 1.0
-    assert stopped.wait(2)                                   # the worker really stopped, it was not just abandoned
+    assert stopped.wait(2)  # the worker really stopped, it was not just abandoned
 
 
 def test_the_slot_is_held_until_the_thread_really_ends(monkeypatch):
@@ -150,12 +157,13 @@ def test_the_slot_is_held_until_the_thread_really_ends(monkeypatch):
 
     async def main():
         with pytest.raises(tr.DeadlineExceeded):
-            await tr.run_turn(time.sleep, 0.8)               # ignores cancellation (a hung HTTP call)
+            await tr.run_turn(time.sleep, 0.8)  # ignores cancellation (a hung HTTP call)
         monkeypatch.setattr(settings, "agent_turn_deadline_s", 5.0)
-        with pytest.raises(tr.Busy):                         # the zombie still owns the only slot
+        with pytest.raises(tr.Busy):  # the zombie still owns the only slot
             await tr.run_turn(lambda: "x")
-        await asyncio.sleep(0.8)                             # ... until it finishes
+        await asyncio.sleep(0.8)  # ... until it finishes
         assert await tr.run_turn(lambda: "x") == "x"
+
     run(main())
 
 
@@ -177,6 +185,7 @@ def test_a_client_disconnect_cancels_the_turn():
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
     run(main())
     assert seen.wait(2)
 
@@ -188,15 +197,22 @@ def test_status_counts_running_and_waiting_turns():
         snapshot = tr.status()
         await asyncio.gather(*hold, return_exceptions=True)
         return snapshot
+
     snap = run(main())
     assert snap["running"] == 2 and snap["waiting"] == 1 and snap["max_concurrent"] == 2
     assert tr.status()["running"] == 0 and tr.status()["waiting"] == 0
 
 
-@pytest.mark.parametrize("exc,status,fragment", [
-    (tr.Busy("x"), 503, "busy"), (tr.DeadlineExceeded("x"), 504, "too long"), (lr.TurnCancelled("x"), 504, "too long"),
-    (lr.ModelUnavailable("x"), 503, "language model"), (ValueError("boom"), 500, "Agent error: boom"),
-])
+@pytest.mark.parametrize(
+    "exc,status,fragment",
+    [
+        (tr.Busy("x"), 503, "busy"),
+        (tr.DeadlineExceeded("x"), 504, "too long"),
+        (lr.TurnCancelled("x"), 504, "too long"),
+        (lr.ModelUnavailable("x"), 503, "language model"),
+        (ValueError("boom"), 500, "Agent error: boom"),
+    ],
+)
 def test_failures_map_to_meaningful_http_responses(exc, status, fragment):
     code, message, headers = tr.describe_failure(exc)
     assert code == status and fragment in message
@@ -211,6 +227,7 @@ httpx = pytest.importorskip("httpx")
 def app_module(monkeypatch):
     """The real app module, imported with tracing OFF (a test must not start a network exporter), state restored after."""
     import observability
+
     monkeypatch.setattr(settings, "phoenix_enabled", False)
     saved = observability._tracer
     main = pytest.importorskip("main")
@@ -238,8 +255,12 @@ def test_other_endpoints_stay_responsive_while_a_chat_turn_runs(app_module, monk
 
     status, status_ms, reply = run(main())
     assert reply.status_code == 200 and reply.json()["reply"] == "hi"
-    assert status.status_code == 200 and status.json()["turns"]["running"] == 1 and status.json()["model"]["state"] == "closed"
-    assert status_ms < 150                                    # answered while the 0.7 s turn was still running
+    assert (
+        status.status_code == 200
+        and status.json()["turns"]["running"] == 1
+        and status.json()["model"]["state"] == "closed"
+    )
+    assert status_ms < 150  # answered while the 0.7 s turn was still running
 
 
 def test_the_endpoints_translate_failures_into_clear_http_errors(app_module, monkeypatch):
@@ -254,4 +275,8 @@ def test_the_endpoints_translate_failures_into_clear_http_errors(app_module, mon
             return await client.post("/api/chat", json={"message": "hello"})
 
     resp = run(main())
-    assert resp.status_code == 503 and resp.headers["Retry-After"] == "30" and "language model service" in resp.json()["detail"]
+    assert (
+        resp.status_code == 503
+        and resp.headers["Retry-After"] == "30"
+        and "language model service" in resp.json()["detail"]
+    )

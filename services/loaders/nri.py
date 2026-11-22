@@ -3,6 +3,7 @@
 Behaviour is unchanged: the facade in services/data_loader.py re-exports every name here, so
 `from services.data_loader import ...` (and scripts that call it) keep working.
 """
+
 from __future__ import annotations
 
 """
@@ -18,20 +19,35 @@ from config import settings
 import db.duckdb_store as store
 
 
-
-
-__all__ = ['_NRI_HAZARDS', '_RFLD_ALIAS', '_normalise_columns', '_build_nri_out', 'load_nri', '_cache_nri_geometry']
+__all__ = ["_NRI_HAZARDS", "_RFLD_ALIAS", "_normalise_columns", "_build_nri_out", "load_nri", "_cache_nri_geometry"]
 
 # ── NRI ─────────────────────────────────────────────────────────────────────
 
-_NRI_HAZARDS = ["avln", "cfld", "cwav", "drgt", "erqk", "hail", "hwav", "hrcn",
-                "ifld", "istm", "lnds", "ltng", "swnd", "trnd", "tsun", "vlcn",
-                "wfir", "wntw"]
+_NRI_HAZARDS = [
+    "avln",
+    "cfld",
+    "cwav",
+    "drgt",
+    "erqk",
+    "hail",
+    "hwav",
+    "hrcn",
+    "ifld",
+    "istm",
+    "lnds",
+    "ltng",
+    "swnd",
+    "trnd",
+    "tsun",
+    "vlcn",
+    "wfir",
+    "wntw",
+]
 # Note: RFLD (Riverine Flooding) was renamed to IFLD (Inland Flooding) in the
 # 2023 NRI release. The database column is stored as rfld_risks for backward
 # compatibility but is populated from IFLD_RISKS in the shapefile.
 # _RFLD_ALIAS maps the old DB column name → the new shapefile column name.
-_RFLD_ALIAS = "ifld"   # shapefile prefix for the inland flood hazard
+_RFLD_ALIAS = "ifld"  # shapefile prefix for the inland flood hazard
 
 # Shapefile DBF column names are capped at 10 characters, so some NRI column
 # names are truncated vs the CSV version. This maps the truncated DBF name to
@@ -70,6 +86,7 @@ def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def _build_nri_out(df: pd.DataFrame) -> pd.DataFrame:
     """Convert a normalised NRI DataFrame (from SHP or CSV) into the DB schema."""
+
     def _col(name: str):
         return df[name] if name in df.columns else None
 
@@ -81,24 +98,26 @@ def _build_nri_out(df: pd.DataFrame) -> pd.DataFrame:
     else:
         raise ValueError("Cannot find TRACTFIPS or GEOID column in NRI data")
 
-    out = pd.DataFrame({
-        "tract_fips":  fips_series,
-        "county_fips": fips_series.str[:5],
-        "state_fips":  fips_series.str[:2],
-        "state_name":  _col("STATEABBRV"),
-        "county_name": _col("COUNTY"),
-        "nri_id":      _col("NRI_ID"),
-        "risk_score":  pd.to_numeric(_col("RISK_SCORE"), errors="coerce"),
-        "risk_ratng":  _col("RISK_RATNG"),
-        "risk_npctl":  pd.to_numeric(_col("RISK_NPCTL"), errors="coerce"),
-        "eal_score":   pd.to_numeric(_col("EAL_SCORE"),  errors="coerce"),
-        "eal_ratng":   _col("EAL_RATNG"),
-        "eal_valt":    pd.to_numeric(_col("EAL_VALT"),   errors="coerce"),
-        "sovi_score":  pd.to_numeric(_col("SOVI_SCORE"), errors="coerce"),
-        "sovi_ratng":  _col("SOVI_RATNG"),
-        "resl_score":  pd.to_numeric(_col("RESL_SCORE"), errors="coerce"),
-        "resl_ratng":  _col("RESL_RATNG"),
-    })
+    out = pd.DataFrame(
+        {
+            "tract_fips": fips_series,
+            "county_fips": fips_series.str[:5],
+            "state_fips": fips_series.str[:2],
+            "state_name": _col("STATEABBRV"),
+            "county_name": _col("COUNTY"),
+            "nri_id": _col("NRI_ID"),
+            "risk_score": pd.to_numeric(_col("RISK_SCORE"), errors="coerce"),
+            "risk_ratng": _col("RISK_RATNG"),
+            "risk_npctl": pd.to_numeric(_col("RISK_NPCTL"), errors="coerce"),
+            "eal_score": pd.to_numeric(_col("EAL_SCORE"), errors="coerce"),
+            "eal_ratng": _col("EAL_RATNG"),
+            "eal_valt": pd.to_numeric(_col("EAL_VALT"), errors="coerce"),
+            "sovi_score": pd.to_numeric(_col("SOVI_SCORE"), errors="coerce"),
+            "sovi_ratng": _col("SOVI_RATNG"),
+            "resl_score": pd.to_numeric(_col("RESL_SCORE"), errors="coerce"),
+            "resl_ratng": _col("RESL_RATNG"),
+        }
+    )
 
     # ── Hazard risk scores — flexible column matching ──────────────────
     # The 2023 NRI shapefile changed several things vs older CSV versions:
@@ -123,24 +142,24 @@ def _build_nri_out(df: pd.DataFrame) -> pd.DataFrame:
     # code order in sync with the DDL if you ever add a hazard there.)
     hazard_col_map = {
         # DB dest        source candidates (priority order)
-        "avln_risks":  ["AVLN_RISKS", "AVLN_RISK"],
-        "cfld_risks":  ["CFLD_RISKS", "CFLD_RISK"],
-        "cwav_risks":  ["CWAV_RISKS", "CWAV_RISK"],
-        "drgt_risks":  ["DRGT_RISKS", "DRGT_RISK"],
-        "erqk_risks":  ["ERQK_RISKS", "ERQK_RISK"],
-        "hail_risks":  ["HAIL_RISKS", "HAIL_RISK"],
-        "hwav_risks":  ["HWAV_RISKS", "HWAV_RISK"],
-        "hrcn_risks":  ["HRCN_RISKS", "HRCN_RISK"],
-        "istm_risks":  ["ISTM_RISKS", "ISTM_RISK"],
-        "lnds_risks":  ["LNDS_RISKS", "LNDS_RISK"],
-        "ltng_risks":  ["LTNG_RISKS", "LTNG_RISK"],
-        "rfld_risks":  ["RFLD_RISKS", "RFLD_RISK",  "IFLD_RISKS", "IFLD_RISK"],  # 2023: RFLD→IFLD
-        "swnd_risks":  ["SWND_RISKS", "SWND_RISK"],
-        "trnd_risks":  ["TRND_RISKS", "TRND_RISK"],
-        "tsun_risks":  ["TSUN_RISKS", "TSUN_RISK"],
-        "vlcn_risks":  ["VLCN_RISKS", "VLCN_RISK"],
-        "wfir_risks":  ["WFIR_RISKS", "WFIR_RISK"],
-        "wntw_risks":  ["WNTW_RISKS", "WNTW_RISK"],
+        "avln_risks": ["AVLN_RISKS", "AVLN_RISK"],
+        "cfld_risks": ["CFLD_RISKS", "CFLD_RISK"],
+        "cwav_risks": ["CWAV_RISKS", "CWAV_RISK"],
+        "drgt_risks": ["DRGT_RISKS", "DRGT_RISK"],
+        "erqk_risks": ["ERQK_RISKS", "ERQK_RISK"],
+        "hail_risks": ["HAIL_RISKS", "HAIL_RISK"],
+        "hwav_risks": ["HWAV_RISKS", "HWAV_RISK"],
+        "hrcn_risks": ["HRCN_RISKS", "HRCN_RISK"],
+        "istm_risks": ["ISTM_RISKS", "ISTM_RISK"],
+        "lnds_risks": ["LNDS_RISKS", "LNDS_RISK"],
+        "ltng_risks": ["LTNG_RISKS", "LTNG_RISK"],
+        "rfld_risks": ["RFLD_RISKS", "RFLD_RISK", "IFLD_RISKS", "IFLD_RISK"],  # 2023: RFLD→IFLD
+        "swnd_risks": ["SWND_RISKS", "SWND_RISK"],
+        "trnd_risks": ["TRND_RISKS", "TRND_RISK"],
+        "tsun_risks": ["TSUN_RISKS", "TSUN_RISK"],
+        "vlcn_risks": ["VLCN_RISKS", "VLCN_RISK"],
+        "wfir_risks": ["WFIR_RISKS", "WFIR_RISK"],
+        "wntw_risks": ["WNTW_RISKS", "WNTW_RISK"],
     }
 
     matched, missing = [], []
@@ -233,6 +252,7 @@ def _cache_nri_geometry(gdf, tract_fips_series: pd.Series):
     load it quickly on subsequent runs without re-reading the full NRI shapefile.
     """
     import geopandas as gpd
+
     cache_path = settings.nri_shp.parent / "nri_geometry_cache.parquet"
     try:
         slim = gdf[["geometry"]].copy()

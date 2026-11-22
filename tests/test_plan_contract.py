@@ -1,4 +1,5 @@
 """agents/plan_contract.py: bad SQL is caught for the right reason; valid SQL is never falsely rejected."""
+
 from __future__ import annotations
 
 import sys
@@ -22,11 +23,13 @@ def fx(tmp_path_factory):
 
 def plan_for(q):
     from agents.query_planner import build_query_plan
+
     return build_query_plan(q)
 
 
 def codes(sql, plan):
     from agents import plan_contract
+
     return {v.code for v in plan_contract.verify(sql, plan)}
 
 
@@ -38,33 +41,83 @@ GOOD = """SELECT AVG(nri_tracts.risk_score) FROM census_msa
 ENT = "census_msa.name = 'Pittsburgh, PA Metro Area'"
 
 
-@pytest.mark.parametrize("name,sql,expected", [
-    ("cross join, no conditions", "SELECT AVG(nri_tracts.risk_score) FROM census_msa CROSS JOIN cbsa_counties CROSS JOIN nri_tracts "
-                                  f"WHERE {ENT}", {"cross_join"}),
-    ("joins on nonsense columns", "SELECT AVG(nri_tracts.risk_score) FROM census_msa JOIN cbsa_counties ON census_msa.population = "
-                                  "cbsa_counties.cbsa_code JOIN nri_tracts ON cbsa_counties.county_name = nri_tracts.county_name "
-                                  f"WHERE {ENT}", {"unapproved_join"}),
-    ("entity negated", GOOD.replace(ENT, "census_msa.name <> 'Pittsburgh, PA Metro Area'"), {"missing_entity_filter"}),
-    ("entity only in a comment", GOOD.replace(f"WHERE {ENT}", "-- 'Pittsburgh, PA Metro Area'\n WHERE 1=1"), {"missing_entity_filter"}),
-    ("entity ORed with a tautology", GOOD.replace(ENT, f"{ENT} OR 1=1"), {"missing_entity_filter"}),
-    ("entity ORed with another column", GOOD.replace(ENT, f"{ENT} OR census_msa.msa_code = '1'"), {"missing_entity_filter"}),
-    ("entity NOT IN", GOOD.replace(ENT, "census_msa.name NOT IN ('Pittsburgh, PA Metro Area')"), {"missing_entity_filter"}),
-    ("entity literal in the wrong case", GOOD.replace("Pittsburgh, PA", "PITTSBURGH, PA"), {"missing_entity_filter"}),
-    ("file read via comma-joined table function", GOOD + " AND EXISTS (SELECT 1 FROM census_msa, read_csv_auto('/etc/passwd'))",
-     {"table_function"}),
-    ("file path as a table", GOOD + " AND EXISTS (SELECT 1 FROM '/etc/passwd')", {"file_access"}),
-    ("environment leak", GOOD.replace("AVG(nri_tracts.risk_score)", "AVG(nri_tracts.risk_score), getenv('HOME')"), {"forbidden_function"}),
-    ("system table", GOOD + " AND EXISTS (SELECT 1 FROM information_schema.tables)", {"unknown_table"}),
-    ("a table the catalog does not expose", GOOD + " AND EXISTS (SELECT 1 FROM catalog_concepts)", {"unknown_table"}),
-    ("NATURAL JOIN", "SELECT AVG(nri_tracts.risk_score) FROM census_msa NATURAL JOIN cbsa_counties NATURAL JOIN nri_tracts "
-                     f"WHERE {ENT}", {"natural_join"}),
-    ("direct join where only a bridge is approved", "SELECT AVG(nri_tracts.risk_score) FROM census_msa JOIN cbsa_counties ON census_msa.msa_code = "
-                                                    "cbsa_counties.cbsa_code JOIN nri_tracts ON census_msa.name = nri_tracts.county_name "
-                                                    f"WHERE {ENT}", {"unapproved_join"}),      # reported once: an unapproved equality still connects the tables
-    ("DDL", "DROP TABLE houses", {"sql_invalid"}),
-    ("two statements", GOOD + "; DROP TABLE houses", {"sql_invalid"}),
-    ("syntax error", "SELEC 1", {"sql_invalid"}),
-])
+@pytest.mark.parametrize(
+    "name,sql,expected",
+    [
+        (
+            "cross join, no conditions",
+            "SELECT AVG(nri_tracts.risk_score) FROM census_msa CROSS JOIN cbsa_counties CROSS JOIN nri_tracts "
+            f"WHERE {ENT}",
+            {"cross_join"},
+        ),
+        (
+            "joins on nonsense columns",
+            "SELECT AVG(nri_tracts.risk_score) FROM census_msa JOIN cbsa_counties ON census_msa.population = "
+            "cbsa_counties.cbsa_code JOIN nri_tracts ON cbsa_counties.county_name = nri_tracts.county_name "
+            f"WHERE {ENT}",
+            {"unapproved_join"},
+        ),
+        (
+            "entity negated",
+            GOOD.replace(ENT, "census_msa.name <> 'Pittsburgh, PA Metro Area'"),
+            {"missing_entity_filter"},
+        ),
+        (
+            "entity only in a comment",
+            GOOD.replace(f"WHERE {ENT}", "-- 'Pittsburgh, PA Metro Area'\n WHERE 1=1"),
+            {"missing_entity_filter"},
+        ),
+        ("entity ORed with a tautology", GOOD.replace(ENT, f"{ENT} OR 1=1"), {"missing_entity_filter"}),
+        (
+            "entity ORed with another column",
+            GOOD.replace(ENT, f"{ENT} OR census_msa.msa_code = '1'"),
+            {"missing_entity_filter"},
+        ),
+        (
+            "entity NOT IN",
+            GOOD.replace(ENT, "census_msa.name NOT IN ('Pittsburgh, PA Metro Area')"),
+            {"missing_entity_filter"},
+        ),
+        (
+            "entity literal in the wrong case",
+            GOOD.replace("Pittsburgh, PA", "PITTSBURGH, PA"),
+            {"missing_entity_filter"},
+        ),
+        (
+            "file read via comma-joined table function",
+            GOOD + " AND EXISTS (SELECT 1 FROM census_msa, read_csv_auto('/etc/passwd'))",
+            {"table_function"},
+        ),
+        ("file path as a table", GOOD + " AND EXISTS (SELECT 1 FROM '/etc/passwd')", {"file_access"}),
+        (
+            "environment leak",
+            GOOD.replace("AVG(nri_tracts.risk_score)", "AVG(nri_tracts.risk_score), getenv('HOME')"),
+            {"forbidden_function"},
+        ),
+        ("system table", GOOD + " AND EXISTS (SELECT 1 FROM information_schema.tables)", {"unknown_table"}),
+        (
+            "a table the catalog does not expose",
+            GOOD + " AND EXISTS (SELECT 1 FROM catalog_concepts)",
+            {"unknown_table"},
+        ),
+        (
+            "NATURAL JOIN",
+            "SELECT AVG(nri_tracts.risk_score) FROM census_msa NATURAL JOIN cbsa_counties NATURAL JOIN nri_tracts "
+            f"WHERE {ENT}",
+            {"natural_join"},
+        ),
+        (
+            "direct join where only a bridge is approved",
+            "SELECT AVG(nri_tracts.risk_score) FROM census_msa JOIN cbsa_counties ON census_msa.msa_code = "
+            "cbsa_counties.cbsa_code JOIN nri_tracts ON census_msa.name = nri_tracts.county_name "
+            f"WHERE {ENT}",
+            {"unapproved_join"},
+        ),  # reported once: an unapproved equality still connects the tables
+        ("DDL", "DROP TABLE houses", {"sql_invalid"}),
+        ("two statements", GOOD + "; DROP TABLE houses", {"sql_invalid"}),
+        ("syntax error", "SELEC 1", {"sql_invalid"}),
+    ],
+)
 def test_bad_statements_are_caught_for_the_right_reason(fx, name, sql, expected):
     got = codes(sql, plan_for(NRI_Q))
     assert expected <= got, (name, got)
@@ -76,15 +129,26 @@ def test_the_control_statement_is_clean(fx):
 
 def test_safety_violations_are_flagged_as_such(fx):
     from agents import plan_contract
-    for sql in ("SELECT getenv('HOME') FROM houses", "SELECT * FROM houses, read_csv_auto('x')", "SELECT * FROM '/etc/passwd'"):
+
+    for sql in (
+        "SELECT getenv('HOME') FROM houses",
+        "SELECT * FROM houses, read_csv_auto('x')",
+        "SELECT * FROM '/etc/passwd'",
+    ):
         v = plan_contract.verify(sql, plan_for("How many houses are in Pittsburgh?"))
-        assert v and all(x.severity == "safety" for x in v if x.code in {"forbidden_function", "table_function", "file_access"})
+        assert v and all(
+            x.severity == "safety" for x in v if x.code in {"forbidden_function", "table_function", "file_access"}
+        )
 
 
 def test_modes_never_relax_safety(fx):
     from agents import plan_contract
+
     plan = plan_for(NRI_Q)
-    bad_join = plan_contract.verify(GOOD.replace("JOIN cbsa_counties ON census_msa.msa_code = cbsa_counties.cbsa_code", "CROSS JOIN cbsa_counties"), plan)
+    bad_join = plan_contract.verify(
+        GOOD.replace("JOIN cbsa_counties ON census_msa.msa_code = cbsa_counties.cbsa_code", "CROSS JOIN cbsa_counties"),
+        plan,
+    )
     assert bad_join and not plan_contract.blocking(bad_join, "warn") and not plan_contract.blocking(bad_join, "off")
     assert plan_contract.blocking(bad_join, "enforce")
     unsafe = plan_contract.verify("SELECT getenv('HOME') FROM houses", plan)
@@ -93,12 +157,21 @@ def test_modes_never_relax_safety(fx):
 
 def test_messages_tell_the_model_what_is_acceptable(fx):
     from agents import plan_contract
-    msgs = {v.code: v.message for v in plan_contract.verify(
-        "SELECT AVG(nri_tracts.risk_score) FROM census_msa JOIN cbsa_counties ON census_msa.population = cbsa_counties.cbsa_code "
-        f"JOIN nri_tracts ON cbsa_counties.state_fips || cbsa_counties.county_fips = nri_tracts.county_fips WHERE {ENT}", plan_for(NRI_Q))}
-    assert "census_msa.msa_code = cbsa_counties.cbsa_code" in msgs["unapproved_join"]          # names the approved condition
+
+    msgs = {
+        v.code: v.message
+        for v in plan_contract.verify(
+            "SELECT AVG(nri_tracts.risk_score) FROM census_msa JOIN cbsa_counties ON census_msa.population = cbsa_counties.cbsa_code "
+            f"JOIN nri_tracts ON cbsa_counties.state_fips || cbsa_counties.county_fips = nri_tracts.county_fips WHERE {ENT}",
+            plan_for(NRI_Q),
+        )
+    }
+    assert "census_msa.msa_code = cbsa_counties.cbsa_code" in msgs["unapproved_join"]  # names the approved condition
     missing = {v.code: v.message for v in plan_contract.verify(GOOD.replace(ENT, "1=1"), plan_for(NRI_Q))}
-    assert "Pittsburgh, PA Metro Area" in missing["missing_entity_filter"] and "exact literal" in missing["missing_entity_filter"]
+    assert (
+        "Pittsburgh, PA Metro Area" in missing["missing_entity_filter"]
+        and "exact literal" in missing["missing_entity_filter"]
+    )
 
 
 VALID = {
@@ -159,6 +232,7 @@ def test_everything_the_deterministic_compiler_emits_satisfies_the_contract(fx):
     """The fallback compiler is valid by construction; the contract must agree on EVERY plan in the battery."""
     from agents import plan_contract
     from agents.tools import _compile_sql_from_plan
+
     checked = 0
     for qs in GROUPS.values():
         for q in qs:
@@ -166,8 +240,8 @@ def test_everything_the_deterministic_compiler_emits_satisfies_the_contract(fx):
             try:
                 sql = _compile_sql_from_plan(plan)
             except Exception:
-                continue                                     # not compilable (no operation / tables): nothing to check
+                continue  # not compilable (no operation / tables): nothing to check
             violations = plan_contract.verify(sql, plan)
             assert not violations, (q, sql, violations)
             checked += 1
-    assert checked >= 15                                      # a meaningful share of the battery really compiles
+    assert checked >= 15  # a meaningful share of the battery really compiles

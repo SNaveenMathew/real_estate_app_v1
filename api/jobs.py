@@ -3,6 +3,7 @@
 The heavy POSTs answer 202 with a ``job_id`` and the page polls here. Kept
 separate from the routers that start the work so one endpoint serves every kind.
 """
+
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query

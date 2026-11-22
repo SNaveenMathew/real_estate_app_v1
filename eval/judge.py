@@ -15,6 +15,7 @@ Two backends behind one interface (JudgeBackend):
     every result it produces is labeled "(MOCK)" so it can't be mistaken for
     a real score in a report.
 """
+
 from __future__ import annotations
 
 import json
@@ -65,6 +66,7 @@ class LLMJudge(JudgeBackend):
 
     def __init__(self, base_url: str | None = None, model: str | None = None):
         from config import settings
+
         self.base_url = base_url or settings.judge_llama_server_base_url
         self.model = model or settings.judge_llama_server_model
         self._llm = None
@@ -72,28 +74,33 @@ class LLMJudge(JudgeBackend):
     def _client(self):
         if self._llm is None:
             from langchain_openai import ChatOpenAI
+
             self._llm = ChatOpenAI(
-                base_url=self.base_url, api_key="not-needed",
-                model=self.model, temperature=0.0,
+                base_url=self.base_url,
+                api_key="not-needed",
+                model=self.model,
+                temperature=0.0,
             )
         return self._llm
 
     def judge(self, example: GoldenExample, reply: str) -> ScoreResult:
         from langchain_core.messages import SystemMessage, HumanMessage
-        prompt = _JUDGE_USER_TEMPLATE.format(
-            question=example.question, rubric=example.rubric, reply=reply)
+
+        prompt = _JUDGE_USER_TEMPLATE.format(question=example.question, rubric=example.rubric, reply=reply)
         meta = {"judge_model": self.model}
         last_problem = "judge produced no verdict"
         attempts = 0
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             attempts = attempt
             try:
-                response = self._client().invoke([
-                    SystemMessage(content=_JUDGE_SYSTEM_PROMPT),
-                    HumanMessage(content=prompt),
-                ])
+                response = self._client().invoke(
+                    [
+                        SystemMessage(content=_JUDGE_SYSTEM_PROMPT),
+                        HumanMessage(content=prompt),
+                    ]
+                )
                 content = response.content
-            except Exception as e:                       # transport or server problem
+            except Exception as e:  # transport or server problem
                 last_problem = f"judge call failed: {e}"
                 continue
 
@@ -106,24 +113,35 @@ class LLMJudge(JudgeBackend):
             if verdict not in ("PASS", "FAIL"):
                 last_problem = f"judge returned an unrecognized verdict: {parsed}"
                 continue
-            return ScoreResult(example.id, verdict, "llm_judge", parsed.get("reasoning", ""), reply,
-                               extra={**meta, "judge_attempts": attempts})
+            return ScoreResult(
+                example.id,
+                verdict,
+                "llm_judge",
+                parsed.get("reasoning", ""),
+                reply,
+                extra={**meta, "judge_attempts": attempts},
+            )
 
         # Retried and still unusable: this says nothing about the answer, so it is not an
         # ERROR (which would read as a broken agent) and certainly not a FAIL.
-        return ScoreResult(example.id, "INCONCLUSIVE", "llm_judge",
-                           f"{last_problem} (after {attempts} attempt(s))", reply,
-                           extra={**meta, "judge_attempts": attempts})
+        return ScoreResult(
+            example.id,
+            "INCONCLUSIVE",
+            "llm_judge",
+            f"{last_problem} (after {attempts} attempt(s))",
+            reply,
+            extra={**meta, "judge_attempts": attempts},
+        )
 
 
 def _parse_judge_json(text: str) -> dict | None:
     text = text.strip()
-    text = re.sub(r'^```(?:json)?\s*|\s*```$', '', text, flags=re.MULTILINE).strip()
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-    m = re.search(r'\{.*\}', text, re.DOTALL)
+    m = re.search(r"\{.*\}", text, re.DOTALL)
     if m:
         try:
             return json.loads(m.group())
@@ -150,7 +168,12 @@ class MockJudge(JudgeBackend):
             return ScoreResult(example.id, "FAIL", "llm_judge (MOCK)", "empty reply", reply, extra=meta)
         reply_lower = reply.lower()
         if any(p in reply_lower for p in self._BAIL_PHRASES):
-            return ScoreResult(example.id, "FAIL", "llm_judge (MOCK)",
-                                "reply looks like a bail-out", reply, extra=meta)
-        return ScoreResult(example.id, "PASS", "llm_judge (MOCK)",
-                            "non-empty, non-bail-out reply — MOCK judge, not a real evaluation", reply, extra=meta)
+            return ScoreResult(example.id, "FAIL", "llm_judge (MOCK)", "reply looks like a bail-out", reply, extra=meta)
+        return ScoreResult(
+            example.id,
+            "PASS",
+            "llm_judge (MOCK)",
+            "non-empty, non-bail-out reply — MOCK judge, not a real evaluation",
+            reply,
+            extra=meta,
+        )

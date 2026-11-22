@@ -14,6 +14,7 @@ Architecture (mirrors agents/general_agent.py):
 The LLM decides WHAT data is needed and WHICH approved house functions to call.
 The application owns execution, sandboxing, and security -- no rule-based routing.
 """
+
 from __future__ import annotations
 
 import ast
@@ -49,6 +50,7 @@ PROGRESS_STEPS: list[tuple[str, str]] = [
 
 # -- Approved house functions (house_id bound via closure) --------------------
 
+
 def make_house_approved_functions(house_id: str) -> dict:
     """
     Build the set of approved functions for the house code agent.
@@ -76,39 +78,41 @@ def make_house_approved_functions(house_id: str) -> dict:
         if not nri:
             return f"No NRI data found for tract {house['tract_fips']}."
         hazards = {label: nri.get(col) for col, label in schema.NRI_HAZARD_COLUMNS.items()}
-        top = sorted(
-            [(k, v) for k, v in hazards.items() if v and v > 0],
-            key=lambda x: x[1], reverse=True
-        )[:5]
+        top = sorted([(k, v) for k, v in hazards.items() if v and v > 0], key=lambda x: x[1], reverse=True)[:5]
         try:
             import pandas as pd
+
             hazards_df = pd.DataFrame(top, columns=["hazard", "risk_score"])
             emit_artifact(classify_dataframe(hazards_df, title="Top hazards by risk score", presentation="chart"))
         except Exception:
             pass
-        return json.dumps({
-            "tract_fips": nri.get("tract_fips"),
-            "county": nri.get("county_name"),
-            "state": nri.get("state_name"),
-            "composite_risk_score": nri.get("risk_score"),
-            "composite_risk_rating": nri.get("risk_ratng"),
-            "risk_percentile": nri.get("risk_npctl"),
-            "expected_annual_loss_usd": nri.get("eal_valt"),
-            "social_vulnerability": nri.get("sovi_ratng"),
-            "community_resilience": nri.get("resl_ratng"),
-            "top_5_hazards_by_risk_score": top,
-        }, indent=2)
+        return json.dumps(
+            {
+                "tract_fips": nri.get("tract_fips"),
+                "county": nri.get("county_name"),
+                "state": nri.get("state_name"),
+                "composite_risk_score": nri.get("risk_score"),
+                "composite_risk_rating": nri.get("risk_ratng"),
+                "risk_percentile": nri.get("risk_npctl"),
+                "expected_annual_loss_usd": nri.get("eal_valt"),
+                "social_vulnerability": nri.get("sovi_ratng"),
+                "community_resilience": nri.get("resl_ratng"),
+                "top_5_hazards_by_risk_score": top,
+            },
+            indent=2,
+        )
 
     def estimate_price_with_code() -> str:
         """Compute price estimates from comparable data and ZHVI home-value growth."""
         import pandas as pd
+
         house = store.get_house(house_id)
         if not house:
             return "House not found."
         tract = house.get("tract_fips")
-        sqft  = house.get("sqft")
+        sqft = house.get("sqft")
         price = house.get("price")
-        city  = house.get("city")
+        city = house.get("city")
         lines = []
         if tract:
             stats = store.get_price_stats_in_tract(tract)
@@ -126,32 +130,42 @@ def make_house_approved_functions(house_id: str) -> dict:
                 lines.append(f"  Sold count: {int(stats['sold_sold_count'])}")
                 lines.append(f"  Median sold price: ${stats.get('sold_median_sold', 0):,.0f}")
                 if stats.get("sold_median_sold_per_sqft") and sqft:
-                    lines.append(f"  Estimated value (sold $/sqft x {sqft:.0f} sqft): ${stats['sold_median_sold_per_sqft'] * sqft:,.0f}")
+                    lines.append(
+                        f"  Estimated value (sold $/sqft x {sqft:.0f} sqft): ${stats['sold_median_sold_per_sqft'] * sqft:,.0f}"
+                    )
                 lines.append(f"  Sale date range: {stats.get('sold_oldest_sale')} to {stats.get('sold_newest_sale')}")
         if price:
             lines.append(f"\n### Current List Price: ${price:,.0f}")
             if sqft:
-                lines.append(f"  Price/sqft: ${price/sqft:,.2f}")
+                lines.append(f"  Price/sqft: ${price / sqft:,.2f}")
         if city:
-            nearby = store.query("""
+            nearby = store.query(
+                """
                 SELECT price, sqft, beds, baths, status,
                        ROUND(price / NULLIF(sqft, 0), 0) as ppsf
                 FROM houses
                 WHERE city = ? AND price > 0 AND house_id != ?
                 ORDER BY ABS(price - COALESCE(?, price)) ASC
                 LIMIT 8
-            """, [city, house_id, price])
+            """,
+                [city, house_id, price],
+            )
             if len(nearby) > 0:
                 lines.append(f"\n### Similar Active Listings in {city}")
                 lines.append(nearby.to_string(index=False))
                 try:
-                    emit_artifact(classify_dataframe(
-                        nearby, title=f"Similar active listings in {city}", presentation="table",
-                    ))
+                    emit_artifact(
+                        classify_dataframe(
+                            nearby,
+                            title=f"Similar active listings in {city}",
+                            presentation="table",
+                        )
+                    )
                 except Exception:
                     pass
         if tract:
-            county_comps = store.query("""
+            county_comps = store.query(
+                """
                 SELECT address, city, sold_price, sqft, sold_date,
                        muni_desc, sale_desc, arms_length_flag,
                        ROUND(sold_price / NULLIF(sqft, 0), 0) as ppsf
@@ -161,14 +175,20 @@ def make_house_approved_functions(house_id: str) -> dict:
                   AND sold_price > 1000
                 ORDER BY sold_date DESC
                 LIMIT 8
-            """, [tract])
+            """,
+                [tract],
+            )
             if len(county_comps) > 0:
                 lines.append("\n### County-recorded Arm's-Length Sales (same tract)")
                 lines.append(county_comps.to_string(index=False))
                 try:
-                    emit_artifact(classify_dataframe(
-                        county_comps, title="County-recorded arm's-length sales (same tract)", presentation="table",
-                    ))
+                    emit_artifact(
+                        classify_dataframe(
+                            county_comps,
+                            title="County-recorded arm's-length sales (same tract)",
+                            presentation="table",
+                        )
+                    )
                 except Exception:
                     pass
         # ZHVI-adjusted estimate: this house's own last recorded sale, grown
@@ -178,9 +198,11 @@ def make_house_approved_functions(house_id: str) -> dict:
         zhvi_est = store.get_zhvi_price_estimate(house_id)
         if zhvi_est:
             level = zhvi_est["geography_level"]
-            level_label = {"zip": f"ZIP {zhvi_est['geography_key']}",
-                           "metro": "metro area (ZIP had no ZHVI coverage)",
-                           "state": "state (ZIP and metro had no ZHVI coverage)"}[level]
+            level_label = {
+                "zip": f"ZIP {zhvi_est['geography_key']}",
+                "metro": "metro area (ZIP had no ZHVI coverage)",
+                "state": "state (ZIP and metro had no ZHVI coverage)",
+            }[level]
             lines.append("\n### ZHVI-Adjusted Estimate (last sold price x home-value growth)")
             lines.append(f"  Last recorded sale: ${zhvi_est['sold_price']:,.0f} on {zhvi_est['sold_date'][:10]}")
             lines.append(f"  Geography used: {level_label}")
@@ -192,14 +214,17 @@ def make_house_approved_functions(house_id: str) -> dict:
             lines.append(f"  -> Estimated value (last sold price x growth): ${zhvi_est['estimated_value']:,.0f}")
         elif store.get_last_sold_snapshot(house_id):
             lines.append("\n### ZHVI-Adjusted Estimate")
-            lines.append("  This house has a recorded sale, but no ZHVI data is loaded for its "
-                          "ZIP, metro, or state - run `python setup_data.py --only zhvi` after "
-                          "downloading a ZHVI export to enable this estimate.")
+            lines.append(
+                "  This house has a recorded sale, but no ZHVI data is loaded for its "
+                "ZIP, metro, or state - run `python setup_data.py --only zhvi` after "
+                "downloading a ZHVI export to enable this estimate."
+            )
         return "\n".join(lines) if lines else "Insufficient data for price estimation."
 
     def get_nearby_sold_homes() -> str:
         """Return recent sold comparables in the same census tract."""
         import pandas as pd
+
         house = store.get_house(house_id)
         if not house or not house.get("tract_fips"):
             return "No tract data available."
@@ -207,7 +232,11 @@ def make_house_approved_functions(house_id: str) -> dict:
         if not sold:
             return "No sold homes found in this census tract yet."
         df = pd.DataFrame(sold[:10])
-        cols = [c for c in ["address", "sold_price", "sqft", "beds", "baths", "sold_date", "arms_length_flag"] if c in df.columns]
+        cols = [
+            c
+            for c in ["address", "sold_price", "sqft", "beds", "baths", "sold_date", "arms_length_flag"]
+            if c in df.columns
+        ]
         view = df[cols]
         try:
             emit_artifact(classify_dataframe(view, title="Nearby sold homes", presentation="table"))
@@ -220,10 +249,7 @@ def make_house_approved_functions(house_id: str) -> dict:
         docs = vs.search_house(house_id, query, n_results=4)
         if not docs:
             return "No documents found for this house yet."
-        return "\n\n".join(
-            f"[{d['metadata'].get('doc_type', 'text')}]\n{d['text']}"
-            for d in docs
-        )
+        return "\n\n".join(f"[{d['metadata'].get('doc_type', 'text')}]\n{d['text']}" for d in docs)
 
     def query_database(request: str, presentation: str = "auto", scope: str = "this_house") -> str:
         """Run a read-only analytical query.
@@ -234,25 +260,32 @@ def make_house_approved_functions(house_id: str) -> dict:
         The model chooses the scope; it cannot see, alter or omit the filter itself.
         """
         from agents import query_scope
+
         if scope not in ("this_house", "all_houses"):
-            return (f"Code Agent error: scope must be 'this_house' or 'all_houses' (got {scope!r}). Use 'this_house' for "
-                    "anything about this house and 'all_houses' for comparisons or aggregates across houses.")
+            return (
+                f"Code Agent error: scope must be 'this_house' or 'all_houses' (got {scope!r}). Use 'this_house' for "
+                "anything about this house and 'all_houses' for comparisons or aggregates across houses."
+            )
         filters = (query_scope.ScopeFilter("houses", "house_id", str(house_id)),) if scope == "this_house" else ()
         with query_scope.scoped(*filters):
-            return general_query_database.invoke({
-                "request": request,
-                "requirements": "",
-                "presentation": presentation,
-            })
+            return general_query_database.invoke(
+                {
+                    "request": request,
+                    "requirements": "",
+                    "presentation": presentation,
+                }
+            )
 
     def get_commute_info() -> str:
         """Estimated commute from this house to the user's saved work location (free-flow; no traffic)."""
         from services import commute
+
         return commute.describe_for_chat(house_id)
 
     def get_linked_dataset_records(dataset: str = "") -> str:
         """Records from user-added datasets that link to this house through approved catalog relationships."""
         from services.house_links import linked_records
+
         return linked_records(house_id, dataset)
 
     return {
@@ -269,6 +302,7 @@ def make_house_approved_functions(house_id: str) -> dict:
 
 # -- AST validation -----------------------------------------------------------
 
+
 class HouseCodeAgentProgramError(ValueError):
     pass
 
@@ -278,14 +312,10 @@ def _invoke_approved(name: str, function_obj, args: tuple, kwargs: dict):
     if args:
         fields = list(inspect.signature(function_obj).parameters.keys())
         if len(args) > len(fields):
-            raise HouseCodeAgentProgramError(
-                f"Too many positional arguments for approved function '{name}'."
-            )
+            raise HouseCodeAgentProgramError(f"Too many positional arguments for approved function '{name}'.")
         for field, value in zip(fields, args):
             if field in kwargs:
-                raise HouseCodeAgentProgramError(
-                    f"Argument '{field}' supplied both positionally and by keyword."
-                )
+                raise HouseCodeAgentProgramError(f"Argument '{field}' supplied both positionally and by keyword.")
             kwargs[field] = value
     return function_obj(**kwargs)
 
@@ -298,9 +328,8 @@ def _validate_house_program(source: str, approved_names: set) -> ast.Module:
         raise HouseCodeAgentProgramError("Generated code exceeded the maximum size.")
 
     from services.guardrails import CodeAgentGuardrail
-    guard_res = CodeAgentGuardrail.validate_code_program(
-        source, approved_names, max_chars=HOUSE_CODE_AGENT_MAX_CHARS
-    )
+
+    guard_res = CodeAgentGuardrail.validate_code_program(source, approved_names, max_chars=HOUSE_CODE_AGENT_MAX_CHARS)
     if not guard_res.passed:
         raise HouseCodeAgentProgramError("; ".join(guard_res.reasons))
 
@@ -352,12 +381,15 @@ def _execute_house_program(source: str, approved_functions: dict) -> tuple:
 
     namespace: dict = {}
     for name, fn in approved_functions.items():
+
         def make_wrapper(function_name: str, function_obj):
             def wrapped(*args, **kwargs):
                 result = _invoke_approved(function_name, function_obj, args, kwargs)
                 calls.append((function_name, result))
                 return result
+
             return wrapped
+
         namespace[name] = make_wrapper(name, fn)
 
     namespace["__builtins__"] = {}
@@ -527,6 +559,7 @@ def _get_house_response_agent() -> ChatOpenAI:
 
 # -- Shared helpers -----------------------------------------------------------
 
+
 def _extract_text(resp: Any) -> str:
     content = getattr(resp, "content", resp)
     if isinstance(content, str):
@@ -592,6 +625,7 @@ def _tool_messages_from_calls(calls: list) -> list:
 def _get_stored_description(house_id: str) -> str | None:
     try:
         import db.vector_store as vs
+
         doc = vs.get_description(house_id)
         return doc["text"] if doc else None
     except Exception:
@@ -600,6 +634,7 @@ def _get_stored_description(house_id: str) -> str | None:
 
 # -- Program generation with recovery ----------------------------------------
 
+
 def _linked_datasets_prompt() -> str:
     """Prompt section for user-added datasets that link to houses (empty when there are none).
 
@@ -607,6 +642,7 @@ def _linked_datasets_prompt() -> str:
     available to the very next House Chat turn: no restart and no prompt edit.
     """
     import db.schema_catalog as schema
+
     try:
         linked = schema.house_linked_datasets()
     except Exception:
@@ -623,10 +659,12 @@ def _linked_datasets_prompt() -> str:
     ]
     for d in linked:
         measures = f" Measures: {', '.join(d['measures'])}." if d["measures"] else ""
-        lines.append(f"   - {d['name']}: {clean(d['description'])} Grain: {clean(d['grain']) or 'unspecified'}.{measures} Join: {d['join']}")
+        lines.append(
+            f"   - {d['name']}: {clean(d['description'])} Grain: {clean(d['grain']) or 'unspecified'}.{measures} Join: {d['join']}"
+        )
     first = linked[0]["name"]
     lines += [
-        "   For comparisons across houses, or aggregates over these datasets, use query_database(request=..., scope=\"all_houses\").",
+        '   For comparisons across houses, or aggregates over these datasets, use query_database(request=..., scope="all_houses").',
         f"   Example: User: What does {first} say about this house?",
         f'   Code: final_result = get_linked_dataset_records(dataset="{first}")',
     ]
@@ -644,7 +682,8 @@ def _generate_house_program(
     desc_section = (
         f"\nSTORED PROPERTY DESCRIPTION (already loaded -- do NOT call "
         f"search_house_documents to re-fetch it):\n{stored_description[:3000]}\n"
-        if stored_description else ""
+        if stored_description
+        else ""
     )
     conversation = _messages_to_text(history, user_message)
     prompt_parts = [
@@ -659,12 +698,16 @@ def _generate_house_program(
     prompt_parts.append("Generate the next small Python program now.")
 
     try:
-        response = llm_resilience.invoke(_get_house_code_agent(), [
-            SystemMessage(content="\n\n".join(p for p in prompt_parts if p)),
-            HumanMessage(content=user_message),
-        ], role="house_code_agent")
+        response = llm_resilience.invoke(
+            _get_house_code_agent(),
+            [
+                SystemMessage(content="\n\n".join(p for p in prompt_parts if p)),
+                HumanMessage(content=user_message),
+            ],
+            role="house_code_agent",
+        )
     except llm_resilience.ModelUnavailable:
-        return "final_result = get_house_details()"   # model down: degrade, do not fail
+        return "final_result = get_house_details()"  # model down: degrade, do not fail
     code = _clean_code(_extract_text(response))
 
     if code:
@@ -686,12 +729,16 @@ def _generate_house_program(
         "Approved functions: " + ", ".join(sorted(approved_names))
     )
     try:
-        retry = llm_resilience.invoke(_get_house_code_agent(), [
-            SystemMessage(content=retry_prompt),
-            HumanMessage(content="Generate the statement now."),
-        ], role="house_code_agent")
+        retry = llm_resilience.invoke(
+            _get_house_code_agent(),
+            [
+                SystemMessage(content=retry_prompt),
+                HumanMessage(content="Generate the statement now."),
+            ],
+            role="house_code_agent",
+        )
     except llm_resilience.ModelUnavailable:
-        return "final_result = get_house_details()"   # model down: degrade, do not fail
+        return "final_result = get_house_details()"  # model down: degrade, do not fail
     retry_code = _clean_code(_extract_text(retry))
     if retry_code:
         try:
@@ -706,17 +753,26 @@ def _generate_house_program(
 
 # -- Final answer synthesis ---------------------------------------------------
 
+
 def _write_house_final_answer_with_model(user_message: str, history: list | None, evidence: str) -> str:
     conversation = _messages_to_text(history, user_message)
     prompt = (
         _HOUSE_FINAL_RESPONSE_PROMPT
-        + "\n\nCONVERSATION:\n" + conversation
-        + "\n\nEXECUTED EVIDENCE:\n" + evidence[:HOUSE_FINAL_RESPONSE_MAX_CHARS]
+        + "\n\nCONVERSATION:\n"
+        + conversation
+        + "\n\nEXECUTED EVIDENCE:\n"
+        + evidence[:HOUSE_FINAL_RESPONSE_MAX_CHARS]
     )
-    response = llm_resilience.invoke(_get_house_response_agent(), [
-        SystemMessage(content=prompt),
-        HumanMessage(content="Write the final answer to the user's request. Return non-empty text grounded in the evidence."),
-    ], role="house_response_agent")
+    response = llm_resilience.invoke(
+        _get_house_response_agent(),
+        [
+            SystemMessage(content=prompt),
+            HumanMessage(
+                content="Write the final answer to the user's request. Return non-empty text grounded in the evidence."
+            ),
+        ],
+        role="house_response_agent",
+    )
     answer = _extract_text(response)
     if answer:
         return answer
@@ -726,10 +782,14 @@ def _write_house_final_answer_with_model(user_message: str, history: list | None
         "Do not invent facts. Return concise, non-empty plain text or markdown.\n\n"
         f"USER REQUEST:\n{user_message}\n\nEVIDENCE:\n{evidence[:10000]}"
     )
-    retry = llm_resilience.invoke(_get_house_response_agent(), [
-        SystemMessage(content=retry_prompt),
-        HumanMessage(content="Answer now."),
-    ], role="house_response_agent")
+    retry = llm_resilience.invoke(
+        _get_house_response_agent(),
+        [
+            SystemMessage(content=retry_prompt),
+            HumanMessage(content="Answer now."),
+        ],
+        role="house_response_agent",
+    )
     return _extract_text(retry) or evidence.strip() or "I could not produce a response."
 
 
@@ -739,13 +799,18 @@ def _write_house_final_answer(user_message: str, history: list | None, evidence:
         return _write_house_final_answer_with_model(user_message, history, evidence)
     except llm_resilience.ModelUnavailable:
         if not evidence.strip():
-            return ("The language model service is not responding and this question needs it. Nothing was estimated; "
-                    "please try again in a minute.")
-        return ("(The language model service is not responding, so this is the data the app retrieved without it, "
-                "not a written answer.)\n\n" + evidence.strip()[:6000])
+            return (
+                "The language model service is not responding and this question needs it. Nothing was estimated; "
+                "please try again in a minute."
+            )
+        return (
+            "(The language model service is not responding, so this is the data the app retrieved without it, "
+            "not a written answer.)\n\n" + evidence.strip()[:6000]
+        )
 
 
 # -- Public entry-point -------------------------------------------------------
+
 
 def run_house_chat(
     house_id: str,
@@ -805,12 +870,17 @@ def run_house_chat(
             },
         ]
         end_house_chat(
-            root_span, root_context=root_context, trace_id=trace_id, reply=blocked_reply,
-            started_at=started_at, tool_call_count=0,
+            root_span,
+            root_context=root_context,
+            trace_id=trace_id,
+            reply=blocked_reply,
+            started_at=started_at,
+            tool_call_count=0,
         )
         return blocked_reply, updated_history, []
 
     from agents.turn_progress import get_current_tracker
+
     tracker = get_current_tracker()
     if tracker:
         tracker.start_step("property_analysis", "Property Analysis")
@@ -840,10 +910,14 @@ def run_house_chat(
                     "house_chat.house_id": house_id,
                 },
             ) as code_span:
-                set_span_input(code_span, {
-                    "message": message,
-                    "prior_evidence": evidence[:4000],
-                }, mime_type="application/json")
+                set_span_input(
+                    code_span,
+                    {
+                        "message": message,
+                        "prior_evidence": evidence[:4000],
+                    },
+                    mime_type="application/json",
+                )
                 try:
                     program = _generate_house_program(
                         user_message=message,
@@ -875,10 +949,14 @@ def run_house_chat(
                     all_calls.extend(calls)
                     step_evidence = _render_evidence(calls)
                     evidence = (evidence + "\n\n" + step_evidence).strip()
-                    set_span_output(exec_span, {
-                        "function_calls": [name for name, _ in calls],
-                        "result_preview": str(final_result)[:500],
-                    }, mime_type="application/json")
+                    set_span_output(
+                        exec_span,
+                        {
+                            "function_calls": [name for name, _ in calls],
+                            "result_preview": str(final_result)[:500],
+                        },
+                        mime_type="application/json",
+                    )
                 except Exception as exc:
                     mark_span_error(exec_span, exc)
                     all_calls.append(("code_execution_error", str(exc)))
@@ -888,7 +966,8 @@ def run_house_chat(
             # Only loop if the first step produced no substantive data
             if step == 0:
                 step_failed = any(
-                    isinstance(result, str) and (
+                    isinstance(result, str)
+                    and (
                         "not found" in result.lower()
                         or "no documents" in result.lower()
                         or "no data" in result.lower()
@@ -908,9 +987,14 @@ def run_house_chat(
             "house_chat.response",
             attributes={"openinference.span.kind": "LLM"},
         ) as response_span:
-            set_span_input(response_span, {
-                "message": message, "evidence": evidence[:8000],
-            }, mime_type="application/json")
+            set_span_input(
+                response_span,
+                {
+                    "message": message,
+                    "evidence": evidence[:8000],
+                },
+                mime_type="application/json",
+            )
             raw_reply = _write_house_final_answer(message, history, evidence)
             set_span_output(response_span, {"reply": raw_reply}, mime_type="application/json")
 
@@ -928,6 +1012,7 @@ def run_house_chat(
         # 5. Output grounding guardrails
         try:
             import db.duckdb_store as store
+
             house = store.get_house(house_id) or {}
             walk_score = house.get("walk_score")
             reply, _ = OutputGroundingGuardrail.enforce_missing_score_guard(
@@ -952,8 +1037,12 @@ def run_house_chat(
         artifacts = collect_artifacts()
 
         end_house_chat(
-            root_span, root_context=root_context, trace_id=trace_id, reply=reply,
-            started_at=started_at, tool_call_count=len(all_calls),
+            root_span,
+            root_context=root_context,
+            trace_id=trace_id,
+            reply=reply,
+            started_at=started_at,
+            tool_call_count=len(all_calls),
         )
         record_house_chat_success(
             latency_seconds=perf_counter() - started_at,
@@ -967,8 +1056,13 @@ def run_house_chat(
     except Exception as exc:
         mark_span_error(root_span, exc)
         end_house_chat(
-            root_span, root_context=root_context, trace_id=trace_id, reply=None,
-            started_at=started_at, tool_call_count=len(all_calls), error=exc,
+            root_span,
+            root_context=root_context,
+            trace_id=trace_id,
+            reply=None,
+            started_at=started_at,
+            tool_call_count=len(all_calls),
+            error=exc,
         )
         record_house_chat_error(perf_counter() - started_at)
         raise

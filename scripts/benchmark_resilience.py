@@ -5,6 +5,7 @@ Benchmark the 4 resilience guarantees on the live codebase:
 3. SQL inspection latency (regex vs native AST contract)
 4. DuckDB concurrency integrity (shared connection vs per-thread cursors)
 """
+
 import asyncio
 import os
 import sys
@@ -22,6 +23,7 @@ results = {}
 print("Benchmarking Event Loop Lag...", flush=True)
 from agents import turn_runner as tr
 
+
 async def _measure_lag(duration_s: float) -> float:
     worst = 0.0
     end = time.perf_counter() + duration_s
@@ -31,22 +33,24 @@ async def _measure_lag(duration_s: float) -> float:
         worst = max(worst, time.perf_counter() - t0 - 0.01)
     return worst
 
+
 async def bench_event_loop():
     # Before: blocking work in async handler
     async def blocking_handler():
         time.sleep(0.6)
-    
+
     t0 = time.perf_counter()
     task = asyncio.create_task(blocking_handler())
     old_lag = await _measure_lag(0.5)
     await task
-    
+
     # After: offloaded to turn_runner
     task2 = asyncio.create_task(tr.run_turn(time.sleep, 0.6))
     new_lag = await _measure_lag(0.5)
     await task2
-    
+
     return round(old_lag * 1000, 1), round(new_lag * 1000, 1)
+
 
 old_lag_ms, new_lag_ms = asyncio.run(bench_event_loop())
 results["event_loop_lag_ms"] = {"before": old_lag_ms, "after": new_lag_ms}
@@ -60,7 +64,9 @@ from agents import sql_inspector as si
 sample_sql = "SELECT h.address, h.price, c.population FROM houses h JOIN census_tracts c ON h.tract_fips = c.tract_fips WHERE h.city = 'Pittsburgh' AND h.price <= 350000 ORDER BY h.price LIMIT 10"
 
 # Old: regex validation
-DANGEROUS_RE = re.compile(r"\b(DROP|DELETE|UPDATE|ALTER|COPY|ATTACH|DETACH|PRAGMA|read_csv|read_parquet|glob)\b", re.IGNORECASE)
+DANGEROUS_RE = re.compile(
+    r"\b(DROP|DELETE|UPDATE|ALTER|COPY|ATTACH|DETACH|PRAGMA|read_csv|read_parquet|glob)\b", re.IGNORECASE
+)
 N = 1000
 
 t0 = time.perf_counter()
@@ -84,6 +90,7 @@ from db import duckdb_store as store
 # Setup database
 import tempfile
 import tests.census_fixture as census_fixture
+
 tmp_dir = Path(tempfile.mkdtemp())
 fx = census_fixture.activate(tmp_dir)
 
@@ -93,7 +100,7 @@ try:
     barrier = threading.Barrier(12)
     after_success = [0]
     lock = threading.Lock()
-    
+
     def worker_after(tid):
         barrier.wait()
         local_ok = 0
@@ -107,16 +114,18 @@ try:
                 pass
         with lock:
             after_success[0] += local_ok
-            
+
     threads = [threading.Thread(target=worker_after, args=(i,)) for i in range(12)]
-    for t in threads: t.start()
-    for t in threads: t.join()
-    
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
     # Before: single shared connection/cursor across 12 threads
     shared_cursor = s.get_conn().cursor()
     barrier2 = threading.Barrier(12)
     before_success = [0]
-    
+
     def worker_before(tid):
         barrier2.wait()
         local_ok = 0
@@ -129,18 +138,23 @@ try:
                 pass
         with lock:
             before_success[0] += local_ok
-            
+
     threads2 = [threading.Thread(target=worker_before, args=(i,)) for i in range(12)]
-    for t in threads2: t.start()
-    for t in threads2: t.join()
-    
+    for t in threads2:
+        t.start()
+    for t in threads2:
+        t.join()
+
     results["concurrency_300"] = {
         "shared_cursor_passed": before_success[0],
         "shared_cursor_total": 300,
         "per_thread_passed": after_success[0],
-        "per_thread_total": 300
+        "per_thread_total": 300,
     }
-    print(f"  Concurrency: Shared cursor passed {before_success[0]}/300, Per-thread passed {after_success[0]}/300", flush=True)
+    print(
+        f"  Concurrency: Shared cursor passed {before_success[0]}/300, Per-thread passed {after_success[0]}/300",
+        flush=True,
+    )
 finally:
     census_fixture.deactivate(fx)
 
@@ -161,7 +175,12 @@ for i in range(20):
 print(f"ELAPSED {time.perf_counter() - t0:.4f}", flush=True)
 os._exit(0)
 """
-env = dict(os.environ, APP_ROOT=str(APP_ROOT), PHOENIX_ENABLED="true", PHOENIX_COLLECTOR_ENDPOINT="http://127.0.0.1:1/v1/traces")
+env = dict(
+    os.environ,
+    APP_ROOT=str(APP_ROOT),
+    PHOENIX_ENABLED="true",
+    PHOENIX_COLLECTOR_ENDPOINT="http://127.0.0.1:1/v1/traces",
+)
 out = subprocess.run([sys.executable, "-c", probe_script], capture_output=True, text=True, env=env, timeout=30)
 batch_time_ms = 0.0
 for line in out.stdout.splitlines():
@@ -172,12 +191,15 @@ for line in out.stdout.splitlines():
 # Each failed export in synchronous mode waits for socket connection timeout:
 # 20 spans * ~7.8 s = ~156,000 ms
 results["phoenix_tracing_ms"] = {"before": 156000.0, "after": round(batch_time_ms, 1)}
-print(f"  Phoenix tracing 20 spans: Sync={results['phoenix_tracing_ms']['before']} ms (calculated), Batch={batch_time_ms:.1f} ms (live measured)", flush=True)
+print(
+    f"  Phoenix tracing 20 spans: Sync={results['phoenix_tracing_ms']['before']} ms (calculated), Batch={batch_time_ms:.1f} ms (live measured)",
+    flush=True,
+)
 
 print("\n--- SUMMARY OF LIVE RESULTS ---")
 import json
+
 print(json.dumps(results, indent=2))
 
 with open(r"c:\Coding\tech_non_tech_blog\data\live_benchmark_results.json", "w") as f:
     json.dump(results, f, indent=2)
-

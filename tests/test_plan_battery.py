@@ -1,4 +1,5 @@
 """Golden-plan regression: planning output for unrelated questions must not drift (see scripts/plan_battery.py)."""
+
 from __future__ import annotations
 
 import sys
@@ -16,7 +17,8 @@ def test_every_plan_matches_the_committed_golden():
     assert not problems, (
         "\n\n".join(problems)
         + "\n\nA changed plan for a question you did not mean to affect is a collision between concepts or datasets. If the "
-          "change IS intended, run `python scripts/plan_battery.py --update --groups <group>` and review the golden diff.")
+        "change IS intended, run `python scripts/plan_battery.py --update --groups <group>` and review the golden diff."
+    )
 
 
 def test_the_zero_drift_groups_are_present_and_substantial():

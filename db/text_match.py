@@ -14,6 +14,7 @@ Semantics are intentionally identical to the regex they replace, including the n
 ``re.finditer`` that the declared-precedence (``overrides``) logic relies on.  ``tests/test_text_match.py``
 proves the equivalence differentially against the original regex implementation.
 """
+
 from __future__ import annotations
 
 import re
@@ -51,7 +52,7 @@ class TextIndex:
             table = {}
             toks = self.tokens
             for i in range(len(toks) - n + 1):
-                table.setdefault(" ".join(toks[i:i + n]), []).append(i)
+                table.setdefault(" ".join(toks[i : i + n]), []).append(i)
             self._grams[n] = table
         return table
 
@@ -75,7 +76,7 @@ def phrase_spans(text: str, alias: str) -> list[tuple[int, int, int]]:
     if not occurrences:
         return []
     out: list[tuple[int, int, int]] = []
-    next_free = 0                      # re.finditer never returns overlapping matches
+    next_free = 0  # re.finditer never returns overlapping matches
     for p in occurrences:
         if p < next_free:
             continue

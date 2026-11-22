@@ -1,4 +1,5 @@
 """Common utilities and schemas for API routers."""
+
 import math
 from typing import Any, Optional
 from pydantic import BaseModel
@@ -22,7 +23,7 @@ _safe_dict = safe_dict
 
 class ChatRequest(BaseModel):
     message: str
-    history: list[dict] = []   # [{"role": "user"|"assistant", "content": "..."}]
+    history: list[dict] = []  # [{"role": "user"|"assistant", "content": "..."}]
     session_id: Optional[str] = None
     turn_id: Optional[str] = None
 
@@ -42,5 +43,3 @@ class TransitRouteRequest(BaseModel):
     start: str
     end: str
     city: str = "Pittsburgh, PA"
-
-

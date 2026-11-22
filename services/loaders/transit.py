@@ -3,6 +3,7 @@
 Behaviour is unchanged: the facade in services/data_loader.py re-exports every name here, so
 `from services.data_loader import ...` (and scripts that call it) keep working.
 """
+
 from __future__ import annotations
 
 """
@@ -21,20 +22,29 @@ from config import settings
 import db.duckdb_store as store
 
 
-
-
 from services.loaders.census import _build_cbsa_lookup, _match_msa_to_cbsa  # CBSA matcher
 
-__all__ = ['load_transit_agencies', 'load_transit_ridership', 'load_transit_safety', 'load_transit_routes', 'load_fta_data']
+__all__ = [
+    "load_transit_agencies",
+    "load_transit_ridership",
+    "load_transit_safety",
+    "load_transit_routes",
+    "load_fta_data",
+]
 
 # ── Federal Transit Administration (FTA) Data ─────────────────────────────────
+
 
 def load_transit_agencies() -> int:
     """
     Load transit agency master records from the Ridership Master sheet into `transit_agencies`.
     Resolves CBSA msa_code for each agency via UZA Name / HQ City & State.
     """
-    path = getattr(settings, "fta_ridership_file", settings.data_dir / "fta" / "September 2026 Raw Monthly Ridership (no adjustments or estimates)_261102.xlsx")
+    path = getattr(
+        settings,
+        "fta_ridership_file",
+        settings.data_dir / "fta" / "September 2026 Raw Monthly Ridership (no adjustments or estimates)_261102.xlsx",
+    )
     if not path.exists():
         print(f"  FTA Ridership file not found at {path}")
         return 0
@@ -43,7 +53,11 @@ def load_transit_agencies() -> int:
     df = pd.read_excel(path, sheet_name="Master")
     if df.empty:
         return 0
-    df = df[df["NTD ID"].notna() & (df["NTD ID"].astype(str).str.strip() != "") & (df["NTD ID"].astype(str).str.lower() != "nan")].copy()
+    df = df[
+        df["NTD ID"].notna()
+        & (df["NTD ID"].astype(str).str.strip() != "")
+        & (df["NTD ID"].astype(str).str.lower() != "nan")
+    ].copy()
 
     cbsa_df = store.query("SELECT DISTINCT cbsa_code, cbsa_title FROM cbsa_counties")
     cbsa_lookup = _build_cbsa_lookup(cbsa_df) if not cbsa_df.empty else {}
@@ -94,7 +108,11 @@ def load_transit_agencies() -> int:
     out["service_area_population"] = pd.to_numeric(renamed.get("service_area_population"), errors="coerce")
     out["service_area_sq_miles"] = pd.to_numeric(renamed.get("service_area_sq_miles"), errors="coerce")
 
-    op_costs = renamed.get("operating_expenses") if "operating_expenses" in renamed.columns else renamed.get("operating_expenses_fy")
+    op_costs = (
+        renamed.get("operating_expenses")
+        if "operating_expenses" in renamed.columns
+        else renamed.get("operating_expenses_fy")
+    )
     fares = renamed.get("fare_revenues") if "fare_revenues" in renamed.columns else renamed.get("fare_revenues_fy")
     out["operating_expenses"] = pd.to_numeric(op_costs, errors="coerce")
     out["fare_revenues"] = pd.to_numeric(fares, errors="coerce")
@@ -115,10 +133,28 @@ def load_transit_agencies() -> int:
     out["msa_code"] = msa_codes
 
     cols = [
-        "ntd_id", "legacy_ntd_id", "agency", "mode", "tos", "three_mode", "mode_status",
-        "reporter_type", "organization_type", "hq_city", "hq_state", "uace_cd", "uza_name",
-        "uza_sq_miles", "uza_population", "service_area_population", "service_area_sq_miles",
-        "operating_expenses", "fare_revenues", "avg_cost_per_trip", "avg_fares_per_trip", "msa_code"
+        "ntd_id",
+        "legacy_ntd_id",
+        "agency",
+        "mode",
+        "tos",
+        "three_mode",
+        "mode_status",
+        "reporter_type",
+        "organization_type",
+        "hq_city",
+        "hq_state",
+        "uace_cd",
+        "uza_name",
+        "uza_sq_miles",
+        "uza_population",
+        "service_area_population",
+        "service_area_sq_miles",
+        "operating_expenses",
+        "fare_revenues",
+        "avg_cost_per_trip",
+        "avg_fares_per_trip",
+        "msa_code",
     ]
     out = out[cols].drop_duplicates(subset=["ntd_id", "mode", "tos"])
     store.upsert_df("transit_agencies", out)
@@ -131,7 +167,11 @@ def load_transit_ridership() -> int:
     """
     Load monthly transit ridership (UPT) from Ridership UPT sheet into `transit_ridership`.
     """
-    path = getattr(settings, "fta_ridership_file", settings.data_dir / "fta" / "September 2026 Raw Monthly Ridership (no adjustments or estimates)_261102.xlsx")
+    path = getattr(
+        settings,
+        "fta_ridership_file",
+        settings.data_dir / "fta" / "September 2026 Raw Monthly Ridership (no adjustments or estimates)_261102.xlsx",
+    )
     if not path.exists():
         print(f"  FTA Ridership file not found at {path}")
         return 0
@@ -148,21 +188,29 @@ def load_transit_ridership() -> int:
         return 0
 
     id_vars = ["NTD ID", "Agency", "Mode", "TOS"]
-    df_upt = df_upt[df_upt["NTD ID"].notna() & (df_upt["NTD ID"].astype(str).str.strip() != "") & (df_upt["NTD ID"].astype(str).str.lower() != "nan")].copy()
+    df_upt = df_upt[
+        df_upt["NTD ID"].notna()
+        & (df_upt["NTD ID"].astype(str).str.strip() != "")
+        & (df_upt["NTD ID"].astype(str).str.lower() != "nan")
+    ].copy()
     melted = pd.melt(df_upt, id_vars=id_vars, value_vars=month_cols, var_name="month_str", value_name="upt")
     melted = melted[melted["upt"].notna()].copy()
 
     splits = melted["month_str"].str.split("/", expand=True)
     melted["month"] = splits[0].astype(int)
     melted["year"] = splits[1].astype(int)
-    melted["date"] = pd.to_datetime(melted["year"].astype(str) + "-" + melted["month"].astype(str).str.zfill(2) + "-01").dt.date
+    melted["date"] = pd.to_datetime(
+        melted["year"].astype(str) + "-" + melted["month"].astype(str).str.zfill(2) + "-01"
+    ).dt.date
     melted["ntd_id"] = melted["NTD ID"].astype(str).str.split(".").str[0].str.zfill(5)
     melted["agency"] = melted["Agency"].astype(str).str.strip()
     melted["mode"] = melted["Mode"].astype(str).str.strip()
     melted["tos"] = melted["TOS"].astype(str).str.strip()
     melted["upt"] = pd.to_numeric(melted["upt"], errors="coerce")
 
-    agencies_df = store.query("SELECT DISTINCT ntd_id, mode, tos, msa_code FROM transit_agencies WHERE msa_code IS NOT NULL")
+    agencies_df = store.query(
+        "SELECT DISTINCT ntd_id, mode, tos, msa_code FROM transit_agencies WHERE msa_code IS NOT NULL"
+    )
     if not agencies_df.empty:
         melted = melted.merge(agencies_df, on=["ntd_id", "mode", "tos"], how="left")
     else:
@@ -194,7 +242,11 @@ def load_transit_safety() -> int:
     df = pd.read_excel(path, sheet_name="Data", header=2)
     if df.empty:
         return 0
-    df = df[df["NTD ID"].notna() & (df["NTD ID"].astype(str).str.strip() != "") & (df["NTD ID"].astype(str).str.lower() != "nan")].copy()
+    df = df[
+        df["NTD ID"].notna()
+        & (df["NTD ID"].astype(str).str.strip() != "")
+        & (df["NTD ID"].astype(str).str.lower() != "nan")
+    ].copy()
 
     cbsa_df = store.query("SELECT DISTINCT cbsa_code, cbsa_title FROM cbsa_counties")
     cbsa_lookup = _build_cbsa_lookup(cbsa_df) if not cbsa_df.empty else {}
@@ -240,10 +292,23 @@ def load_transit_safety() -> int:
     out["uza_name"] = renamed["uza_name"].astype(str).str.strip()
     out["reporter_type"] = renamed["reporter_type"].astype(str).str.strip()
 
-    for col in ["event_total", "collision_total", "derailment_total", "fire_total", "security_total",
-                "transit_worker_assault_events", "total_fatalities", "fatality_passenger", "fatality_employee",
-                "fatality_other", "total_injuries", "injury_passenger", "injury_employee", "injury_other",
-                "serious_injuries"]:
+    for col in [
+        "event_total",
+        "collision_total",
+        "derailment_total",
+        "fire_total",
+        "security_total",
+        "transit_worker_assault_events",
+        "total_fatalities",
+        "fatality_passenger",
+        "fatality_employee",
+        "fatality_other",
+        "total_injuries",
+        "injury_passenger",
+        "injury_employee",
+        "injury_other",
+        "serious_injuries",
+    ]:
         if col in renamed.columns:
             out[col] = pd.to_numeric(renamed[col], errors="coerce").fillna(0).astype(int)
         else:
@@ -269,12 +334,36 @@ def load_transit_safety() -> int:
     out["msa_code"] = msa_codes
 
     cols = [
-        "year", "ntd_id", "agency", "mode", "tos", "city", "state", "uace_cd", "uza_name",
-        "reporter_type", "msa_code", "event_total", "collision_total", "derailment_total",
-        "fire_total", "security_total", "transit_worker_assault_events", "total_fatalities",
-        "fatality_passenger", "fatality_employee", "fatality_other", "total_injuries",
-        "injury_passenger", "injury_employee", "injury_other", "serious_injuries",
-        "upt", "vrm", "vrh", "voms"
+        "year",
+        "ntd_id",
+        "agency",
+        "mode",
+        "tos",
+        "city",
+        "state",
+        "uace_cd",
+        "uza_name",
+        "reporter_type",
+        "msa_code",
+        "event_total",
+        "collision_total",
+        "derailment_total",
+        "fire_total",
+        "security_total",
+        "transit_worker_assault_events",
+        "total_fatalities",
+        "fatality_passenger",
+        "fatality_employee",
+        "fatality_other",
+        "total_injuries",
+        "injury_passenger",
+        "injury_employee",
+        "injury_other",
+        "serious_injuries",
+        "upt",
+        "vrm",
+        "vrh",
+        "voms",
     ]
     out = out[cols].drop_duplicates(subset=["year", "ntd_id", "mode", "tos"])
     store.upsert_df("transit_safety", out)
@@ -289,7 +378,9 @@ def load_transit_routes() -> int:
     import pyogrio
     import shapely
 
-    path = getattr(settings, "fta_routes_shp", settings.data_dir / "fta" / "connections" / "National_Transit_Map_Routes.shp")
+    path = getattr(
+        settings, "fta_routes_shp", settings.data_dir / "fta" / "connections" / "National_Transit_Map_Routes.shp"
+    )
     if not path.exists():
         print(f"  National Transit Map shapefile not found at {path}")
         return 0
@@ -342,29 +433,31 @@ def load_transit_routes() -> int:
             "color": route_colo or "#4f8ef7",
         }
 
-        rows.append({
-            "route_uid": uid,
-            "route_id": route_id,
-            "ntd_id": ntd_id,
-            "feed_id": feed_id,
-            "shape_id": shape_id,
-            "agency_id": agency_id,
-            "route_short_name": route_shor,
-            "route_long_name": route_long,
-            "route_desc": route_desc,
-            "route_type": route_type,
-            "route_type_name": route_ty_1,
-            "route_url": route_url,
-            "route_color": route_colo,
-            "route_text_color": route_text,
-            "download_date": download_d,
-            "min_lon": float(minx),
-            "min_lat": float(miny),
-            "max_lon": float(maxx),
-            "max_lat": float(maxy),
-            "geometry_json": geo_json_str,
-            "properties_json": json.dumps(props, ensure_ascii=False),
-        })
+        rows.append(
+            {
+                "route_uid": uid,
+                "route_id": route_id,
+                "ntd_id": ntd_id,
+                "feed_id": feed_id,
+                "shape_id": shape_id,
+                "agency_id": agency_id,
+                "route_short_name": route_shor,
+                "route_long_name": route_long,
+                "route_desc": route_desc,
+                "route_type": route_type,
+                "route_type_name": route_ty_1,
+                "route_url": route_url,
+                "route_color": route_colo,
+                "route_text_color": route_text,
+                "download_date": download_d,
+                "min_lon": float(minx),
+                "min_lat": float(miny),
+                "max_lon": float(maxx),
+                "max_lat": float(maxy),
+                "geometry_json": geo_json_str,
+                "properties_json": json.dumps(props, ensure_ascii=False),
+            }
+        )
 
     out = pd.DataFrame(rows)
     out = out.drop_duplicates(subset=["route_uid"])

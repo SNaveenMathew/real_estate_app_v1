@@ -3,6 +3,7 @@
 Behaviour is unchanged: the facade in services/data_loader.py re-exports every name here, so
 `from services.data_loader import ...` (and scripts that call it) keep working.
 """
+
 from __future__ import annotations
 
 """
@@ -23,9 +24,15 @@ from services.crime_sources import CRIME_CITY_KEYS
 from services.zillow_sources import normalize_zip5
 
 
-
-
-__all__ = ['_REDFIN_COL_MAP', '_house_id', '_normalize_crime_city', '_infer_crime_city', '_clean_numeric', '_extract_snapshot_date', 'load_redfin']
+__all__ = [
+    "_REDFIN_COL_MAP",
+    "_house_id",
+    "_normalize_crime_city",
+    "_infer_crime_city",
+    "_clean_numeric",
+    "_extract_snapshot_date",
+    "load_redfin",
+]
 
 # ── Redfin ──────────────────────────────────────────────────────────────────
 
@@ -68,7 +75,7 @@ _REDFIN_COL_MAP = {
 
 
 def _house_id(row: pd.Series) -> str:
-    key = f"{row.get('address','')}-{row.get('city','')}-{row.get('zip','')}"
+    key = f"{row.get('address', '')}-{row.get('city', '')}-{row.get('zip', '')}"
     return hashlib.md5(key.encode()).hexdigest()[:12]
 
 
@@ -114,9 +121,10 @@ def _extract_snapshot_date(filename: str) -> str | None:
     """
     import re as _re
     from datetime import datetime
+
     patterns = [
-        r'(\d{4})[_\-](\d{2})[_\-](\d{2})',  # 2024-01-15 or 2024_01_15
-        r'(\d{4})(\d{2})(\d{2})',              # 20240115
+        r"(\d{4})[_\-](\d{2})[_\-](\d{2})",  # 2024-01-15 or 2024_01_15
+        r"(\d{4})(\d{2})(\d{2})",  # 20240115
     ]
     for pat in patterns:
         m = _re.search(pat, filename)
@@ -153,11 +161,10 @@ def load_redfin(geo_utils=None) -> int:
         except Exception as e:
             print(f"    Error: {e}")
             continue
-        zip_like_raw = {"zip", "zip/postal code"}   # raw headers _REDFIN_COL_MAP maps to "zip"
+        zip_like_raw = {"zip", "zip/postal code"}  # raw headers _REDFIN_COL_MAP maps to "zip"
         dtype_overrides = {c: str for c in header_cols if c.strip().lower() in zip_like_raw}
         try:
-            df = pd.read_csv(path, encoding="utf-8-sig", low_memory=False,
-                              dtype=dtype_overrides or None)
+            df = pd.read_csv(path, encoding="utf-8-sig", low_memory=False, dtype=dtype_overrides or None)
         except Exception as e:
             print(f"    Error: {e}")
             continue
@@ -168,8 +175,7 @@ def load_redfin(geo_utils=None) -> int:
         df = df.rename(columns=col_rename)
 
         # Known numeric columns
-        for col in ["price", "beds", "baths", "sqft", "hoa_fee", "walk_score",
-                    "bike_score", "transit_score"]:
+        for col in ["price", "beds", "baths", "sqft", "hoa_fee", "walk_score", "bike_score", "transit_score"]:
             if col in df.columns:
                 df[col] = _clean_numeric(df[col])
 
@@ -193,24 +199,23 @@ def load_redfin(geo_utils=None) -> int:
         # snapshot_date: prefer the listing/update date from the CSV itself.
         # Fall back to filename date, then file mtime.
         if "listing_date" in df.columns:
-            df["snapshot_date"] = pd.to_datetime(
-                df["listing_date"], errors="coerce"
-            ).dt.date.astype(str)
+            df["snapshot_date"] = pd.to_datetime(df["listing_date"], errors="coerce").dt.date.astype(str)
             # Where the CSV date is missing, fill from filename
             file_date = _extract_snapshot_date(path.name)
             if not file_date:
                 import os
                 from datetime import datetime as _dt
+
                 file_date = _dt.fromtimestamp(os.path.getmtime(path)).date().isoformat()
             df["snapshot_date"] = df["snapshot_date"].where(
-                df["snapshot_date"].notna() & (df["snapshot_date"] != "NaT") & (df["snapshot_date"] != "nan"),
-                file_date
+                df["snapshot_date"].notna() & (df["snapshot_date"] != "NaT") & (df["snapshot_date"] != "nan"), file_date
             )
         else:
             snap_date = _extract_snapshot_date(path.name)
             if not snap_date:
                 import os
                 from datetime import datetime as _dt
+
                 snap_date = _dt.fromtimestamp(os.path.getmtime(path)).date().isoformat()
             df["snapshot_date"] = snap_date
 
@@ -218,9 +223,7 @@ def load_redfin(geo_utils=None) -> int:
         known_cols = set(_REDFIN_COL_MAP.values()) | {"source_file", "source_type", "snapshot_date"}
         extra_cols = [c for c in df.columns if c not in known_cols]
         df["raw_json"] = df[extra_cols].apply(
-            lambda r: json.dumps({k: v for k, v in r.items()
-                                  if not (isinstance(v, float) and np.isnan(v))}),
-            axis=1
+            lambda r: json.dumps({k: v for k, v in r.items() if not (isinstance(v, float) and np.isnan(v))}), axis=1
         )
 
         all_rows.append(df)
@@ -247,9 +250,7 @@ def load_redfin(geo_utils=None) -> int:
     combined["crime_city"] = combined["crime_city"].apply(_normalize_crime_city)
     needs_inference = combined["crime_city"].isna()
     if needs_inference.any():
-        combined.loc[needs_inference, "crime_city"] = (
-            combined.loc[needs_inference, "city"].apply(_infer_crime_city)
-        )
+        combined.loc[needs_inference, "crime_city"] = combined.loc[needs_inference, "city"].apply(_infer_crime_city)
     if "nearest_big_city" not in combined.columns:
         combined["nearest_big_city"] = None
 
@@ -262,18 +263,18 @@ def load_redfin(geo_utils=None) -> int:
     # table_name = 'houses'
     # schema_result = con.sql(f"DESCRIBE {table_name}")
     # schema_cols = schema_result.to_df()['column_name'].tolist()
-    
+
     # for col in schema_cols:
     #     if col not in combined.columns:
     #         combined[col] = None
-    
+
     # combined = combined[schema_cols]
 
     # # Spatial join to get census tract FIPS (if geo_utils available)
     # if geo_utils and combined["tract_fips"].isna().any():
     #     print(f"  Resolving census tracts for {combined['tract_fips'].isna().sum()} houses...")
     #     combined = geo_utils.assign_tract_fips(combined)
-    
+
     # Spatial join for tract FIPS on the deduplicated latest set
     if geo_utils and latest["tract_fips"].isna().any():
         print(f"  Resolving census tracts for {int(latest['tract_fips'].isna().sum())} houses...")
@@ -294,12 +295,12 @@ def load_redfin(geo_utils=None) -> int:
 
     # if 'created_at' in combined.columns:
     #     combined['created_at'] = pd.to_datetime(combined['created_at']).dt.strftime('%Y-%m-%d')
-    
+
     # store.upsert_houses(combined)
     # print(f"  Loaded {len(combined)} houses into DuckDB")
     # return len(combined)
-    
+
     n_unique = latest["house_id"].nunique()
-    n_total  = len(combined)
+    n_total = len(combined)
     print(f"  Loaded {n_unique} unique houses ({n_total} total rows → {n_total - n_unique} historical snapshots)")
     return n_unique

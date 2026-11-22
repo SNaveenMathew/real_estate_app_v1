@@ -20,6 +20,7 @@ Blocking by design: these are plain file operations. An ``async def`` endpoint m
 call them through ``asyncio.to_thread`` (or be a plain ``def`` handler, which FastAPI
 already runs in its worker pool) rather than on the event loop.
 """
+
 from __future__ import annotations
 
 import re
@@ -33,8 +34,7 @@ CHUNK_SIZE = 1024 * 1024
 MAX_FILENAME_STEM = 100
 
 # Windows treats these as device names even with an extension ("CON.csv" fails to open).
-_RESERVED_STEMS = {"CON", "PRN", "AUX", "NUL",
-                   *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+_RESERVED_STEMS = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
 
 # Pillow format -> extension written to disk. The extension is derived from the decoded
 # bytes, so it can never disagree with the content.
@@ -48,10 +48,10 @@ def sanitize_filename(raw: str | None, *, fallback: str = "upload") -> str:
     the caller's own allow-list rejects it); ``"CON.csv"`` -> ``"_CON.csv"``.
     """
     name = unicodedata.normalize("NFKC", str(raw or "")).replace("\\", "/")
-    name = name.rsplit("/", 1)[-1]                                   # basename only: no traversal, no drive letters
-    name = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip(" .")       # no control chars, quotes, or shell metacharacters
+    name = name.rsplit("/", 1)[-1]  # basename only: no traversal, no drive letters
+    name = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip(" .")  # no control chars, quotes, or shell metacharacters
     stem, dot, suffix = name.rpartition(".")
-    if not dot or not stem:                                          # "csv", ".csv", "..." have no usable stem
+    if not dot or not stem:  # "csv", ".csv", "..." have no usable stem
         stem, suffix = name, ""
     stem = stem.strip(" .")[:MAX_FILENAME_STEM] or fallback
     if stem.upper() in _RESERVED_STEMS:

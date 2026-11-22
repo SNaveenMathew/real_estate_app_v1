@@ -19,6 +19,7 @@ inspector; ``tests/test_plan_contract.py`` keeps a corpus of valid statements th
 
 Messages are written for the model that will repair the statement: they say what is wrong AND what is acceptable.
 """
+
 from __future__ import annotations
 
 import re
@@ -33,18 +34,19 @@ from agents import sql_inspector as si
 class Violation:
     code: str
     message: str
-    severity: str = "contract"          # "safety" | "contract"
+    severity: str = "contract"  # "safety" | "contract"
 
 
 @dataclass(frozen=True)
 class Edge:
-    canon: frozenset                    # {canonical left expression, canonical right expression}
-    display: str                        # "houses.tract_fips = census_tracts.tract_fips"
+    canon: frozenset  # {canonical left expression, canonical right expression}
+    display: str  # "houses.tract_fips = census_tracts.tract_fips"
 
 
 @dataclass
 class CatalogView:
     """What the contract needs to know about the catalog (injectable, so it is testable without a database)."""
+
     tables: frozenset
     columns_of: Callable[[str], set | None]
     edges_between: Callable[[str, str], list]
@@ -64,16 +66,19 @@ def _edge_index(key: tuple) -> dict:
             a = si.canonical_sql_expression(left_expr, left_table)
             b = si.canonical_sql_expression(right_expr, right_table)
         except si.SqlInspectionError:
-            continue                                      # an unparsable relationship expression: the catalog lint reports it
+            continue  # an unparsable relationship expression: the catalog lint reports it
         index.setdefault(frozenset({left_table, right_table}), []).append(
-            Edge(frozenset({a, b}), f"{left_table}.{left_expr} = {right_table}.{right_expr}"))
+            Edge(frozenset({a, b}), f"{left_table}.{left_expr} = {right_table}.{right_expr}")
+        )
     return index
 
 
 def default_catalog_view() -> CatalogView:
     import db.schema_catalog as schema
 
-    relationships = tuple((r.left_table.lower(), r.left_expr, r.right_table.lower(), r.right_expr) for r in schema.RELATIONSHIPS)
+    relationships = tuple(
+        (r.left_table.lower(), r.left_expr, r.right_table.lower(), r.right_expr) for r in schema.RELATIONSHIPS
+    )
     index = _edge_index(relationships)
     memo: dict = {}
 
@@ -90,32 +95,69 @@ def default_catalog_view() -> CatalogView:
             path = []
         return "; ".join(f"{r.left_table}.{r.left_expr} = {r.right_table}.{r.right_expr}" for r in path)
 
-    return CatalogView(frozenset(t.lower() for t in schema.list_table_names()), columns_of,
-                       lambda a, b: index.get(frozenset({a, b}), []), path_hint)
+    return CatalogView(
+        frozenset(t.lower() for t in schema.list_table_names()),
+        columns_of,
+        lambda a, b: index.get(frozenset({a, b}), []),
+        path_hint,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Safety
 # ---------------------------------------------------------------------------
 SAFE_TABLE_FUNCTIONS = frozenset({"unnest", "range", "generate_series", "generate_subscripts"})
-DENIED_FUNCTIONS = frozenset({"getenv", "current_setting", "getvariable", "query", "query_table", "glob", "which_secret",
-                              "st_read", "st_readosm"})
+DENIED_FUNCTIONS = frozenset(
+    {
+        "getenv",
+        "current_setting",
+        "getvariable",
+        "query",
+        "query_table",
+        "glob",
+        "which_secret",
+        "st_read",
+        "st_readosm",
+    }
+)
 DENIED_PREFIXES = ("read_", "duckdb_", "pragma_", "parquet_", "sniff_", "iceberg_", "delta_", "write_", "http_")
 
 
 def _safety(ins: si.Inspection, view: CatalogView) -> list[Violation]:
     out = []
     for fn in sorted(ins.table_functions - SAFE_TABLE_FUNCTIONS):
-        out.append(Violation("table_function", f"Table function {fn}() is not allowed: query only the catalog tables.", "safety"))
+        out.append(
+            Violation(
+                "table_function", f"Table function {fn}() is not allowed: query only the catalog tables.", "safety"
+            )
+        )
     for path in ins.files:
-        out.append(Violation("file_access", f"File or path {path!r} cannot be used as a table: query only the catalog tables.", "safety"))
+        out.append(
+            Violation(
+                "file_access",
+                f"File or path {path!r} cannot be used as a table: query only the catalog tables.",
+                "safety",
+            )
+        )
     for fn in sorted(ins.functions):
         if fn in DENIED_FUNCTIONS or fn.startswith(DENIED_PREFIXES):
-            out.append(Violation("forbidden_function", f"Function {fn}() is not allowed (file, environment or system access).", "safety"))
+            out.append(
+                Violation(
+                    "forbidden_function",
+                    f"Function {fn}() is not allowed (file, environment or system access).",
+                    "safety",
+                )
+            )
     unknown = sorted(t for t in ins.tables if t not in view.tables)
     if unknown:
-        out.append(Violation("unknown_table", f"Table(s) {', '.join(unknown)} are not available to the assistant. "
-                                              f"Use only: {', '.join(sorted(view.tables))}.", "safety"))
+        out.append(
+            Violation(
+                "unknown_table",
+                f"Table(s) {', '.join(unknown)} are not available to the assistant. "
+                f"Use only: {', '.join(sorted(view.tables))}.",
+                "safety",
+            )
+        )
     return out
 
 
@@ -156,13 +198,19 @@ def _joins(ins: si.Inspection, view: CatalogView) -> list[Violation]:
                 continue
             if edges:
                 approved = "; ".join(e.display for e in edges)
-                add("unapproved_join", f"Join condition `{jp.left} = {jp.right}` is not an approved relationship between "
-                                       f"{jp.left_table} and {jp.right_table}. Use: {approved}.")
+                add(
+                    "unapproved_join",
+                    f"Join condition `{jp.left} = {jp.right}` is not an approved relationship between "
+                    f"{jp.left_table} and {jp.right_table}. Use: {approved}.",
+                )
             else:
                 hint = view.path_hint(jp.left_table, jp.right_table)
-                add("unapproved_join", f"There is no approved direct relationship between {jp.left_table} and {jp.right_table}"
-                                       f" (`{jp.left} = {jp.right}` is not allowed)."
-                                       + (f" Connect them through: {hint}." if hint else ""))
+                add(
+                    "unapproved_join",
+                    f"There is no approved direct relationship between {jp.left_table} and {jp.right_table}"
+                    f" (`{jp.left} = {jp.right}` is not allowed)."
+                    + (f" Connect them through: {hint}." if hint else ""),
+                )
 
         find, union = _union_find(list(blk.rels))
         for a, b in blk.links:
@@ -186,8 +234,11 @@ def _joins(ins: si.Inspection, view: CatalogView) -> list[Violation]:
                         ok = True
             if checked and not ok:
                 names = ", ".join(sorted({t for _, t in rights} | {t for _, t in lefts}))
-                add("unapproved_join", f"JOIN ... USING ({col}) between {names} is not an approved relationship: write the "
-                                       "approved ON condition instead.")
+                add(
+                    "unapproved_join",
+                    f"JOIN ... USING ({col}) between {names} is not an approved relationship: write the "
+                    "approved ON condition instead.",
+                )
 
         groups: dict = {}
         for alias, rel in blk.rels.items():
@@ -195,9 +246,12 @@ def _joins(ins: si.Inspection, view: CatalogView) -> list[Violation]:
                 groups.setdefault(find(alias), []).append(rel.name)
         if len(groups) > 1:
             parts = [", ".join(sorted(set(g))) for g in groups.values()]
-            add("cross_join", "These tables are not joined to each other by any condition, which makes a cross product "
-                              f"(wrong results): {' | '.join(parts)}. Join every planned table using the approved "
-                              "relationship conditions listed in the plan.")
+            add(
+                "cross_join",
+                "These tables are not joined to each other by any condition, which makes a cross product "
+                f"(wrong results): {' | '.join(parts)}. Join every planned table using the approved "
+                "relationship conditions listed in the plan.",
+            )
     return out
 
 
@@ -212,7 +266,7 @@ def _required_equalities(filters) -> list[tuple[str, str]]:
     out = []
     for f in filters or []:
         m = _EQUALITY.match(str(f).strip())
-        if m:                                              # anything fancier is passed through by the planner too
+        if m:  # anything fancier is passed through by the planner too
             out.append((f"{m.group(1)}.{m.group(2)}".lower(), m.group(3).replace("''", "'")))
     return out
 
@@ -243,11 +297,14 @@ def _filters(ins: si.Inspection, wanted: list[tuple[str, str]], what: str) -> li
     out = []
     for column, value in wanted:
         if not _has_positive_filter(ins, column, value):
-            out.append(Violation(
-                f"missing_{what}_filter",
-                f"The {what} filter {column} = '{value}' must be a positive condition AND-ed into the WHERE or ON clause "
-                "(an equality, an IN list, or an OR of equalities on that column). It is missing, negated, commented "
-                "out, or voided by an OR with something else. Use the exact literal from the plan."))
+            out.append(
+                Violation(
+                    f"missing_{what}_filter",
+                    f"The {what} filter {column} = '{value}' must be a positive condition AND-ed into the WHERE or ON clause "
+                    "(an equality, an IN list, or an OR of equalities on that column). It is missing, negated, commented "
+                    "out, or voided by an OR with something else. Use the exact literal from the plan.",
+                )
+            )
     return out
 
 
@@ -256,9 +313,16 @@ def _limit(ins: si.Inspection, plan) -> list[Violation]:
     if not n:
         return []
     if ins.limit is None:
-        return [Violation("missing_limit", f"The request asks for the top {n} rows: the statement must end with LIMIT {n}.")]
+        return [
+            Violation("missing_limit", f"The request asks for the top {n} rows: the statement must end with LIMIT {n}.")
+        ]
     if ins.limit > n:
-        return [Violation("limit_too_large", f"The request asks for the top {n} rows but the statement uses LIMIT {ins.limit}: use LIMIT {n}.")]
+        return [
+            Violation(
+                "limit_too_large",
+                f"The request asks for the top {n} rows but the statement uses LIMIT {ins.limit}: use LIMIT {n}.",
+            )
+        ]
     return []
 
 

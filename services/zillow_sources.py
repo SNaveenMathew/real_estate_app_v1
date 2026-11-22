@@ -39,6 +39,7 @@ services/data_loader.py::load_zhvi() / load_market_heat_index() add nothing
 to this shape beyond deduplication before calling db.duckdb_store.upsert_df —
 the DuckDB table columns match this schema 1:1 (see db/duckdb_store.py).
 """
+
 from __future__ import annotations
 
 import re
@@ -84,23 +85,24 @@ def normalize_zip5(value) -> Optional[str]:
     digits = _ZIP_DIGITS_RE.sub("", s)
     if not digits:
         return None
-    digits = digits[:5]                # ZIP+4 or an accidentally-concatenated value: keep the first 5
+    digits = digits[:5]  # ZIP+4 or an accidentally-concatenated value: keep the first 5
     if len(digits) < 5:
-        digits = digits.zfill(5)       # leading zero(s) previously stripped
+        digits = digits.zfill(5)  # leading zero(s) previously stripped
     return digits
+
 
 # Logical name -> candidate raw column names (matched case-insensitively).
 # Only "region_id" and "region_name" are required; the rest are filled in
 # with NULL when a given geography level's export doesn't include them.
 _ID_COLUMNS: dict[str, list[str]] = {
-    "region_id":   ["RegionID"],
+    "region_id": ["RegionID"],
     "region_type": ["RegionType"],
     "region_name": ["RegionName"],
-    "size_rank":   ["SizeRank"],
-    "state_name":  ["StateName"],
-    "state":       ["State"],
-    "city":        ["City"],
-    "metro":       ["Metro"],
+    "size_rank": ["SizeRank"],
+    "state_name": ["StateName"],
+    "state": ["State"],
+    "city": ["City"],
+    "metro": ["Metro"],
     "county_name": ["CountyName"],
 }
 _REQUIRED = ["region_id", "region_name"]
@@ -163,19 +165,20 @@ def melt_wide_file(path: Path, value_name: str) -> Optional[pd.DataFrame]:
     missing_required = [f for f in _REQUIRED if not resolved.get(f)]
     if missing_required:
         preview = header_cols[:12] + (["..."] if len(header_cols) > 12 else [])
-        print(f"    Skipping {path.name}: missing required column(s) {missing_required} "
-              f"— doesn't look like a Zillow region export (columns found: {preview})")
+        print(
+            f"    Skipping {path.name}: missing required column(s) {missing_required} "
+            f"— doesn't look like a Zillow region export (columns found: {preview})"
+        )
         return None
 
     date_cols = [c for c in header_cols if _DATE_COL_RE.match(str(c).strip())]
     if not date_cols:
-        print(f"    Skipping {path.name}: no date columns found "
-              f"(expected headers like '2024-01-31')")
+        print(f"    Skipping {path.name}: no date columns found (expected headers like '2024-01-31')")
         return None
 
     id_cols_present = {logical: col for logical, col in resolved.items() if col}
     usecols = list(id_cols_present.values()) + date_cols
-    dtype = {col: str for col in id_cols_present.values()}   # date columns: let pandas infer (numeric)
+    dtype = {col: str for col in id_cols_present.values()}  # date columns: let pandas infer (numeric)
 
     try:
         raw = _read_selected(path, dtype=dtype, usecols=usecols)
@@ -211,7 +214,9 @@ def melt_wide_file(path: Path, value_name: str) -> Optional[pd.DataFrame]:
     if "region_type" in long.columns:
         long["region_type"] = long["region_type"].astype(object).where(long["region_type"].notna(), None)
         long["region_type"] = long["region_type"].apply(
-            lambda v: _REGION_TYPE_ALIASES.get(str(v).strip().lower(), str(v).strip().lower()) if v is not None else None
+            lambda v: (
+                _REGION_TYPE_ALIASES.get(str(v).strip().lower(), str(v).strip().lower()) if v is not None else None
+            )
         )
 
     # Defensive: Zillow's own zip-level exports are already clean 5-digit
@@ -237,17 +242,19 @@ class ZillowSourceBase:
     and `label` differ. Add a new Zillow metric (e.g. ZORI, days-to-pending)
     by subclassing this with those three attributes set.
     """
-    key: str = "unknown"            # matches the data/<key>/ folder name
+
+    key: str = "unknown"  # matches the data/<key>/ folder name
     label: str = "Unknown"
-    value_column: str = "value"     # name of the metric column in the long output
-    table: str = "unknown"          # destination DuckDB table (db/duckdb_store.py)
+    value_column: str = "value"  # name of the metric column in the long output
+    table: str = "unknown"  # destination DuckDB table (db/duckdb_store.py)
 
     @classmethod
     def load_dir(cls, source_dir: Path) -> pd.DataFrame:
-        files = sorted(
-            p for p in source_dir.iterdir()
-            if p.is_file() and p.suffix.lower() == ".csv"
-        ) if source_dir.exists() else []
+        files = (
+            sorted(p for p in source_dir.iterdir() if p.is_file() and p.suffix.lower() == ".csv")
+            if source_dir.exists()
+            else []
+        )
 
         frames = []
         for path in files:
@@ -260,9 +267,11 @@ class ZillowSourceBase:
             n_regions = long["region_id"].nunique()
             types = ", ".join(sorted(t for t in long["region_type"].dropna().unique().tolist()))
             date_lo, date_hi = long["date"].min(), long["date"].max()
-            print(f"      \u2713 {n_regions:,} regions"
-                  f"{' (' + types + ')' if types else ''}, "
-                  f"{date_lo.date()} to {date_hi.date()}")
+            print(
+                f"      \u2713 {n_regions:,} regions"
+                f"{' (' + types + ')' if types else ''}, "
+                f"{date_lo.date()} to {date_hi.date()}"
+            )
             frames.append(long)
 
         if not frames:
@@ -272,6 +281,7 @@ class ZillowSourceBase:
 
 class ZhviParser(ZillowSourceBase):
     """Zillow Home Value Index — smoothed, seasonally-adjusted typical home value ($)."""
+
     key = "zhvi"
     label = "Zillow Home Value Index (ZHVI)"
     value_column = "home_value"
@@ -280,6 +290,7 @@ class ZhviParser(ZillowSourceBase):
 
 class MarketHeatIndexParser(ZillowSourceBase):
     """Zillow Market Heat Index — ~0-100+ buyer/seller market temperature (higher = hotter/more seller-favorable)."""
+
     key = "market_heat_index"
     label = "Zillow Market Heat Index"
     value_column = "heat_index"

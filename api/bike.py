@@ -1,4 +1,5 @@
 """HTTP API endpoints for bicycle routing."""
+
 from __future__ import annotations
 
 import traceback
@@ -20,4 +21,3 @@ async def get_bike_route(req: BikeRouteRequest):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=502, detail=f"Bike routing service error: {e}")
-

@@ -11,6 +11,7 @@ pool and each gets its own DuckDB cursor (db/duckdb_store.py); the queries are s
 primary-key reads and bounded scans over the cache tables only), so the Cache page never waits
 behind the map.
 """
+
 from __future__ import annotations
 
 from typing import Optional
@@ -37,9 +38,11 @@ def cache_graph(include_empty: bool = Query(default=True)):
 
 
 @router.get("/entries")
-def cache_entries(kind: Optional[str] = Query(default=None),
-                        limit: int = Query(default=200, ge=1, le=2000),
-                        q: str = Query(default="")):
+def cache_entries(
+    kind: Optional[str] = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=2000),
+    q: str = Query(default=""),
+):
     store.get_conn()
     return {"entries": result_cache.entries(kind=kind, limit=limit, query=q)}
 

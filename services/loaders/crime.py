@@ -3,6 +3,7 @@
 Behaviour is unchanged: the facade in services/data_loader.py re-exports every name here, so
 `from services.data_loader import ...` (and scripts that call it) keep working.
 """
+
 from __future__ import annotations
 
 """
@@ -21,9 +22,7 @@ from services.crime_sources import CRIME_PARSERS, CRIME_CITY_KEYS
 from services.crime_taxonomy import classify_crime_text
 
 
-
-
-__all__ = ['_CRIME_SCHEMA_COLS', '_crime_incident_id', 'load_crime']
+__all__ = ["_CRIME_SCHEMA_COLS", "_crime_incident_id", "load_crime"]
 
 # ── Crime ────────────────────────────────────────────────────────────────────
 # Standardizes data/crime/<city>/ (one folder per city, any mix of .csv/.xlsx)
@@ -42,9 +41,20 @@ __all__ = ['_CRIME_SCHEMA_COLS', '_crime_incident_id', 'load_crime']
 # "what's the weighted crime severity near tract X" via query_database.
 
 _CRIME_SCHEMA_COLS = [
-    "incident_id", "city", "source_file", "occurred_at", "year", "month",
-    "year_month", "lat", "lon", "category", "category_label",
-    "severity_weight", "raw_type", "location_text",
+    "incident_id",
+    "city",
+    "source_file",
+    "occurred_at",
+    "year",
+    "month",
+    "year_month",
+    "lat",
+    "lon",
+    "category",
+    "category_label",
+    "severity_weight",
+    "raw_type",
+    "location_text",
 ]
 
 
@@ -101,21 +111,22 @@ def load_crime() -> int:
         city_dir = crime_root / parser.city
         if not city_dir.exists():
             continue
-        files = sorted(
-            p for p in city_dir.iterdir()
-            if p.is_file() and p.suffix.lower() in (".csv", ".xlsx", ".xls")
-        )
+        files = sorted(p for p in city_dir.iterdir() if p.is_file() and p.suffix.lower() in (".csv", ".xlsx", ".xls"))
         if not files:
             continue
 
-        print(f"  {parser.city_label}: {len(files)} file(s) — "
-              f"{', '.join(f.name for f in files[:4])}"
-              f"{', ...' if len(files) > 4 else ''}")
+        print(
+            f"  {parser.city_label}: {len(files)} file(s) — "
+            f"{', '.join(f.name for f in files[:4])}"
+            f"{', ...' if len(files) > 4 else ''}"
+        )
         try:
             raw = parser.load_raw(city_dir, files)
         except Exception as e:
             print(f"    Error loading {parser.city_label}: {e}")
-            import traceback; traceback.print_exc()
+            import traceback
+
+            traceback.print_exc()
             continue
 
         if raw is None or raw.empty:
@@ -139,8 +150,7 @@ def load_crime() -> int:
             df = df[df["lat"].between(lat_lo, lat_hi) & df["lon"].between(lon_lo, lon_hi)]
         dropped = before - len(df)
         if dropped:
-            print(f"    Dropped {dropped:,} row(s): missing/invalid date, lat, lon, "
-                  f"or outside the expected area")
+            print(f"    Dropped {dropped:,} row(s): missing/invalid date, lat, lon, or outside the expected area")
 
         if df.empty:
             print(f"    No valid rows remain for {parser.city_label}")
@@ -150,13 +160,13 @@ def load_crime() -> int:
 
         # ── Classification ─────────────────────────────────────────────
         classified = df["raw_type"].fillna("").astype(str).apply(classify_crime_text)
-        df["category"]        = [c[0] for c in classified]
-        df["category_label"]  = [c[1] for c in classified]
+        df["category"] = [c[0] for c in classified]
+        df["category_label"] = [c[1] for c in classified]
         df["severity_weight"] = [c[2] for c in classified]
 
         # ── Time parts (mirrors the R pipeline's year / year_month frames) ─
-        df["year"]       = df["occurred_at"].dt.year
-        df["month"]      = df["occurred_at"].dt.month
+        df["year"] = df["occurred_at"].dt.year
+        df["month"] = df["occurred_at"].dt.month
         df["year_month"] = df["occurred_at"].dt.strftime("%Y-%m")
 
         # ── IDs ────────────────────────────────────────────────────────
@@ -174,8 +184,7 @@ def load_crime() -> int:
         n_by_cat = df["category_label"].value_counts()
         top3 = ", ".join(f"{k} ({v:,})" for k, v in n_by_cat.head(3).items())
         yr_lo, yr_hi = df["year"].min(), df["year"].max()
-        print(f"    ✓ {len(df):,} incidents "
-              f"({int(yr_lo)}–{int(yr_hi)}) — top categories: {top3}")
+        print(f"    ✓ {len(df):,} incidents ({int(yr_lo)}–{int(yr_hi)}) — top categories: {top3}")
 
         # Surface what's landing in the catch-all bucket so classification
         # gaps are visible instead of silently averaging away. Some of this
@@ -191,25 +200,34 @@ def load_crime() -> int:
         if other_n and other_pct >= 5:
             top_unclassified = (
                 df.loc[other_mask, "raw_type"]
-                  .astype(str).str.strip()
-                  .replace("", pd.NA).dropna()
-                  .value_counts().head(10)
+                .astype(str)
+                .str.strip()
+                .replace("", pd.NA)
+                .dropna()
+                .value_counts()
+                .head(10)
             )
-            print(f"    ⚠ {other_n:,} ({other_pct:.0f}%) incidents fell into "
-                  f"'Other/Unclassified'. Most common unclassified raw text "
-                  f"for {parser.city_label}:")
+            print(
+                f"    ⚠ {other_n:,} ({other_pct:.0f}%) incidents fell into "
+                f"'Other/Unclassified'. Most common unclassified raw text "
+                f"for {parser.city_label}:"
+            )
             for txt, n in top_unclassified.items():
                 snippet = txt if len(txt) <= 80 else txt[:77] + "..."
                 print(f"        {n:>7,}×  {snippet}")
-            print(f"      → If real crime types are being missed above, add "
-                  f"keyword patterns for them in services/crime_taxonomy.py.")
+            print(
+                f"      → If real crime types are being missed above, add "
+                f"keyword patterns for them in services/crime_taxonomy.py."
+            )
 
         all_rows.append(df[_CRIME_SCHEMA_COLS])
 
     if not all_rows:
-        print(f"  No crime data loaded. Expected folders like "
-              f"data/crime/chicago/, data/crime/pittsburgh/, etc. "
-              f"(supported cities: {', '.join(CRIME_CITY_KEYS)})")
+        print(
+            f"  No crime data loaded. Expected folders like "
+            f"data/crime/chicago/, data/crime/pittsburgh/, etc. "
+            f"(supported cities: {', '.join(CRIME_CITY_KEYS)})"
+        )
         return 0
 
     combined = pd.concat(all_rows, ignore_index=True)
@@ -223,14 +241,11 @@ def load_crime() -> int:
     placeholders = ", ".join("?" for _ in cities)
     conn.execute("BEGIN TRANSACTION")
     try:
-        conn.execute(
-            f"DELETE FROM crime_incidents WHERE city IN ({placeholders})", cities
-        )
+        conn.execute(f"DELETE FROM crime_incidents WHERE city IN ({placeholders})", cities)
         store.upsert_df("crime_incidents", combined)
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
         raise
-    print(f"  ✓ {len(combined):,} total crime incidents loaded "
-          f"across {combined['city'].nunique()} cities")
+    print(f"  ✓ {len(combined):,} total crime incidents loaded across {combined['city'].nunique()} cities")
     return len(combined)

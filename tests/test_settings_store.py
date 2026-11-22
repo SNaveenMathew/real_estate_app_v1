@@ -79,4 +79,3 @@ def test_commute_house_endpoint_with_no_work_set(fresh_db):
 
     assert response.status_code == 200
     assert response.json() == {"work": None, "commute": None}
-

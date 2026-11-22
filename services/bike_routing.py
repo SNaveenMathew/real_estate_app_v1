@@ -9,6 +9,7 @@ Uses free/open infrastructure:
 Routes never use an external road/path routing graph. The seven configured
 BikePGH layer families are the only route edges.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -40,8 +41,6 @@ from services.routing_common import (
     NOMINATIM_MIN_INTERVAL_SECONDS,
     HTTP_TIMEOUT_SECONDS,
 )
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +76,7 @@ BIKE_GRAPH_SNAP_MAX_MILES = 0.50
 # so the two never drift apart. Raw source layers remain independently routable; this hierarchy only
 # resolves coincident classifications for the route visualization.
 from services.map_layers import BIKE_DISPLAY_PRIORITY
+
 BIKE_GRAPH_CACHE: dict[str, tuple[int, dict]] = {}
 
 # Crime-avoidance uses the same coarse, severity-weighted grid philosophy as
@@ -95,8 +95,6 @@ CRIME_EDGE_MAX_PENALTY = 3.0
 VISUAL_CORRIDOR_PAD_DEG = 0.02
 MAX_VISUAL_DENSITY_CELLS = 700
 MAX_VISUAL_HOTSPOT_CELLS = 350
-
-
 
 
 def _iter_lines(geom):
@@ -146,9 +144,7 @@ def _load_bike_graph(city: Optional[str]) -> dict:
     count_df = store.query(f"SELECT COUNT(*) AS n FROM bike_routes {where}", params)
     feature_count = int(count_df.iloc[0]["n"]) if not count_df.empty else 0
     if feature_count <= 0:
-        raise ValueError(
-            f"No BikePGH infrastructure data is loaded for city '{city or 'all cities'}'."
-        )
+        raise ValueError(f"No BikePGH infrastructure data is loaded for city '{city or 'all cities'}'.")
 
     cached = BIKE_GRAPH_CACHE.get(city_key)
     if cached and cached[0] == feature_count:
@@ -182,9 +178,7 @@ def _load_bike_graph(city: Optional[str]) -> dict:
         lines.extend(list(_iter_lines(geom)))
 
     if not lines:
-        raise ValueError(
-            f"BikePGH data for '{city or 'all cities'}' contains no routable line geometry."
-        )
+        raise ValueError(f"BikePGH data for '{city or 'all cities'}' contains no routable line geometry.")
 
     from shapely.ops import unary_union
 
@@ -343,7 +337,8 @@ def _crime_density_aggregate(city: Optional[str], grid_deg: float = DEFAULT_CRIM
         city_clause = f"AND lower(city) IN ({placeholders})"
         params.extend(city_candidates)
 
-    df = store.query(f"""
+    df = store.query(
+        f"""
         SELECT
             ROUND(lat / ?) * ? AS glat,
             ROUND(lon / ?) * ? AS glon,
@@ -354,17 +349,18 @@ def _crime_density_aggregate(city: Optional[str], grid_deg: float = DEFAULT_CRIM
           {city_clause}
         GROUP BY glat, glon
         HAVING COUNT(*) > 0
-    """, params)
+    """,
+        params,
+    )
 
     if df.empty:
         return []
 
     max_count = max(int(df["incident_count"].max()), 1)
     max_weight = max(float(df["weighted_score"].max()), 1.0)
-    df["intensity"] = (
-        (df["incident_count"].astype(float) / max_count) * 0.75
-        + (df["weighted_score"].astype(float) / max_weight) * 0.25
-    )
+    df["intensity"] = (df["incident_count"].astype(float) / max_count) * 0.75 + (
+        df["weighted_score"].astype(float) / max_weight
+    ) * 0.25
 
     return [
         {
@@ -384,8 +380,9 @@ def _crime_density_aggregate(city: Optional[str], grid_deg: float = DEFAULT_CRIM
     ]
 
 
-def _crime_hotspot_cells(city: Optional[str], grid_deg: float = DEFAULT_CRIME_GRID_DEG,
-                         percentile: float = DEFAULT_CRIME_DENSITY_PERCENTILE) -> list[dict]:
+def _crime_hotspot_cells(
+    city: Optional[str], grid_deg: float = DEFAULT_CRIME_GRID_DEG, percentile: float = DEFAULT_CRIME_DENSITY_PERCENTILE
+) -> list[dict]:
     """Return citywide high-risk crime cells using the exact score shown on the map.
 
     The percentile baseline remains citywide.  Only the spatial application of
@@ -425,8 +422,9 @@ def _crime_hotspot_cells(city: Optional[str], grid_deg: float = DEFAULT_CRIME_GR
     ]
 
 
-def _crime_density_cells(city: Optional[str], grid_deg: float = DEFAULT_CRIME_GRID_DEG,
-                         max_cells: int = 5000) -> list[dict]:
+def _crime_density_cells(
+    city: Optional[str], grid_deg: float = DEFAULT_CRIME_GRID_DEG, max_cells: int = 5000
+) -> list[dict]:
     """Return the same crime-density cells and intensity score shown to the user.
 
     Both the map and routing consume the shared aggregate so there is no second,
@@ -447,22 +445,24 @@ def _graph_network_features(graph: dict, max_edges: int = 25000) -> list[dict]:
     """Serialize the currently filtered BikePGH graph for the intermediate map."""
     features = []
     for a, b, _miles in _graph_edges(graph):
-        features.append({
-            "type": "Feature",
-            "properties": {"color": "#4b5563", "filtered_network": True},
-            "geometry": {
-                "type": "LineString",
-                "coordinates": [[float(a[0]), float(a[1])], [float(b[0]), float(b[1])]],
-            },
-        })
+        features.append(
+            {
+                "type": "Feature",
+                "properties": {"color": "#4b5563", "filtered_network": True},
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [[float(a[0]), float(a[1])], [float(b[0]), float(b[1])]],
+                },
+            }
+        )
         if len(features) >= max_edges:
             break
     return features
 
 
 def _analysis_corridor_bounds(start: dict, end: dict, pad_deg: float = VISUAL_CORRIDOR_PAD_DEG) -> dict:
-    lats = [float(start["lat"]), float(end["lat"]) ]
-    lons = [float(start["lon"]), float(end["lon"]) ]
+    lats = [float(start["lat"]), float(end["lat"])]
+    lons = [float(start["lon"]), float(end["lon"])]
     return {
         "west": min(lons) - pad_deg,
         "south": min(lats) - pad_deg,
@@ -486,24 +486,23 @@ def _geometry_intersects_bbox(feature: dict, bbox: dict) -> bool:
         return False
 
 
-def _build_crime_analysis_visualization(graph: dict, start: dict, end: dict,
-                                        hotspot_cells: list[dict] | None,
-                                        *, crime_enabled: bool,
-                                        crime_percentile: float) -> dict:
+def _build_crime_analysis_visualization(
+    graph: dict,
+    start: dict,
+    end: dict,
+    hotspot_cells: list[dict] | None,
+    *,
+    crime_enabled: bool,
+    crime_percentile: float,
+) -> dict:
     hotspots = hotspot_cells or []
     corridor_bbox = _analysis_corridor_bounds(start, end)
 
     density_cells = _crime_density_aggregate(graph.get("city"), DEFAULT_CRIME_GRID_DEG) if crime_enabled else []
     # Keep the visualization focused on the requested trip corridor, while the
     # percentile baseline remains citywide.
-    relevant_density = [
-        c for c in density_cells
-        if _point_in_bbox(float(c["glat"]), float(c["glon"]), corridor_bbox)
-    ]
-    relevant_hotspots = [
-        c for c in hotspots
-        if _point_in_bbox(float(c["glat"]), float(c["glon"]), corridor_bbox)
-    ]
+    relevant_density = [c for c in density_cells if _point_in_bbox(float(c["glat"]), float(c["glon"]), corridor_bbox)]
+    relevant_hotspots = [c for c in hotspots if _point_in_bbox(float(c["glat"]), float(c["glon"]), corridor_bbox)]
     relevant_density = relevant_density[:MAX_VISUAL_DENSITY_CELLS]
     relevant_hotspots = relevant_hotspots[:MAX_VISUAL_HOTSPOT_CELLS]
 
@@ -521,17 +520,21 @@ def _build_crime_analysis_visualization(graph: dict, start: dict, end: dict,
         "blocked_bike_network": {"type": "FeatureCollection", "features": blocked_network},
         "crime_density": [
             {
-                "lat": c["glat"], "lon": c["glon"],
+                "lat": c["glat"],
+                "lon": c["glon"],
                 "incident_count": c["incident_count"],
                 "weighted_score": c["weighted_score"],
                 "intensity": c["intensity"],
-                "is_hotspot": any(abs(c["glat"] - h["glat"]) < 1e-9 and abs(c["glon"] - h["glon"]) < 1e-9 for h in relevant_hotspots),
+                "is_hotspot": any(
+                    abs(c["glat"] - h["glat"]) < 1e-9 and abs(c["glon"] - h["glon"]) < 1e-9 for h in relevant_hotspots
+                ),
             }
             for c in relevant_density
         ],
         "crime_hotspots": [
             {
-                "lat": c["glat"], "lon": c["glon"],
+                "lat": c["glat"],
+                "lon": c["glon"],
                 "incident_count": c["incident_count"],
                 "weighted_score": c["weighted_score"],
                 "intensity": c.get("intensity", 0.0),
@@ -577,8 +580,9 @@ def _crime_cell_center(value: float, grid_deg: float) -> float:
     return round(math.floor((value / grid_deg) + 0.5) * grid_deg, 6)
 
 
-def _edge_crime_exposure(edge: LineString, crime_lookup: dict[tuple[float, float], float],
-                         grid_deg: float, hotspot_threshold: float) -> dict:
+def _edge_crime_exposure(
+    edge: LineString, crime_lookup: dict[tuple[float, float], float], grid_deg: float, hotspot_threshold: float
+) -> dict:
     """Sample a geometry against the shared continuous crime-density score."""
     if not crime_lookup or hotspot_threshold <= 0:
         return {
@@ -694,9 +698,13 @@ def _logical_bike_segments(graph: dict, boundary_nodes: set | None = None) -> li
     return segments
 
 
-def _segment_crime_exposure(segment: dict, crime_lookup: dict[tuple[float, float], float],
-                            grid_deg: float, hotspot_threshold: float,
-                            hotspot_polygons: list) -> dict:
+def _segment_crime_exposure(
+    segment: dict,
+    crime_lookup: dict[tuple[float, float], float],
+    grid_deg: float,
+    hotspot_threshold: float,
+    hotspot_polygons: list,
+) -> dict:
     """Evaluate crime exposure for an entire intersection-to-intersection segment."""
     geom = segment["geometry"]
     sampled = _edge_crime_exposure(geom, crime_lookup, grid_deg, hotspot_threshold)
@@ -745,11 +753,14 @@ def _segment_feature(segment: dict, *, color="#f97316", dashed=True):
     }
 
 
-def _apply_crime_avoidance_filter(graph: dict, hotspot_cells: list[dict],
-                                  all_density_cells: list[dict] | None = None,
-                                  grid_deg: float = DEFAULT_CRIME_GRID_DEG,
-                                  crime_threshold: float | None = None,
-                                  boundary_nodes: set | None = None) -> dict:
+def _apply_crime_avoidance_filter(
+    graph: dict,
+    hotspot_cells: list[dict],
+    all_density_cells: list[dict] | None = None,
+    grid_deg: float = DEFAULT_CRIME_GRID_DEG,
+    crime_threshold: float | None = None,
+    boundary_nodes: set | None = None,
+) -> dict:
     """Apply citywide crime filtering at logical intersection-to-intersection segments."""
     if not hotspot_cells:
         graph["crime_avoidance"] = {
@@ -766,11 +777,7 @@ def _apply_crime_avoidance_filter(graph: dict, hotspot_cells: list[dict],
     if all_density_cells is None:
         all_density_cells = _crime_density_aggregate(graph.get("city"), grid_deg)
     lookup = _crime_cell_lookup(all_density_cells, grid_deg)
-    threshold = float(
-        crime_threshold
-        if crime_threshold is not None
-        else hotspot_cells[0].get("crime_threshold", 0.0)
-    )
+    threshold = float(crime_threshold if crime_threshold is not None else hotspot_cells[0].get("crime_threshold", 0.0))
     hotspot_polygons = [c["exclusion_polygon"] for c in hotspot_cells if c.get("exclusion_polygon") is not None]
 
     adjacency = graph["adjacency"]
@@ -784,9 +791,7 @@ def _apply_crime_avoidance_filter(graph: dict, hotspot_cells: list[dict],
     # to that real-world intersection-to-intersection section.
     segments = _logical_bike_segments(graph, boundary_nodes=boundary_nodes)
     for segment in segments:
-        exposure = _segment_crime_exposure(
-            segment, lookup, grid_deg, threshold, hotspot_polygons
-        )
+        exposure = _segment_crime_exposure(segment, lookup, grid_deg, threshold, hotspot_polygons)
         segment_stats.append(exposure)
 
         if not exposure["blocked"]:
@@ -823,6 +828,7 @@ def _apply_crime_avoidance_filter(graph: dict, hotspot_cells: list[dict],
     }
     return graph
 
+
 def _dijkstra(graph, start_node, end_node):
     return _common_dijkstra(
         graph["adjacency"],
@@ -833,8 +839,6 @@ def _dijkstra(graph, start_node, end_node):
             "the locally ingested BikePGH infrastructure."
         ),
     )
-
-
 
 
 def _local_bike_facilities(route_geom: LineString, city: Optional[str]) -> dict:
@@ -879,11 +883,13 @@ def _local_bike_facilities(route_geom: LineString, city: Optional[str]) -> dict:
 
     labels = []
     for row in df.itertuples(index=False):
-        labels.append({
-            "layer_type": getattr(row, "layer_type", ""),
-            "label": getattr(row, "layer_label", ""),
-            "color": getattr(row, "color", ""),
-        })
+        labels.append(
+            {
+                "layer_type": getattr(row, "layer_type", ""),
+                "label": getattr(row, "layer_label", ""),
+                "color": getattr(row, "color", ""),
+            }
+        )
 
     return {
         "facility_overlap_miles": None,
@@ -941,20 +947,21 @@ def _used_bike_infrastructure(graph: dict, path: list[tuple[float, float]]) -> l
         if key in seen:
             continue
         seen.add(key)
-        output.append({
-            "type": "Feature",
-            "properties": {
-                "layer_type": meta["layer_type"],
-                "label": meta["label"],
-                "color": meta["color"],
-                "display_priority": BIKE_DISPLAY_PRIORITY.get(meta["layer_type"], 0),
-            },
-            "geometry": {
-                "type": "LineString",
-                "coordinates": [[float(a[0]), float(a[1])],
-                                [float(b[0]), float(b[1])]],
-            },
-        })
+        output.append(
+            {
+                "type": "Feature",
+                "properties": {
+                    "layer_type": meta["layer_type"],
+                    "label": meta["label"],
+                    "color": meta["color"],
+                    "display_priority": BIKE_DISPLAY_PRIORITY.get(meta["layer_type"], 0),
+                },
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [[float(a[0]), float(a[1])], [float(b[0]), float(b[1])]],
+                },
+            }
+        )
 
     return output
 
@@ -963,10 +970,7 @@ def _bearing(a, b):
     lon1, lat1 = map(math.radians, a)
     lon2, lat2 = map(math.radians, b)
     dx = math.cos(lat2) * math.sin(lon2 - lon1)
-    dy = (
-        math.cos(lat1) * math.sin(lat2)
-        - math.sin(lat1) * math.cos(lat2) * math.cos(lon2 - lon1)
-    )
+    dy = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(lon2 - lon1)
     return (math.degrees(math.atan2(dx, dy)) + 360.0) % 360.0
 
 
@@ -1056,41 +1060,48 @@ async def route_bike(
         end_node, end_snap_miles = _snap_point_to_graph(graph, end["lat"], end["lon"])
         if start_node == end_node:
             raise ValueError(
-                "Both endpoints snap to the same BikePGH path location. "
-                "Choose more specific endpoint locations."
+                "Both endpoints snap to the same BikePGH path location. Choose more specific endpoint locations."
             )
 
         hotspot_cells = []
         if avoid_crime_dense_areas:
             try:
-                hotspot_cells = _crime_hotspot_cells(
-                    city, percentile=crime_density_percentile
-                )
+                hotspot_cells = _crime_hotspot_cells(city, percentile=crime_density_percentile)
                 # A crime-aware route is only valid when crime data exists. An
                 # empty crime dataset must not silently turn into an unfiltered
                 # route with `applied=True`.
                 if not hotspot_cells:
                     analysis_visualization = _build_crime_analysis_visualization(
-                        graph, start, end, [],
-                        crime_enabled=True, crime_percentile=crime_density_percentile,
+                        graph,
+                        start,
+                        end,
+                        [],
+                        crime_enabled=True,
+                        crime_percentile=crime_density_percentile,
                     )
                     return {
-                        "start": start, "end": end,
+                        "start": start,
+                        "end": end,
                         "city": graph.get("city") or (city or "Pittsburgh, PA"),
                         "provider": "BikePGH local graph",
                         "attribution": "Endpoint geocoding: Nominatim / OpenStreetMap",
-                        "route": None, "alternatives_considered": 1,
+                        "route": None,
+                        "alternatives_considered": 1,
                         "crime_avoidance": {
-                            "enabled": True, "applied": False,
-                            "hotspot_cells": 0, "blocked_edges": 0,
+                            "enabled": True,
+                            "applied": False,
+                            "hotspot_cells": 0,
+                            "blocked_edges": 0,
                             "error": "No crime-density data is available for the requested city.",
                         },
                         "analysis_visualization": analysis_visualization,
-                        "no_route": True, "crime_filter_error": True,
+                        "no_route": True,
+                        "crime_filter_error": True,
                         "note": "Crime-aware routing is not possible because no crime-density data is available for the requested city.",
                     }
                 _apply_crime_avoidance_filter(
-                    graph, hotspot_cells,
+                    graph,
+                    hotspot_cells,
                     all_density_cells=_crime_density_aggregate(city, DEFAULT_CRIME_GRID_DEG),
                     grid_deg=DEFAULT_CRIME_GRID_DEG,
                     crime_threshold=float(hotspot_cells[0].get("crime_threshold", 0.0)),
@@ -1100,30 +1111,45 @@ async def route_bike(
                 crime_avoidance.update({"enabled": True, "applied": True})
             except Exception as exc:
                 analysis_visualization = _build_crime_analysis_visualization(
-                    graph, start, end, hotspot_cells,
-                    crime_enabled=True, crime_percentile=crime_density_percentile,
+                    graph,
+                    start,
+                    end,
+                    hotspot_cells,
+                    crime_enabled=True,
+                    crime_percentile=crime_density_percentile,
                 )
                 return {
-                    "start": start, "end": end,
+                    "start": start,
+                    "end": end,
                     "city": graph.get("city") or (city or "Pittsburgh, PA"),
                     "provider": "BikePGH local graph",
                     "attribution": "Endpoint geocoding: Nominatim / OpenStreetMap",
-                    "route": None, "alternatives_considered": 1,
+                    "route": None,
+                    "alternatives_considered": 1,
                     "crime_avoidance": {
-                        "enabled": True, "applied": False,
+                        "enabled": True,
+                        "applied": False,
                         "hotspot_cells": len(hotspot_cells),
-                        "blocked_edges": 0, "error": str(exc),
+                        "blocked_edges": 0,
+                        "error": str(exc),
                     },
                     "analysis_visualization": analysis_visualization,
-                    "no_route": True, "crime_filter_error": True,
+                    "no_route": True,
+                    "crime_filter_error": True,
                     "note": f"Crime-avoidance filter could not be applied: {exc}",
                 }
 
         analysis_visualization = (
             _build_crime_analysis_visualization(
-                graph, start, end, hotspot_cells,
-                crime_enabled=True, crime_percentile=crime_density_percentile,
-            ) if avoid_crime_dense_areas else None
+                graph,
+                start,
+                end,
+                hotspot_cells,
+                crime_enabled=True,
+                crime_percentile=crime_density_percentile,
+            )
+            if avoid_crime_dense_areas
+            else None
         )
 
         try:
@@ -1131,11 +1157,13 @@ async def route_bike(
         except ValueError as exc:
             if avoid_crime_dense_areas:
                 return {
-                    "start": start, "end": end,
+                    "start": start,
+                    "end": end,
                     "city": graph.get("city") or (city or "Pittsburgh, PA"),
                     "provider": "BikePGH local graph",
                     "attribution": "Endpoint geocoding: Nominatim / OpenStreetMap",
-                    "route": None, "alternatives_considered": 1,
+                    "route": None,
+                    "alternatives_considered": 1,
                     "crime_avoidance": graph.get("crime_avoidance", crime_avoidance),
                     "analysis_visualization": analysis_visualization,
                     "no_route": True,
@@ -1154,12 +1182,15 @@ async def route_bike(
         route_lats = [float(lat) for lon, lat in path]
         route_lons = [float(lon) for lon, lat in path]
         route_bbox = {
-            "west": min(route_lons), "south": min(route_lats),
-            "east": max(route_lons), "north": max(route_lats),
+            "west": min(route_lons),
+            "south": min(route_lats),
+            "east": max(route_lons),
+            "north": max(route_lats),
         }
 
         return {
-            "start": start, "end": end,
+            "start": start,
+            "end": end,
             "city": graph.get("city") or (city or "Pittsburgh, PA"),
             "provider": "BikePGH local graph",
             "attribution": "Endpoint geocoding: Nominatim / OpenStreetMap",
@@ -1187,20 +1218,27 @@ async def route_bike(
         if avoid_crime_dense_areas:
             try:
                 analysis_visualization = _build_crime_analysis_visualization(
-                    graph, start, end, [],
-                    crime_enabled=True, crime_percentile=crime_density_percentile,
+                    graph,
+                    start,
+                    end,
+                    [],
+                    crime_enabled=True,
+                    crime_percentile=crime_density_percentile,
                 )
             except Exception:
                 analysis_visualization = None
             return {
-                "start": start, "end": end,
+                "start": start,
+                "end": end,
                 "city": graph.get("city") or (city or "Pittsburgh, PA"),
                 "provider": "BikePGH local graph",
                 "attribution": "Endpoint geocoding: Nominatim / OpenStreetMap",
-                "route": None, "alternatives_considered": 1,
+                "route": None,
+                "alternatives_considered": 1,
                 "crime_avoidance": {**crime_avoidance, "enabled": True, "applied": False, "error": str(exc)},
                 "analysis_visualization": analysis_visualization,
-                "no_route": True, "crime_filter_error": True,
+                "no_route": True,
+                "crime_filter_error": True,
                 "note": f"Crime-aware routing could not be completed: {exc}",
             }
         raise

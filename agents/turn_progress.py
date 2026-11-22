@@ -1,4 +1,5 @@
 """Real-time progress tracker for agent execution steps."""
+
 from __future__ import annotations
 
 import contextvars
@@ -6,7 +7,9 @@ import threading
 import time
 from typing import Any, Callable
 
-_CURRENT_TRACKER: contextvars.ContextVar[TurnProgressTracker | None] = contextvars.ContextVar("turn_progress_tracker", default=None)
+_CURRENT_TRACKER: contextvars.ContextVar[TurnProgressTracker | None] = contextvars.ContextVar(
+    "turn_progress_tracker", default=None
+)
 
 
 def get_current_tracker() -> TurnProgressTracker | None:
@@ -42,9 +45,7 @@ class TurnProgressTracker:
         # - Result step: "result" (pending initially)
         # ``default_steps`` is the agent's own plan (agents/general_agent.PROGRESS_STEPS /
         # agents/house_agent.PROGRESS_STEPS), so the panel never shows steps that will not run.
-        self.steps: list[dict[str, str]] = [
-            {"id": "start", "title": "Starting", "status": "running"}
-        ]
+        self.steps: list[dict[str, str]] = [{"id": "start", "title": "Starting", "status": "running"}]
         for step_id, title in default_steps or []:
             self.steps.append({"id": step_id, "title": title, "status": "pending"})
         self.steps.append({"id": "result", "title": "result", "status": "pending"})
@@ -204,7 +205,9 @@ def get_progress_tracker(turn_id: str) -> TurnProgressTracker | None:
         return _TRACKERS.get(turn_id)
 
 
-def get_or_create_progress_tracker(turn_id: str, default_steps: list[tuple[str, str]] | None = None) -> TurnProgressTracker:
+def get_or_create_progress_tracker(
+    turn_id: str, default_steps: list[tuple[str, str]] | None = None
+) -> TurnProgressTracker:
     with _TRACKERS_LOCK:
         if turn_id in _TRACKERS:
             return _TRACKERS[turn_id]

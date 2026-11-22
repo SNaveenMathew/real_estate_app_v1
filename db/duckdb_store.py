@@ -2,6 +2,7 @@
 DuckDB-backed structured data store.
 All heavy analytics (SQL-like queries, joins) go through here.
 """
+
 import json
 import threading
 import duckdb
@@ -15,7 +16,7 @@ from config import settings
 _conn: Optional[duckdb.DuckDBPyConnection] = None
 
 
-_generation: int = 0   # bumped every time a new connection is opened (see connection_generation)
+_generation: int = 0  # bumped every time a new connection is opened (see connection_generation)
 
 # How many times a corrupt/un-repayable .wal has been quarantined in this process. Nine such
 # files sit in data/ from before this counter existed; without a number the recovery is silent
@@ -39,11 +40,14 @@ def _safe_connect(db_path: Path) -> duckdb.DuckDBPyConnection:
         err_msg = str(exc)
         if wal_path.exists() and any(sig in err_msg for sig in ("replaying WAL file", "DatabaseManager", "WAL", "wal")):
             import time, logging
+
             logger = logging.getLogger(__name__)
             bad_wal = Path(str(db_path) + f".wal.bad.{int(time.time())}")
             logger.warning(
                 "Corrupt or un-repayable DuckDB WAL file detected (%s). Moving %s -> %s and recovering from checkpoint.",
-                err_msg, wal_path, bad_wal,
+                err_msg,
+                wal_path,
+                bad_wal,
             )
             try:
                 wal_path.rename(bad_wal)
@@ -71,7 +75,7 @@ def _safe_connect(db_path: Path) -> duckdb.DuckDBPyConnection:
 # the engine, and nothing else in the app changes: callers still just call ``get_conn()``.
 _local = threading.local()
 _create_lock = threading.RLock()
-_cursors: list = []            # every cursor handed out, so close() can release them (they keep the database file open)
+_cursors: list = []  # every cursor handed out, so close() can release them (they keep the database file open)
 
 
 def get_conn() -> duckdb.DuckDBPyConnection:
@@ -79,14 +83,14 @@ def get_conn() -> duckdb.DuckDBPyConnection:
     global _conn, _generation
     if _conn is None:
         with _create_lock:
-            if _conn is None:                       # another thread may have created it while we waited
+            if _conn is None:  # another thread may have created it while we waited
                 settings.duckdb_path.parent.mkdir(parents=True, exist_ok=True)
                 _conn = _safe_connect(settings.duckdb_path)
-                _ensure_schema(_conn)               # (assigned first: schema setup re-enters get_conn())
+                _ensure_schema(_conn)  # (assigned first: schema setup re-enters get_conn())
                 _generation += 1
     cursor = getattr(_local, "cursor", None)
     if cursor is None or getattr(_local, "generation", -1) != _generation:
-        with _create_lock:                          # also makes other threads wait while the schema is being created
+        with _create_lock:  # also makes other threads wait while the schema is being created
             cursor = _conn.cursor()
             _cursors.append(cursor)
         _local.cursor, _local.generation = cursor, _generation
@@ -122,7 +126,7 @@ def query_limited(sql: str, params=None, *, max_rows: int | None = None, timeout
         timer.start()
     try:
         result = cursor.execute(sql, params) if params else cursor.execute(sql)
-        vectors = max(1, -(-(max_rows + 1) // 2048))      # DuckDB hands out rows 2048 at a time
+        vectors = max(1, -(-(max_rows + 1) // 2048))  # DuckDB hands out rows 2048 at a time
         frame = result.fetch_df_chunk(vectors)
         truncated = len(frame) > max_rows
         if truncated:
@@ -137,8 +141,9 @@ def query_limited(sql: str, params=None, *, max_rows: int | None = None, timeout
             timer.cancel()
 
 
-def query_limited_cached(sql: str, params=None, *, max_rows: int | None = None,
-                         timeout_s: float | None = None, request_text: str = ""):
+def query_limited_cached(
+    sql: str, params=None, *, max_rows: int | None = None, timeout_s: float | None = None, request_text: str = ""
+):
     """``query_limited`` plus the shared SQL/CTE result cache: ``(DataFrame, truncated, cache_hit)``.
 
     Both chats reach SQL through the same path, so a CTE or aggregate one of them already computed is
@@ -147,6 +152,7 @@ def query_limited_cached(sql: str, params=None, *, max_rows: int | None = None,
     failure in the cache layer falls through to a normal execution.
     """
     from services import cache as result_cache
+
     if not result_cache.sql_cache_available(params):
         frame, truncated = query_limited(sql, params, max_rows=max_rows, timeout_s=timeout_s)
         return frame, truncated, False
@@ -176,6 +182,7 @@ def connection_generation() -> int:
 def _ensure_schema(conn: duckdb.DuckDBPyConnection):
     """Create every table this app owns (DDL lives in db/schema_ddl.py, one function per domain)."""
     from db import schema_ddl
+
     schema_ddl.initialize(conn)
 
 
@@ -212,6 +219,7 @@ def _json_safe_record(record: dict) -> dict:
     holding a mixed value), or a numpy scalar (np.int64, np.bool_, ...)
     instead of a native Python type."""
     import numpy as np
+
     safe = {}
     for k, v in record.items():
         if isinstance(v, pd.Timestamp) or v is pd.NaT:
@@ -228,23 +236,17 @@ def get_setting(key: str, default: Any = None) -> Any:
     conn = get_conn()
     row = None
     try:
-        row = conn.execute(
-            "SELECT value_json FROM app_settings WHERE key = ?", [key]
-        ).fetchone()
+        row = conn.execute("SELECT value_json FROM app_settings WHERE key = ?", [key]).fetchone()
     except Exception:
         try:
-            row = conn.execute(
-                "SELECT value FROM app_settings WHERE key = ?", [key]
-            ).fetchone()
+            row = conn.execute("SELECT value FROM app_settings WHERE key = ?", [key]).fetchone()
         except Exception:
             return default
 
     # If row was found but value_json was NULL, attempt falling back to value column if it exists
     if row is not None and row[0] is None:
         try:
-            row_legacy = conn.execute(
-                "SELECT value FROM app_settings WHERE key = ?", [key]
-            ).fetchone()
+            row_legacy = conn.execute("SELECT value FROM app_settings WHERE key = ?", [key]).fetchone()
             if row_legacy and row_legacy[0] is not None:
                 row = row_legacy
         except Exception:
@@ -304,23 +306,55 @@ def delete_setting(key: str) -> None:
 
 
 _SNAP_COLS = [
-    "snapshot_id", "house_id", "snapshot_date", "source_file", "source_type",
-    "status", "price", "beds", "baths", "sqft", "hoa_fee",
-    "year_built", "walk_score", "bike_score", "transit_score",
+    "snapshot_id",
+    "house_id",
+    "snapshot_date",
+    "source_file",
+    "source_type",
+    "status",
+    "price",
+    "beds",
+    "baths",
+    "sqft",
+    "hoa_fee",
+    "year_built",
+    "walk_score",
+    "bike_score",
+    "transit_score",
 ]
 _SNAP_INSERT = (
-    f"INSERT OR IGNORE INTO house_snapshots ({', '.join(_SNAP_COLS)}) "
-    f"SELECT {', '.join(_SNAP_COLS)} FROM __snap_tmp"
+    f"INSERT OR IGNORE INTO house_snapshots ({', '.join(_SNAP_COLS)}) SELECT {', '.join(_SNAP_COLS)} FROM __snap_tmp"
 )
 
 _HOUSES_COLS = [
-    "house_id", "address", "city", "state", "zip", "lat", "lon",
-    "status", "price", "beds", "baths", "sqft", "year_built",
-    "hoa_fee", "walk_score", "bike_score", "transit_score",
-    "tract_fips", "msa_code", "nearest_big_city", "crime_city",
-    "source_file", "raw_json", "is_favorite",
+    "house_id",
+    "address",
+    "city",
+    "state",
+    "zip",
+    "lat",
+    "lon",
+    "status",
+    "price",
+    "beds",
+    "baths",
+    "sqft",
+    "year_built",
+    "hoa_fee",
+    "walk_score",
+    "bike_score",
+    "transit_score",
+    "tract_fips",
+    "msa_code",
+    "nearest_big_city",
+    "crime_city",
+    "source_file",
+    "raw_json",
+    "is_favorite",
 ]
-_HOUSES_INSERT = f"INSERT OR REPLACE INTO houses ({', '.join(_HOUSES_COLS)}) SELECT {', '.join(_HOUSES_COLS)} FROM __tmp_houses"
+_HOUSES_INSERT = (
+    f"INSERT OR REPLACE INTO houses ({', '.join(_HOUSES_COLS)}) SELECT {', '.join(_HOUSES_COLS)} FROM __tmp_houses"
+)
 
 
 def _build_snap_df(df: pd.DataFrame, source_type: str = "redfin") -> pd.DataFrame:
@@ -329,7 +363,7 @@ def _build_snap_df(df: pd.DataFrame, source_type: str = "redfin") -> pd.DataFram
 
     if df is None or not isinstance(df, pd.DataFrame):
         raise ValueError(f"_build_snap_df: expected DataFrame, got {type(df)}")
-    
+
     snap_df = df.copy()
     if "source_type" not in snap_df.columns:
         snap_df["source_type"] = source_type
@@ -340,10 +374,9 @@ def _build_snap_df(df: pd.DataFrame, source_type: str = "redfin") -> pd.DataFram
     for col in _SNAP_COLS:
         if col != "snapshot_id" and col not in snap_df.columns:
             snap_df[col] = None
-    
+
     def _snap_id(row):
-        key = (f"{row.get('house_id', '')}{row.get('source_file', '')}"
-               f"{row.get('status', '')}{row.get('price', '')}")
+        key = f"{row.get('house_id', '')}{row.get('source_file', '')}{row.get('status', '')}{row.get('price', '')}"
         return _hl.md5(key.encode()).hexdigest()[:14]
 
     snap_df["snapshot_id"] = snap_df.apply(_snap_id, axis=1)
@@ -383,9 +416,10 @@ def add_sold_snapshot(house_id: str, sold_row: dict):
     Converts the date in Python (no TRY_CAST) to avoid DuckDB parameter issues.
     """
     import hashlib as _hl
+
     conn = get_conn()
     snap_id = _hl.md5(
-        f"{house_id}{sold_row.get('sold_date','')}{sold_row.get('sold_price','')}".encode()
+        f"{house_id}{sold_row.get('sold_date', '')}{sold_row.get('sold_price', '')}".encode()
     ).hexdigest()[:14]
 
     sold_date = sold_row.get("sold_date")
@@ -398,24 +432,27 @@ def add_sold_snapshot(house_id: str, sold_row: dict):
             created_at = str(pd.to_datetime(sold_date).date())
         except Exception:
             pass
-    
-    conn.execute("""
+
+    conn.execute(
+        """
         INSERT OR IGNORE INTO house_snapshots
             (snapshot_id, house_id, snapshot_date, source_file, source_type,
              status, price, beds, baths, sqft, year_built, created_at)
         VALUES (?, ?, ?, ?, 'sold', 'Sold', ?, ?, ?, ?, ?, ?)
-    """, [
-        snap_id,
-        house_id,
-        str(sold_date) if sold_date is not None else None,
-        sold_row.get("source_file"),
-        sold_row.get("sold_price"),
-        sold_row.get("beds"),
-        sold_row.get("baths"),
-        sold_row.get("sqft"),
-        sold_row.get("year_built"),
-        created_at,
-    ])
+    """,
+        [
+            snap_id,
+            house_id,
+            str(sold_date) if sold_date is not None else None,
+            sold_row.get("source_file"),
+            sold_row.get("sold_price"),
+            sold_row.get("beds"),
+            sold_row.get("baths"),
+            sold_row.get("sqft"),
+            sold_row.get("year_built"),
+            created_at,
+        ],
+    )
 
 
 def get_house_history(house_id: str) -> list[dict]:
@@ -425,7 +462,8 @@ def get_house_history(house_id: str) -> list[dict]:
       - Redfin rows:  the 'date' field from the CSV (per-row listing date)
       - Sold rows:    the SALEDATE from the assessor record
     """
-    return query_json("""
+    return query_json(
+        """
         SELECT
             snapshot_id,
             snapshot_date,
@@ -445,7 +483,9 @@ def get_house_history(house_id: str) -> list[dict]:
         FROM house_snapshots
         WHERE house_id = ?
         ORDER BY snapshot_date DESC NULLS LAST, created_at DESC
-    """, [house_id])
+    """,
+        [house_id],
+    )
 
 
 def match_sold_to_houses() -> int:
@@ -466,21 +506,41 @@ def match_sold_to_houses() -> int:
     import re as _re
 
     _SUFFIX_MAP = {
-        "street": "st", "avenue": "av", "ave": "av", "boulevard": "blvd",
-        "drive": "dr", "road": "rd", "court": "ct", "lane": "ln",
-        "place": "pl", "way": "wy", "terrace": "ter", "circle": "cir",
-        "trail": "trl", "highway": "hwy", "parkway": "pkwy", "pike": "pk",
+        "street": "st",
+        "avenue": "av",
+        "ave": "av",
+        "boulevard": "blvd",
+        "drive": "dr",
+        "road": "rd",
+        "court": "ct",
+        "lane": "ln",
+        "place": "pl",
+        "way": "wy",
+        "terrace": "ter",
+        "circle": "cir",
+        "trail": "trl",
+        "highway": "hwy",
+        "parkway": "pkwy",
+        "pike": "pk",
     }
-    _DIR = {"north": "n", "south": "s", "east": "e", "west": "w",
-            "northeast": "ne", "northwest": "nw", "southeast": "se", "southwest": "sw"}
+    _DIR = {
+        "north": "n",
+        "south": "s",
+        "east": "e",
+        "west": "w",
+        "northeast": "ne",
+        "northwest": "nw",
+        "southeast": "se",
+        "southwest": "sw",
+    }
 
     def _norm(addr: str) -> str:
         """Lowercase, remove punctuation, collapse whitespace."""
         if not addr:
             return ""
         a = str(addr).lower().strip()
-        a = _re.sub(r'[.,#]', ' ', a)
-        a = _re.sub(r'\s+', ' ', a).strip()
+        a = _re.sub(r"[.,#]", " ", a)
+        a = _re.sub(r"\s+", " ", a).strip()
         # expand abbreviations then re-collapse
         tokens = a.split()
         tokens = [_DIR.get(t, _SUFFIX_MAP.get(t, t)) for t in tokens]
@@ -488,14 +548,14 @@ def match_sold_to_houses() -> int:
 
     def _house_num(norm_addr: str) -> str:
         """Return the leading house number token, or ''."""
-        m = _re.match(r'^(\d+\w*)', norm_addr.strip())
+        m = _re.match(r"^(\d+\w*)", norm_addr.strip())
         return m.group(1) if m else ""
 
     def _street_word(norm_addr: str) -> str:
         """Return first non-numeric, non-directional token (the street name)."""
         tokens = norm_addr.split()
         for i, t in enumerate(tokens):
-            if i == 0 and _re.match(r'^\d', t):
+            if i == 0 and _re.match(r"^\d", t):
                 continue  # skip house number
             if t in _DIR.values():
                 continue  # skip directionals
@@ -509,24 +569,27 @@ def match_sold_to_houses() -> int:
     if houses_df.empty:
         return 0
 
-    houses_df["norm"]    = houses_df["address"].apply(_norm)
-    houses_df["zip5"]    = houses_df["zip"].astype(str).str[:5]
-    houses_df["hnum"]    = houses_df["norm"].apply(_house_num)
-    houses_df["sword"]   = houses_df["norm"].apply(_street_word)
+    houses_df["norm"] = houses_df["address"].apply(_norm)
+    houses_df["zip5"] = houses_df["zip"].astype(str).str[:5]
+    houses_df["hnum"] = houses_df["norm"].apply(_house_num)
+    houses_df["sword"] = houses_df["norm"].apply(_street_word)
     houses_df["city_init"] = houses_df["city"].astype(str).str[:3].str.lower()
 
     # Build lookup dicts for each tier
-    t1 = {}   # (norm_addr, zip5) → house_id
-    t2 = {}   # (hnum, sword, zip5) → house_id
-    t3 = {}   # (hnum, zip5, city_init) → house_id
+    t1 = {}  # (norm_addr, zip5) → house_id
+    t2 = {}  # (hnum, sword, zip5) → house_id
+    t3 = {}  # (hnum, zip5, city_init) → house_id
 
     for row in houses_df.itertuples(index=False):
         k1 = (row.norm, row.zip5)
         k2 = (row.hnum, row.sword, row.zip5)
         k3 = (row.hnum, row.zip5, row.city_init)
-        if k1 not in t1: t1[k1] = row.house_id
-        if k2 not in t2: t2[k2] = row.house_id
-        if k3 not in t3: t3[k3] = row.house_id
+        if k1 not in t1:
+            t1[k1] = row.house_id
+        if k2 not in t2:
+            t2[k2] = row.house_id
+        if k3 not in t3:
+            t3[k3] = row.house_id
 
     # ── Load sold homes ───────────────────────────────────────────────────
     sold_df = query("""
@@ -547,29 +610,23 @@ def match_sold_to_houses() -> int:
         print("  No unmatched sold records found")
         return 0
 
-    sold_df["norm"]      = sold_df["address"].apply(_norm)
-    sold_df["zip5"]      = sold_df["zip"].astype(str).str[:5]
-    sold_df["hnum"]      = sold_df["norm"].apply(_house_num)
-    sold_df["sword"]     = sold_df["norm"].apply(_street_word)
+    sold_df["norm"] = sold_df["address"].apply(_norm)
+    sold_df["zip5"] = sold_df["zip"].astype(str).str[:5]
+    sold_df["hnum"] = sold_df["norm"].apply(_house_num)
+    sold_df["sword"] = sold_df["norm"].apply(_street_word)
     sold_df["city_init"] = sold_df["city"].astype(str).str[:3].str.lower()
 
     matched = 0
-    tiers   = {1: 0, 2: 0, 3: 0}
+    tiers = {1: 0, 2: 0, 3: 0}
     for _, sold_row in sold_df.iterrows():
-        nr   = sold_row["norm"]
-        z5   = sold_row["zip5"]
-        hn   = sold_row["hnum"]
-        sw   = sold_row["sword"]
-        ci   = sold_row["city_init"]
+        nr = sold_row["norm"]
+        z5 = sold_row["zip5"]
+        hn = sold_row["hnum"]
+        sw = sold_row["sword"]
+        ci = sold_row["city_init"]
 
-        house_id = (
-            t1.get((nr, z5))
-            or t2.get((hn, sw, z5))
-            or t3.get((hn, z5, ci))
-        )
-        tier = (1 if t1.get((nr, z5)) else
-                2 if t2.get((hn, sw, z5)) else
-                3 if t3.get((hn, z5, ci)) else None)
+        house_id = t1.get((nr, z5)) or t2.get((hn, sw, z5)) or t3.get((hn, z5, ci))
+        tier = 1 if t1.get((nr, z5)) else 2 if t2.get((hn, sw, z5)) else 3 if t3.get((hn, z5, ci)) else None
 
         if house_id:
             add_sold_snapshot(house_id, sold_row.to_dict())
@@ -578,8 +635,7 @@ def match_sold_to_houses() -> int:
                 tiers[tier] += 1
 
     total = len(sold_df)
-    print(f"  Matched {matched}/{total} sold records "
-          f"(tier1={tiers[1]}, tier2={tiers[2]}, tier3={tiers[3]})")
+    print(f"  Matched {matched}/{total} sold records (tier1={tiers[1]}, tier2={tiers[2]}, tier3={tiers[3]})")
     return matched
 
 
@@ -628,14 +684,16 @@ def mark_removed_favorites(house_ids, source_file: str) -> int:
         return 0
     conn = get_conn()
     today = pd.Timestamp.now().date().isoformat()
-    removed_df = pd.DataFrame({
-        "house_id": ids,
-        "source_file": source_file,
-        "source_type": "redfin",
-        "snapshot_date": today,
-        "status": "Removed from favorites",
-        "price": None,
-    })
+    removed_df = pd.DataFrame(
+        {
+            "house_id": ids,
+            "source_file": source_file,
+            "source_type": "redfin",
+            "snapshot_date": today,
+            "status": "Removed from favorites",
+            "price": None,
+        }
+    )
     snap_df = _build_snap_df(removed_df, source_type="redfin")
     conn.register("__snap_tmp", snap_df)
     conn.execute(_SNAP_INSERT)
@@ -667,10 +725,10 @@ def upsert_df(table: str, df: pd.DataFrame):
     - Tables WITHOUT a primary key (e.g. cbsa_counties): DELETE all + re-insert
     """
     conn = get_conn()
-    
+
     # Check whether this table has a primary key
     has_pk = _table_has_pk(conn, table)
-    
+
     conn.register("__tmp", df)
     if has_pk:
         conn.execute(f"INSERT OR REPLACE INTO {table} SELECT * FROM __tmp")
@@ -685,7 +743,7 @@ def upsert_df(table: str, df: pd.DataFrame):
         except Exception:
             conn.execute("ROLLBACK")
             raise
-    
+
     conn.unregister("__tmp")
 
 
@@ -697,27 +755,32 @@ def upsert_df(table: str, df: pd.DataFrame):
 def toggle_favorite(house_id: str) -> bool:
     """Toggle is_favorite for a house. Returns the new value."""
     conn = get_conn()
-    conn.execute("""
+    conn.execute(
+        """
         UPDATE houses SET is_favorite = NOT COALESCE(is_favorite, FALSE)
         WHERE house_id = ?
-    """, [house_id])
-    row = conn.execute(
-        "SELECT is_favorite FROM houses WHERE house_id = ?", [house_id]
-    ).fetchone()
+    """,
+        [house_id],
+    )
+    row = conn.execute("SELECT is_favorite FROM houses WHERE house_id = ?", [house_id]).fetchone()
     return bool(row[0]) if row else False
 
 
-def record_source_load(source_key: str, display_name: str, row_count: int,
-                        source_files: list[str] | None = None, message: str = "") -> None:
+def record_source_load(
+    source_key: str, display_name: str, row_count: int, source_files: list[str] | None = None, message: str = ""
+) -> None:
     """Record that a Data-page refresh of `source_key` just ran. Upserts a single row
     keyed by source_key — see services/data_sources.py for the orchestration that calls
     this after saving an uploaded file and re-running the matching loader."""
     conn = get_conn()
-    conn.execute("""
+    conn.execute(
+        """
         INSERT OR REPLACE INTO data_source_log
             (source_key, display_name, last_loaded_at, row_count, source_files, message)
         VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?, ?)
-    """, [source_key, display_name, int(row_count), json.dumps(source_files or []), message])
+    """,
+        [source_key, display_name, int(row_count), json.dumps(source_files or []), message],
+    )
 
 
 def get_source_log(source_key: str | None = None) -> dict:
@@ -725,9 +788,7 @@ def get_source_log(source_key: str | None = None) -> dict:
     Pass source_key to fetch just one (returns {} if it has never been refreshed)."""
     conn = get_conn()
     if source_key is not None:
-        row = conn.execute(
-            "SELECT * FROM data_source_log WHERE source_key = ?", [source_key]
-        ).fetchdf()
+        row = conn.execute("SELECT * FROM data_source_log WHERE source_key = ?", [source_key]).fetchdf()
         if row.empty:
             return {}
         rec = _json_safe_record(row.to_dict(orient="records")[0])
@@ -807,7 +868,8 @@ def get_house(house_id: str) -> Optional[dict]:
     Return a single house with status/price from the most recent snapshot
     (Redfin OR sold).
     """
-    rows = query_json("""
+    rows = query_json(
+        """
         WITH latest_snap AS (
             SELECT DISTINCT ON (house_id)
                 house_id,
@@ -829,7 +891,9 @@ def get_house(house_id: str) -> Optional[dict]:
         FROM houses h
         LEFT JOIN latest_snap ls ON h.house_id = ls.house_id
         WHERE h.house_id = ?
-    """, [house_id, house_id])
+    """,
+        [house_id, house_id],
+    )
     return rows[0] if rows else None
 
 
@@ -840,21 +904,24 @@ def get_nri_for_tract(tract_fips: str) -> Optional[dict]:
 
 def get_sold_in_tract(tract_fips: str, arms_length_only: bool = True) -> list[dict]:
     """Return sold homes in a census tract, optionally filtering non-arm's-length."""
-    filter_clause = "AND (is_arms_length IS NULL OR is_arms_length = TRUE)" \
-                    if arms_length_only else ""
-    return query_json(f"""
+    filter_clause = "AND (is_arms_length IS NULL OR is_arms_length = TRUE)" if arms_length_only else ""
+    return query_json(
+        f"""
         SELECT sale_id, address, city, state, zip, sold_price, sold_date,
                sqft, beds, baths, year_built, sale_desc, is_arms_length,
                arms_length_flag, geocode_source, source_county
         FROM sold_homes
         WHERE tract_fips = ? {filter_clause}
         ORDER BY sold_date DESC
-    """, [tract_fips])
+    """,
+        [tract_fips],
+    )
 
 
 def get_price_stats_in_tract(tract_fips: str) -> dict:
     """Price stats for comparable houses in the same census tract."""
-    df = query("""
+    df = query(
+        """
         SELECT
             COUNT(*) as count,
             MEDIAN(price) as median_price,
@@ -865,11 +932,14 @@ def get_price_stats_in_tract(tract_fips: str) -> dict:
             MAX(price) as max_price
         FROM houses
         WHERE tract_fips = ? AND price > 0
-    """, [tract_fips])
+    """,
+        [tract_fips],
+    )
     row = df.iloc[0].to_dict() if len(df) > 0 else {}
 
     # Only use arm's-length sales for sold comps
-    sold_df = query("""
+    sold_df = query(
+        """
         SELECT
             COUNT(*) as sold_count,
             MEDIAN(sold_price) as median_sold,
@@ -881,7 +951,9 @@ def get_price_stats_in_tract(tract_fips: str) -> dict:
         WHERE tract_fips = ?
           AND (is_arms_length IS NULL OR is_arms_length = TRUE)
           AND sold_price > 1000
-    """, [tract_fips])
+    """,
+        [tract_fips],
+    )
     if len(sold_df) > 0:
         row.update({f"sold_{k}": v for k, v in sold_df.iloc[0].to_dict().items()})
     return row
@@ -894,6 +966,7 @@ def get_price_stats_in_tract(tract_fips: str) -> dict:
 # the same 3-tier geography fallback for every consumer instead of each
 # caller reimplementing its own join.
 
+
 def get_last_sold_snapshot(house_id: str) -> Optional[dict]:
     """
     This specific house's own most recently recorded SALE — distinct from its
@@ -903,19 +976,23 @@ def get_last_sold_snapshot(house_id: str) -> Optional[dict]:
     row into house_snapshots when a county sold-homes record is matched to a
     house. Returns None if this house has no matched sale on record.
     """
-    rows = query_json("""
+    rows = query_json(
+        """
         SELECT price AS sold_price, snapshot_date AS sold_date
         FROM house_snapshots
         WHERE house_id = ? AND source_type = 'sold'
           AND price IS NOT NULL AND price > 0 AND snapshot_date IS NOT NULL
         ORDER BY snapshot_date DESC
         LIMIT 1
-    """, [house_id])
+    """,
+        [house_id],
+    )
     return rows[0] if rows else None
 
 
-def _zillow_series_snapshot(table: str, value_col: str, region_type: str,
-                             key_col: str, key_value, as_of_date) -> Optional[dict]:
+def _zillow_series_snapshot(
+    table: str, value_col: str, region_type: str, key_col: str, key_value, as_of_date
+) -> Optional[dict]:
     """
     For one (table, region_type, key) time series: the latest available value
     and the value nearest `as_of_date` (nearest by absolute day count, not
@@ -927,7 +1004,8 @@ def _zillow_series_snapshot(table: str, value_col: str, region_type: str,
     """
     if key_value is None or str(key_value).strip() == "":
         return None
-    df = query(f"""
+    df = query(
+        f"""
         WITH series AS (
             SELECT date, {value_col} AS value
             FROM {table}
@@ -938,15 +1016,19 @@ def _zillow_series_snapshot(table: str, value_col: str, region_type: str,
             (SELECT date  FROM series ORDER BY date DESC LIMIT 1) AS latest_date,
             (SELECT value FROM series ORDER BY ABS(date - CAST(? AS DATE)) ASC, date DESC LIMIT 1) AS value_at_sale,
             (SELECT date  FROM series ORDER BY ABS(date - CAST(? AS DATE)) ASC, date DESC LIMIT 1) AS date_at_sale
-    """, [region_type, key_value, as_of_date, as_of_date])
+    """,
+        [region_type, key_value, as_of_date, as_of_date],
+    )
     if df.empty:
         return None
     row = df.iloc[0]
     if pd.isna(row["latest_value"]) or pd.isna(row["value_at_sale"]):
         return None
     return {
-        "latest_value": float(row["latest_value"]), "latest_date": str(row["latest_date"]),
-        "value_at_sale": float(row["value_at_sale"]), "date_at_sale": str(row["date_at_sale"]),
+        "latest_value": float(row["latest_value"]),
+        "latest_date": str(row["latest_date"]),
+        "value_at_sale": float(row["value_at_sale"]),
+        "date_at_sale": str(row["date_at_sale"]),
     }
 
 
@@ -957,9 +1039,9 @@ def _zillow_series_snapshot(table: str, value_col: str, region_type: str,
 # services/data_loader.py::_compute_zillow_msa_codes) — no fuzzy matching
 # happens at query time. state is a plain 2-letter-code equality.
 _ZHVI_GEOGRAPHY_TIERS = (
-    ("zip",   "zip",      "zip",   "region_name"),
+    ("zip", "zip", "zip", "region_name"),
     ("metro", "msa_code", "metro", "msa_code"),
-    ("state", "state",    "state", "state_name"),
+    ("state", "state", "state", "state_name"),
 )
 
 
@@ -1054,7 +1136,7 @@ def close():
         except Exception:
             pass
         with _create_lock:
-            for cursor in _cursors:           # cursors keep the database open; release them with the connection
+            for cursor in _cursors:  # cursors keep the database open; release them with the connection
                 try:
                     cursor.close()
                 except Exception:
@@ -1069,5 +1151,5 @@ def close():
 
 
 import atexit
-atexit.register(close)
 
+atexit.register(close)

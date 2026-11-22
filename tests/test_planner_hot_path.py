@@ -3,6 +3,7 @@ that have nothing to do with a feature must not pay for it.
 
 Deterministic guards (counts and module checks), not wall-clock timings, so they never flake.
 """
+
 from __future__ import annotations
 
 import importlib
@@ -37,9 +38,13 @@ def realistic_scale(n_cities: int = 3000):
     guard that ran only there could never fail.  Scale is what makes this test able to detect a regression.
     """
     import db.duckdb_store as store
+
     conn = store.get_conn()
-    conn.execute("INSERT INTO houses (house_id, address, city, state, status) "
-                 "SELECT 'scale' || i, 'a', 'Cityville' || i, 'PA', 'Active' FROM range(?) t(i)", [n_cities])
+    conn.execute(
+        "INSERT INTO houses (house_id, address, city, state, status) "
+        "SELECT 'scale' || i, 'a', 'Cityville' || i, 'PA', 'Active' FROM range(?) t(i)",
+        [n_cities],
+    )
     try:
         yield
     finally:
@@ -55,10 +60,11 @@ def test_steady_state_planning_compiles_no_regular_expressions(fx, monkeypatch):
     """The old matcher compiled thousands of patterns per call (the cache holds a few hundred).  Any per-call dynamic
     pattern added to the planning path again would show up here immediately."""
     from agents.query_planner import build_query_plan
+
     questions = [q for qs in GROUPS.values() for q in qs]
     with realistic_scale():
         for q in questions:
-            build_query_plan(q)                                # warm every cache once
+            build_query_plan(q)  # warm every cache once
         module, compiled = _regex_compiler(), []
         real = module.compile
         monkeypatch.setattr(module, "compile", lambda *a, **k: (compiled.append(a[0]), real(*a, **k))[1])
@@ -72,14 +78,17 @@ def test_planning_work_does_not_depend_on_how_many_values_the_data_holds(fx):
     import db.duckdb_store as store
     from db import text_match
     from agents.query_planner import build_query_plan
+
     q = "How many houses are in Pittsburgh?"
     build_query_plan(q)
     before = text_match.index_for.cache_info()
     build_query_plan(q)
     small = text_match.index_for.cache_info().hits - before.hits
     conn = store.get_conn()
-    conn.execute("INSERT INTO houses (house_id, address, city, state, status) "
-                 "SELECT 'x' || i, 'a', 'City' || i, 'PA', 'Active' FROM range(3000) t(i)")
+    conn.execute(
+        "INSERT INTO houses (house_id, address, city, state, status) "
+        "SELECT 'x' || i, 'a', 'City' || i, 'PA', 'Active' FROM range(3000) t(i)"
+    )
     try:
         build_query_plan(q)
         before = text_match.index_for.cache_info()
@@ -94,6 +103,7 @@ def test_planning_work_does_not_depend_on_how_many_values_the_data_holds(fx):
 def test_unrelated_requests_never_consult_the_place_lexicon(fx, monkeypatch):
     from agents.query_planner import build_query_plan
     from db import entity_lexicon
+
     calls = []
     monkeypatch.setattr(entity_lexicon, "get_lexicon", lambda *a, **k: calls.append(a[0]) or entity_lexicon.build(a[1]))
     for q in GROUPS["unrelated"]:
@@ -105,11 +115,16 @@ def test_house_and_tract_wording_is_excluded_before_any_lookup_happens(fx, monke
     """excluded_terms are checked before requires_entity, so house/tract questions never pay for the entity lookup."""
     import db.schema_catalog as schema
     from agents.query_planner import build_query_plan
+
     calls = []
     real = schema.request_has_entity
     monkeypatch.setattr(schema, "request_has_entity", lambda *a, **k: (calls.append(a[0]), real(*a, **k))[1])
-    for q in ["houses in Pittsburgh with population over 3000", "population of the tract containing this house",
-              "which houses are in a high population neighborhood", "show houses within 5 square miles of downtown"]:
+    for q in [
+        "houses in Pittsburgh with population over 3000",
+        "population of the tract containing this house",
+        "which houses are in a high population neighborhood",
+        "show houses within 5 square miles of downtown",
+    ]:
         build_query_plan(q)
     assert calls == []
 
@@ -121,6 +136,8 @@ def _fresh_import(statement: str) -> str:
 
 def test_importing_the_agents_does_not_load_the_geometry_provider():
     """The provider (and its geometry/numpy work) is imported lazily, only when a request needs a derived measure."""
-    answer = _fresh_import("import sys, agents.tools, agents.general_agent; "
-                           "print('services.census_metrics' in sys.modules, 'services.derived_measures' in sys.modules)")
+    answer = _fresh_import(
+        "import sys, agents.tools, agents.general_agent; "
+        "print('services.census_metrics' in sys.modules, 'services.derived_measures' in sys.modules)"
+    )
     assert answer == "False True"

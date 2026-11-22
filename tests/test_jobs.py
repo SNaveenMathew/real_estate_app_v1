@@ -1,4 +1,5 @@
 """Background jobs (services/jobs.py): the contract the 202 endpoints rely on."""
+
 import threading
 import time
 
@@ -42,7 +43,7 @@ def test_an_http_exception_keeps_its_own_message():
 
     snap = _wait(jobs.start("test-http-error", "demo", work).id)
     assert snap["state"] == "error"
-    assert snap["error"] == "this upload wasn't applied"          # no "HTTPException:" prefix
+    assert snap["error"] == "this upload wasn't applied"  # no "HTTPException:" prefix
 
 
 def test_one_job_per_kind_and_the_second_is_refused():

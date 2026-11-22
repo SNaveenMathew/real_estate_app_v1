@@ -24,6 +24,7 @@ operator) and retrying would only repeat the same answer.
 Messages must contain no digits: the validator's "does this output contain real data?" heuristic is digit-based, and a
 guidance sentence must never be mistaken for data (tests enforce this for every template).
 """
+
 from __future__ import annotations
 
 import re
@@ -36,7 +37,17 @@ DATA_UNAVAILABLE = "data_unavailable"
 LIMIT_EXCEEDED = "limit_exceeded"
 MODEL_UNAVAILABLE = "model_unavailable"
 
-CODES = frozenset({UNPLANNABLE, PLACE_MISSING, PLACE_AMBIGUOUS, TOPIC_UNAVAILABLE, DATA_UNAVAILABLE, LIMIT_EXCEEDED, MODEL_UNAVAILABLE})
+CODES = frozenset(
+    {
+        UNPLANNABLE,
+        PLACE_MISSING,
+        PLACE_AMBIGUOUS,
+        TOPIC_UNAVAILABLE,
+        DATA_UNAVAILABLE,
+        LIMIT_EXCEEDED,
+        MODEL_UNAVAILABLE,
+    }
+)
 RETRYABLE = frozenset({UNPLANNABLE, PLACE_MISSING})
 
 # Anchored to the start of the text or to the "[RESULT]" header that query_database puts in front of results, so a

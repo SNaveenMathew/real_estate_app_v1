@@ -3,6 +3,7 @@
 Behaviour is unchanged: the facade in services/data_loader.py re-exports every name here, so
 `from services.data_loader import ...` (and scripts that call it) keep working.
 """
+
 from __future__ import annotations
 
 """
@@ -17,30 +18,29 @@ from config import settings
 import db.duckdb_store as store
 
 
-
-
-__all__ = ['load_cbsa_crosswalk']
+__all__ = ["load_cbsa_crosswalk"]
 
 # ── CBSA crosswalk ───────────────────────────────────────────────────────────
+
 
 def load_cbsa_crosswalk() -> int:
     """
     Load the MSA→county crosswalk from Census Bureau delineation file.
-    
+
     Accepts any of these formats (auto-detected by extension):
       list1_2020.csv / list1_2023.csv   — CSV, skiprows=2
       list1_2020.xls / list1_2023.xlsx  — Excel, skiprows=2
-    
+
     Download: https://www.census.gov/geographies/reference-files/time-series/demo/metro-micro/delineation-files.html
     Save to: data/census/   (any filename ending in .csv/.xls/.xlsx is accepted)
     """
-        # Accept any delineation file in the census dir regardless of exact name
+    # Accept any delineation file in the census dir regardless of exact name
     census_dir = settings.cbsa_xlsx.parent
     candidates = (
-        list(census_dir.glob("list*.xlsx")) +
-        list(census_dir.glob("list*.xls")) +
-        list(census_dir.glob("list*.csv")) +
-        ([settings.cbsa_xlsx] if settings.cbsa_xlsx.exists() else [])
+        list(census_dir.glob("list*.xlsx"))
+        + list(census_dir.glob("list*.xls"))
+        + list(census_dir.glob("list*.csv"))
+        + ([settings.cbsa_xlsx] if settings.cbsa_xlsx.exists() else [])
     )
     # Deduplicate while preserving order
     seen = set()
@@ -50,10 +50,10 @@ def load_cbsa_crosswalk() -> int:
         print(f"  CBSA crosswalk not found in: {census_dir}")
         print("  Download delineation file from Census Bureau and save to data/census/")
         return 0
-    
+
     path = candidates[0]
     print(f"  Loading CBSA crosswalk: {path.name}")
-    
+
     suffix = path.suffix.lower()
     try:
         if suffix in (".xlsx", ".xls"):
@@ -61,17 +61,15 @@ def load_cbsa_crosswalk() -> int:
             df = pd.read_excel(path, skiprows=2, dtype=str)
         else:
             try:
-                df = pd.read_csv(path, encoding="utf-8-sig", skiprows=2,
-                                 dtype=str, low_memory=False)
+                df = pd.read_csv(path, encoding="utf-8-sig", skiprows=2, dtype=str, low_memory=False)
             except Exception:
-                df = pd.read_csv(path, encoding="latin-1", skiprows=2,
-                                 dtype=str, low_memory=False)
+                df = pd.read_csv(path, encoding="latin-1", skiprows=2, dtype=str, low_memory=False)
     except Exception as e:
         print(f"  Error reading {path.name}: {e}")
         return 0
 
     df.columns = df.columns.str.strip()
-    
+
     # Drop completely empty rows (common at end of Census Excel files)
     df = df.dropna(how="all")
 
@@ -80,13 +78,20 @@ def load_cbsa_crosswalk() -> int:
     col_map = {}
     for c in df.columns:
         cl = c.lower().strip()
-        if cl == "cbsa code":                               col_map[c] = "cbsa_code"
-        elif cl == "cbsa title":                            col_map[c] = "cbsa_title"
-        elif "metropolitan" in cl and "micro" in cl:        col_map[c] = "msa_type"
-        elif cl in ("fips state code", "fips state"):       col_map[c] = "state_fips"
-        elif cl in ("fips county code", "fips county"):     col_map[c] = "county_fips"
-        elif "county/county" in cl or cl == "county name":  col_map[c] = "county_name"
-        elif cl == "state name":                            col_map[c] = "state_name"
+        if cl == "cbsa code":
+            col_map[c] = "cbsa_code"
+        elif cl == "cbsa title":
+            col_map[c] = "cbsa_title"
+        elif "metropolitan" in cl and "micro" in cl:
+            col_map[c] = "msa_type"
+        elif cl in ("fips state code", "fips state"):
+            col_map[c] = "state_fips"
+        elif cl in ("fips county code", "fips county"):
+            col_map[c] = "county_fips"
+        elif "county/county" in cl or cl == "county name":
+            col_map[c] = "county_name"
+        elif cl == "state name":
+            col_map[c] = "state_name"
     df = df.rename(columns=col_map)
 
     needed = ["cbsa_code", "state_fips", "county_fips"]
@@ -99,17 +104,16 @@ def load_cbsa_crosswalk() -> int:
     df = df.dropna(subset=needed)
     # Remove footnote rows where cbsa_code is not numeric
     df = df[df["cbsa_code"].str.strip().str.match(r"^\d+$", na=False)]
-    
-    df["cbsa_code"]   = df["cbsa_code"].astype(str).str.strip().str.zfill(5)
-    df["state_fips"]  = df["state_fips"].astype(str).str.strip().str.zfill(2)
+
+    df["cbsa_code"] = df["cbsa_code"].astype(str).str.strip().str.zfill(5)
+    df["state_fips"] = df["state_fips"].astype(str).str.strip().str.zfill(2)
     df["county_fips"] = df["county_fips"].astype(str).str.strip().str.zfill(3)
 
     for col in ["cbsa_title", "msa_type", "county_name", "state_name"]:
         if col not in df.columns:
             df[col] = None
 
-    out = df[["cbsa_code", "cbsa_title", "msa_type",
-              "state_fips", "county_fips", "county_name", "state_name"]]
+    out = df[["cbsa_code", "cbsa_title", "msa_type", "state_fips", "county_fips", "county_name", "state_name"]]
     store.upsert_df("cbsa_counties", out)
     print(f"  ✓ Loaded {len(out)} CBSA→county mappings")
     return len(out)

@@ -26,6 +26,7 @@ Provider protocol (duck-typed)::
 Provider modules are imported lazily (only when a request actually needs one), so heavy dependencies such as
 geopandas are not loaded by requests that never touch them.
 """
+
 from __future__ import annotations
 
 import importlib
@@ -49,8 +50,8 @@ class MeasureInfo:
 @dataclass
 class DerivedResult:
     frame: pd.DataFrame
-    method: list[str] = field(default_factory=list)   # how the numbers were produced; shown before the table
-    notes: list[str] = field(default_factory=list)    # caveats about THIS result; shown after the table
+    method: list[str] = field(default_factory=list)  # how the numbers were produced; shown before the table
+    notes: list[str] = field(default_factory=list)  # caveats about THIS result; shown after the table
 
 
 class DerivedError(Exception):
@@ -73,6 +74,7 @@ def register_provider_module(provider_id: str, module_path: str) -> None:
 def detect_measures(provider, request: str) -> set[str]:
     """Measures of ``provider`` whose declared phrases appear in ``request`` (works for any provider)."""
     from db.text_match import has_phrase
+
     return {m.id for m in provider.measures.values() if any(has_phrase(request, ph) for ph in m.phrases)}
 
 

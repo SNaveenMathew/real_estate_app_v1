@@ -1,4 +1,5 @@
 """A report is only evidence if it says what ran and who judged it."""
+
 import json
 from collections import Counter
 
@@ -12,11 +13,11 @@ def test_the_set_covers_the_robustness_categories():
     ids = [e.id for e in GOLDEN_SET]
     assert len(set(ids)) == len(ids)
     tags = Counter(tag for e in GOLDEN_SET for tag in e.tags)
-    assert tags["paraphrase"] >= 10          # typos and paraphrases of questions the set already asks
-    assert tags["guardrails"] >= 5           # injection attempts
-    assert tags["multi_turn"] >= 5           # follow-ups that need the prior turn
-    assert tags["limits"] >= 3               # questions that cannot be answered in full
-    assert tags["crime"] >= 4                # recommendation 10: tables that used to have no examples
+    assert tags["paraphrase"] >= 10  # typos and paraphrases of questions the set already asks
+    assert tags["guardrails"] >= 5  # injection attempts
+    assert tags["multi_turn"] >= 5  # follow-ups that need the prior turn
+    assert tags["limits"] >= 3  # questions that cannot be answered in full
+    assert tags["crime"] >= 4  # recommendation 10: tables that used to have no examples
     assert tags["bike"] >= 2
     assert tags["transit"] >= 4
     assert tags["commute"] >= 2

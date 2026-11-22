@@ -38,6 +38,7 @@ its normal work. A turn can therefore surface more than one artifact
 (e.g. a crime-density map followed by the final route map), and most
 turns surface none at all, which is the common case and always fine.
 """
+
 from __future__ import annotations
 
 import contextvars
@@ -58,9 +59,7 @@ from config import settings
 # is a correctness-by-construction choice more than a fix for an observed
 # bug.
 
-_artifacts_var: contextvars.ContextVar[list | None] = contextvars.ContextVar(
-    "chat_artifacts", default=None
-)
+_artifacts_var: contextvars.ContextVar[list | None] = contextvars.ContextVar("chat_artifacts", default=None)
 
 
 def reset_artifacts() -> None:
@@ -98,8 +97,10 @@ def collect_artifacts() -> list[dict[str, Any]]:
 # a DataFrame that's already in hand (classify_dataframe never re-runs the
 # query, so it can't reuse query_json without doubling the DB round trip).
 
+
 def _json_safe_scalar(v: Any) -> Any:
     import numpy as np
+
     if v is None:
         return None
     if isinstance(v, float) and (v != v or v in (float("inf"), float("-inf"))):
@@ -114,10 +115,7 @@ def _json_safe_scalar(v: Any) -> Any:
 def _records(df: pd.DataFrame, max_rows: int) -> tuple[list[dict], bool, int]:
     total = len(df)
     view = df.head(max_rows)
-    rows = [
-        {k: _json_safe_scalar(v) for k, v in row.items()}
-        for row in view.to_dict(orient="records")
-    ]
+    rows = [{k: _json_safe_scalar(v) for k, v in row.items()} for row in view.to_dict(orient="records")]
     return rows, total > max_rows, total
 
 
@@ -161,6 +159,7 @@ def _pick_label_column(columns, exclude: set[str]) -> str | None:
 # Artifact builders
 # ---------------------------------------------------------------------------
 
+
 def _table_artifact(df: pd.DataFrame, *, title: str | None, max_rows: int) -> dict:
     rows, truncated, total = _records(df, max_rows)
     return {
@@ -188,12 +187,14 @@ def _map_points_artifact(
         except (TypeError, ValueError):
             continue
         fields = {k: _json_safe_scalar(v) for k, v in row.items() if k not in (lat_col, lon_col)}
-        points.append({
-            "lat": lat_f,
-            "lon": lon_f,
-            "label": str(row.get(label_col)) if label_col and row.get(label_col) is not None else None,
-            "fields": fields,
-        })
+        points.append(
+            {
+                "lat": lat_f,
+                "lon": lon_f,
+                "label": str(row.get(label_col)) if label_col and row.get(label_col) is not None else None,
+                "fields": fields,
+            }
+        )
     if not points:
         return None
     return {
@@ -207,8 +208,12 @@ def _map_points_artifact(
 
 
 def _chart_artifact(
-    df: pd.DataFrame, dimension_cols: list[str], numeric_cols: list[str],
-    *, title: str | None, max_points: int,
+    df: pd.DataFrame,
+    dimension_cols: list[str],
+    numeric_cols: list[str],
+    *,
+    title: str | None,
+    max_points: int,
 ) -> dict | None:
     if not (0 < len(df) <= max_points):
         return None
@@ -304,7 +309,10 @@ def classify_dataframe(
         latlon = _find_latlon(columns)
         if latlon:
             artifact = _map_points_artifact(
-                df, title=title, lat_col=latlon[0], lon_col=latlon[1],
+                df,
+                title=title,
+                lat_col=latlon[0],
+                lon_col=latlon[1],
                 max_points=settings.presentation_map_max_points,
             )
             if artifact:
@@ -316,22 +324,22 @@ def classify_dataframe(
         # A numeric-dtype column named like a time period (year, month, ...)
         # is a dimension for charting purposes, not a measure -- "year" is
         # something you'd plot rows *by*, never something you'd average.
-        numeric_cols = [
-            c for c in columns
-            if _is_numeric(df, c) and not _TEMPORAL_NAME_HINTS.search(str(c))
-        ]
+        numeric_cols = [c for c in columns if _is_numeric(df, c) and not _TEMPORAL_NAME_HINTS.search(str(c))]
         dimension_cols = [c for c in columns if c not in numeric_cols]
 
         chart_hinted = presentation == "chart"
         max_dims = 2 if chart_hinted else 1
         max_measures = 6 if chart_hinted else 4
         max_points = (
-            settings.presentation_chart_max_points_hinted
-            if chart_hinted else settings.presentation_chart_max_points
+            settings.presentation_chart_max_points_hinted if chart_hinted else settings.presentation_chart_max_points
         )
         if 1 <= len(dimension_cols) <= max_dims and 1 <= len(numeric_cols) <= max_measures:
             artifact = _chart_artifact(
-                df, dimension_cols, numeric_cols, title=title, max_points=max_points,
+                df,
+                dimension_cols,
+                numeric_cols,
+                title=title,
+                max_points=max_points,
             )
             if artifact:
                 return artifact

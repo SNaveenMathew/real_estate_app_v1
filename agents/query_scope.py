@@ -15,6 +15,7 @@ scope set before ``asyncio.to_thread`` follows the work onto the worker thread.
 
 A scope can be waived only explicitly, by the caller choosing not to set one (House Chat: ``scope="all_houses"``).
 """
+
 from __future__ import annotations
 
 import re

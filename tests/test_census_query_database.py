@@ -3,6 +3,7 @@
 The most important assertions here are about what the SQL model is NOT asked to do: the original failure burned three
 model calls on a request that could never succeed and then blamed the database.
 """
+
 from __future__ import annotations
 
 import re
@@ -42,6 +43,7 @@ def fx(tmp_path_factory):
 @pytest.fixture()
 def model(fx, monkeypatch):
     import agents.tools as tools
+
     stub = StubSqlModel()
     monkeypatch.setattr(tools, "_agent", stub)
     return stub
@@ -49,6 +51,7 @@ def model(fx, monkeypatch):
 
 def ask(request, **kwargs):
     import agents.tools as tools
+
     return tools.query_database.invoke({"request": request, **kwargs})
 
 
@@ -62,7 +65,9 @@ def result_of(output: str) -> str:
 def test_the_reported_request_is_answered_without_asking_the_sql_model(fx, model):
     out = ask("Verify the land areas of Pittsburgh and Indianapolis")
     assert model.calls == 0
-    assert out.startswith("[GENERATED SQL]\nDerived tract-area aggregation\n[RESULT]\n")      # the provider's historical label
+    assert out.startswith(
+        "[GENERATED SQL]\nDerived tract-area aggregation\n[RESULT]\n"
+    )  # the provider's historical label
     body = result_of(out)
     assert not body.startswith("NOT_ANSWERED") and "Code Agent error" not in body
     assert PIT in body and IND in body
@@ -74,6 +79,7 @@ def test_the_reported_request_is_answered_without_asking_the_sql_model(fx, model
 
 def test_derived_answer_is_emitted_as_an_artifact(fx, model):
     from agents.artifacts import collect_artifacts, reset_artifacts
+
     reset_artifacts()
     ask("Verify the land areas of Pittsburgh and Indianapolis")
     artifacts = collect_artifacts()
@@ -82,8 +88,10 @@ def test_derived_answer_is_emitted_as_an_artifact(fx, model):
 
 def test_existing_density_questions_keep_their_numbers_and_wording(fx, model):
     body = result_of(ask("population density of Pittsburgh and Indianapolis"))
-    assert body.startswith("Density is total tract population divided by total tract polygon area in square miles; "
-                           "it is not the average of tract densities.")
+    assert body.startswith(
+        "Density is total tract population divided by total tract polygon area in square miles; "
+        "it is not the average of tract densities."
+    )
     for name in (PIT, IND):
         assert f"{fx.expected[name]['density']:.2f}" in body and f"{fx.expected[name]['area_sq_mi']:.2f}" in body
     assert model.calls == 0
@@ -123,12 +131,17 @@ def test_a_derived_measure_with_no_place_asks_for_one(fx, model):
 def test_population_lookup_survives_an_empty_model_completion(fx, model):
     out = ask("What is the population of Pittsburgh?")
     assert model.calls == 1
-    assert "SELECT census_msa.name, census_msa.population FROM census_msa WHERE census_msa.name = 'Pittsburgh, PA Metro Area'" in out
+    assert (
+        "SELECT census_msa.name, census_msa.population FROM census_msa WHERE census_msa.name = 'Pittsburgh, PA Metro Area'"
+        in out
+    )
     assert str(fx.expected[PIT]["population"]) in result_of(out)
 
 
 def test_population_lookup_uses_the_models_sql_when_it_gives_one(fx, model):
-    model.replies = ["SELECT census_msa.name, census_msa.population FROM census_msa WHERE census_msa.name = 'Pittsburgh, PA Metro Area'"]
+    model.replies = [
+        "SELECT census_msa.name, census_msa.population FROM census_msa WHERE census_msa.name = 'Pittsburgh, PA Metro Area'"
+    ]
     out = ask("How many people live in Pittsburgh?")
     assert model.calls == 1 and str(fx.expected[PIT]["population"]) in result_of(out)
 
@@ -173,12 +186,17 @@ def test_unplannable_requests_do_not_spend_model_calls(fx, model):
 
 def test_unplannable_message_recognises_a_place_and_suggests_measures(fx, model):
     body = result_of(ask("tell me about Pittsburgh"))
-    assert body.startswith("NOT_ANSWERED[unplannable]") and "A place was recognized" in body and "Pittsburgh, PA Metro Area" in body
+    assert (
+        body.startswith("NOT_ANSWERED[unplannable]")
+        and "A place was recognized" in body
+        and "Pittsburgh, PA Metro Area" in body
+    )
     assert "land area" in body or "population" in body.lower()
 
 
 def test_unplannable_message_reports_empty_name_tables(fx, model):
     import db.duckdb_store as store
+
     conn = store.get_conn()
     saved = conn.execute("SELECT * FROM census_msa").df()
     conn.execute("DELETE FROM census_msa")
@@ -207,18 +225,27 @@ def test_house_questions_are_untouched(fx, model):
     out = ask("How many houses are in Pittsburgh?")
     # Outcome first (what a user sees), then mechanism; both report the evidence so a failure is diagnosable at a glance.
     assert "NOT_ANSWERED" not in out and "NOTE (not part" not in out and "Code Agent error" not in out, out
-    assert result_of(out).split()[-1] == "2", out                    # the two Pittsburgh houses in the fixture
+    assert result_of(out).split()[-1] == "2", out  # the two Pittsburgh houses in the fixture
     assert model.calls == 1, f"the SQL model was called {model.calls} time(s), expected 1. Evidence was:\n{out}"
 
 
 # --------------------------------------------------------------------------------------------------------------------
 # Contracts the rest of the app relies on
 # --------------------------------------------------------------------------------------------------------------------
-@pytest.mark.parametrize("question", ["population of Portland", "median household income in Pittsburgh",
-                                      "How is the weather on Mars", "land area of the metro", "tell me about Pittsburgh"])
+@pytest.mark.parametrize(
+    "question",
+    [
+        "population of Portland",
+        "median household income in Pittsburgh",
+        "How is the weather on Mars",
+        "land area of the metro",
+        "tell me about Pittsburgh",
+    ],
+)
 def test_guidance_messages_contain_no_digits(fx, model, question):
     """A guidance sentence must never be mistaken for data by the digit-based validator heuristics."""
     from agents import answer_status
+
     body = result_of(ask(question))
     assert answer_status.is_not_answered(body)
     assert not re.search(r"\d", body)
@@ -226,6 +253,7 @@ def test_guidance_messages_contain_no_digits(fx, model, question):
 
 def test_validator_never_treats_a_non_answer_as_data(fx, model):
     from agents.response_validator import _tool_returned_real_data
+
     for question in ("population of Portland", "land area of Denver", "How is the weather on Mars"):
         assert _tool_returned_real_data([("query_database", ask(question))]) is False, question
     assert _tool_returned_real_data([("query_database", ask("land area of Pittsburgh"))]) is True
@@ -243,6 +271,7 @@ def test_an_unexpected_provider_failure_keeps_the_legacy_error_contract(fx, mode
     body = result_of(ask("land area of Pittsburgh"))
     assert body == "Code Agent error: geometry exploded"
     from agents import answer_status
+
     assert not answer_status.is_not_answered(body) and model.calls == 0
 
 

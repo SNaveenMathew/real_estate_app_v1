@@ -34,6 +34,7 @@ records systems whose exports may not match the columns PittsburghCrimeParser /
 etc. expect. If a refreshed file doesn't parse, `refresh_source` surfaces the
 loader's own "missing required column(s)" message rather than hiding it.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -55,11 +56,11 @@ import pandas as pd
 from config import settings
 import db.duckdb_store as store
 from services import data_loader
-from services.crime_sources import (CRIME_PARSERS, _find_col as _find_crime_col,
-                                     read_table as crime_read_table)
+from services.crime_sources import CRIME_PARSERS, _find_col as _find_crime_col, read_table as crime_read_table
 
 
 # ── Small shared helpers ─────────────────────────────────────────────────────
+
 
 def _safe_filename(name: str) -> str:
     """Strip any directory component and characters that don't belong in a filename."""
@@ -84,8 +85,7 @@ def _warnings_from_log(log_text: str) -> list[str]:
     out = []
     for line in log_text.splitlines():
         s = line.strip()
-        if s.startswith(("Skipping", "⚠", "Error", "✗", "No usable rows", "No valid rows",
-                          "  ✗", "  ⚠")):
+        if s.startswith(("Skipping", "⚠", "Error", "✗", "No usable rows", "No valid rows", "  ✗", "  ⚠")):
             out.append(s.lstrip("  "))
     return out
 
@@ -139,17 +139,21 @@ def _make_crime_precheck(parser) -> Callable[[Path], tuple[bool, str]]:
     this city. A factory (one closure per city) rather than one big dispatcher,
     so each crime DataSource in the registry owns and declares its own check —
     see the module docstring's note on why this shape exists."""
+
     def _check(path: Path) -> tuple[bool, str]:
         try:
             df = crime_read_table(path, parser._WANTED, parser._REQUIRED)
         except Exception as e:
             return False, f"Could not read this file: {e}"
         if df is None:
-            return False, ("This file is missing one or more required columns for "
-                            f"{parser.city_label} — see the loader's own message for which ones.")
+            return False, (
+                "This file is missing one or more required columns for "
+                f"{parser.city_label} — see the loader's own message for which ones."
+            )
         if df.empty:
             return False, "This file was read successfully but had no data rows."
         return True, ""
+
     return _check
 
 
@@ -159,20 +163,26 @@ def _make_crime_precheck(parser) -> Callable[[Path], tuple[bool, str]]:
 # way a plain CLI run would, and chain the same follow-up step setup_data.py
 # always chains after a sold-homes reload.
 
+
 def _run_nri() -> int:
     return data_loader.load_nri()
+
 
 def _run_census_tracts() -> int:
     return data_loader.load_census_tracts()
 
+
 def _run_census_msa() -> int:
     return data_loader.load_census_msa()
+
 
 def _run_cbsa() -> int:
     return data_loader.load_cbsa_crosswalk()
 
+
 def _run_redfin() -> int:
     return data_loader.load_redfin(None)
+
 
 def _run_sold() -> int:
     n = data_loader.load_sold_homes(run_geocoding=True, geo_utils=None)
@@ -180,14 +190,18 @@ def _run_sold() -> int:
     print(f"  ✓ {matched} sold record(s) linked to houses as historical snapshots")
     return n
 
+
 def _run_crime() -> int:
     return data_loader.load_crime()
+
 
 def _run_bike() -> int:
     return data_loader.load_bike_routes()
 
+
 def _run_zhvi() -> int:
     return data_loader.load_zhvi()
+
 
 def _run_market_heat_index() -> int:
     return data_loader.load_market_heat_index()
@@ -196,6 +210,7 @@ def _run_market_heat_index() -> int:
 def _precheck_zillow_file(path: Path) -> tuple[bool, str]:
     """Re-check whether this staged file looks like a valid Zillow wide CSV."""
     from services.zillow_sources import _peek_header, _REQUIRED, _find_col, _ID_COLUMNS, _DATE_COL_RE
+
     try:
         header_cols = _peek_header(path)
     except Exception as e:
@@ -216,20 +231,20 @@ def _precheck_zillow_file(path: Path) -> tuple[bool, str]:
 class DataSource:
     key: str
     label: str
-    category: str                       # grouping shown in the UI
-    table: str                          # primary table, for the schema-map inspector hookup
-    dest_dir: Path                      # where uploaded files land
-    placement: str                      # "single" | "append"
-    accept: str                         # file input accept= hint
+    category: str  # grouping shown in the UI
+    table: str  # primary table, for the schema-map inspector hookup
+    dest_dir: Path  # where uploaded files land
+    placement: str  # "single" | "append"
+    accept: str  # file input accept= hint
     source_url: str
     instructions: str
     loader: Callable[[], int]
-    match_globs: tuple[str, ...] = ()   # "single" placement: existing files matching these are removed first
+    match_globs: tuple[str, ...] = ()  # "single" placement: existing files matching these are removed first
     notes: str = ""
-    detect: Optional[Callable[[list[str]], bool]] = None   # header-only sniff, generic upload flow
-    row_count_sql: str = ""             # SQL returning one row/one column: current row count for this source
-    direct_download: bool = False       # True: source_url IS the file. False: source_url is a page to
-                                         # navigate from — the UI must say so, not imply a one-click download.
+    detect: Optional[Callable[[list[str]], bool]] = None  # header-only sniff, generic upload flow
+    row_count_sql: str = ""  # SQL returning one row/one column: current row count for this source
+    direct_download: bool = False  # True: source_url IS the file. False: source_url is a page to
+    # navigate from — the UI must say so, not imply a one-click download.
     precheck: Optional[Callable[[Path], tuple[bool, str]]] = None
     # Faithful, read-only re-check of a staged file against this source's own loader logic, called
     # by refresh_source() before anything is discarded (see that function's docstring for why).
@@ -246,6 +261,7 @@ class DataSource:
 # ── Detection helpers (used by both the registry below and the generic
 #    "Add a dataset" upload path in api/onboarding.py) ──────────────────────
 
+
 def _norm(s: str) -> str:
     return str(s).strip().lower().replace(" ", "").replace("_", "").replace(".", "")
 
@@ -261,12 +277,15 @@ def _has_all(columns: list[str], candidates_list: list[list[str]]) -> bool:
 
 
 def _detect_redfin(columns: list[str]) -> bool:
-    return _has_all(columns, [
-        ["Address", "Street Address"],
-        ["Latitude", "Lat"],
-        ["Longitude", "Lon"],
-        ["Price", "List Price"],
-    ]) and _has_all(columns, [["Sale Type", "MLS#", "Days on Market", "URL"]])
+    return _has_all(
+        columns,
+        [
+            ["Address", "Street Address"],
+            ["Latitude", "Lat"],
+            ["Longitude", "Lon"],
+            ["Price", "List Price"],
+        ],
+    ) and _has_all(columns, [["Sale Type", "MLS#", "Days on Market", "URL"]])
 
 
 def _detect_sold_allegheny(columns: list[str]) -> bool:
@@ -280,9 +299,7 @@ def _detect_nri(columns: list[str]) -> bool:
 def _detect_census_tracts(columns: list[str]) -> bool:
     # Distinguished from the MSA table by content (GEO_IDs starting 1400000US),
     # which a header-only sniff can't see — this only checks the table shape.
-    return _has_all(columns, [["GEO_ID"], ["NAME"]]) and any(
-        _norm(c).startswith("p1") for c in columns
-    )
+    return _has_all(columns, [["GEO_ID"], ["NAME"]]) and any(_norm(c).startswith("p1") for c in columns)
 
 
 def _detect_cbsa(columns: list[str]) -> bool:
@@ -292,10 +309,12 @@ def _detect_cbsa(columns: list[str]) -> bool:
 def _make_crime_detector(parser) -> Callable[[list[str]], bool]:
     def _detect(columns: list[str]) -> bool:
         return all(_find_crime_col(columns, parser._WANTED[f]) for f in parser._REQUIRED)
+
     return _detect
 
 
 # ── Registry ─────────────────────────────────────────────────────────────────
+
 
 def _census_dir() -> Path:
     return settings.cbsa_xlsx.parent
@@ -303,54 +322,80 @@ def _census_dir() -> Path:
 
 _STATIC_SOURCES: list[DataSource] = [
     DataSource(
-        key="nri", label="FEMA National Risk Index", category="Reference data",
-        table="nri_tracts", dest_dir=settings.nri_shp.parent, placement="single",
+        key="nri",
+        label="FEMA National Risk Index",
+        category="Reference data",
+        table="nri_tracts",
+        dest_dir=settings.nri_shp.parent,
+        placement="single",
         accept=".zip",
         source_url="https://hazards.fema.gov/nri/data-resources",
         instructions="This is FEMA's download page, not a direct file \u2014 under \u201cShapefile Format\u201d, "
-                      "find \u201cCensus Tracts\u201d and download the nationwide zip. Upload it as-is (don't "
-                      "unzip it first); it contains the .shp plus its .dbf/.shx/.prj siblings.",
+        "find \u201cCensus Tracts\u201d and download the nationwide zip. Upload it as-is (don't "
+        "unzip it first); it contains the .shp plus its .dbf/.shx/.prj siblings.",
         loader=_run_nri,
-        match_globs=("*.shp", "*.shx", "*.dbf", "*.prj", "*.cpg", "*.sbn", "*.sbx",
-                     "*.shp.xml", "*.dbf.xml", "nri_geometry_cache.parquet"),
+        match_globs=(
+            "*.shp",
+            "*.shx",
+            "*.dbf",
+            "*.prj",
+            "*.cpg",
+            "*.sbn",
+            "*.sbx",
+            "*.shp.xml",
+            "*.dbf.xml",
+            "nri_geometry_cache.parquet",
+        ),
         row_count_sql="SELECT COUNT(*) FROM nri_tracts",
         detect=_detect_nri,
         direct_download=False,
     ),
     DataSource(
-        key="census_tracts", label="Census tract population (Eg: DECENNIALPL2020.P1-Data.csv)",
-        category="Reference data", table="census_tracts", dest_dir=_census_dir(), placement="single",
+        key="census_tracts",
+        label="Census tract population (Eg: DECENNIALPL2020.P1-Data.csv)",
+        category="Reference data",
+        table="census_tracts",
+        dest_dir=_census_dir(),
+        placement="single",
         accept=".csv",
         source_url="https://data.census.gov/table/DECENNIALPL2020.P1",
         instructions="This is a table-browser page, not a direct file \u2014 set Geography to Census Tracts "
-                      "\u2192 All United States, then use the page's own Download button.",
+        "\u2192 All United States, then use the page's own Download button.",
         loader=_run_census_tracts,
-        match_globs=(),   # handled specially in refresh_source — see _replace_census_tracts
+        match_globs=(),  # handled specially in refresh_source — see _replace_census_tracts
         row_count_sql="SELECT COUNT(*) FROM census_tracts",
         detect=_detect_census_tracts,
         direct_download=False,
     ),
     DataSource(
-        key="census_msa", label="Census MSA population (Eg: DECENNIALPL2020.P1-2026-03-25T232220.csv)",
-        category="Reference data", table="census_msa", dest_dir=_census_dir(), placement="single",
+        key="census_msa",
+        label="Census MSA population (Eg: DECENNIALPL2020.P1-2026-03-25T232220.csv)",
+        category="Reference data",
+        table="census_msa",
+        dest_dir=_census_dir(),
+        placement="single",
         accept=".csv",
         source_url="https://data.census.gov/table/DECENNIALPL2020.P1",
         instructions="Same table-browser page as tract population, not a direct file \u2014 set Geography to "
-                      "Metropolitan/Micropolitan Statistical Areas \u2192 All, then Download.",
+        "Metropolitan/Micropolitan Statistical Areas \u2192 All, then Download.",
         loader=_run_census_msa,
-        match_globs=(),   # handled specially in refresh_source
+        match_globs=(),  # handled specially in refresh_source
         row_count_sql="SELECT COUNT(*) FROM census_msa",
         detect=None,  # a header-only sniff can't reliably tell this apart from the tract file
         direct_download=False,
     ),
     DataSource(
-        key="cbsa", label="CBSA \u2192 county crosswalk", category="Reference data",
-        table="cbsa_counties", dest_dir=_census_dir(), placement="single",
+        key="cbsa",
+        label="CBSA \u2192 county crosswalk",
+        category="Reference data",
+        table="cbsa_counties",
+        dest_dir=_census_dir(),
+        placement="single",
         accept=".xlsx,.xls,.csv",
         source_url="https://www.census.gov/geographies/reference-files/time-series/demo/metro-micro/delineation-files.html",
         instructions="This is an index page, not a direct file \u2014 open the current year's entry and "
-                      "download the delineation file (named like list1_*.xlsx). Refresh this before Census "
-                      "MSA population so MSA name\u2192code matching has something to match against.",
+        "download the delineation file (named like list1_*.xlsx). Refresh this before Census "
+        "MSA population so MSA name\u2192code matching has something to match against.",
         loader=_run_cbsa,
         match_globs=("list*.xlsx", "list*.xls", "list*.csv"),
         row_count_sql="SELECT COUNT(*) FROM cbsa_counties",
@@ -358,33 +403,41 @@ _STATIC_SOURCES: list[DataSource] = [
         direct_download=False,
     ),
     DataSource(
-        key="redfin", label="Redfin favorites", category="Redfin",
-        table="houses", dest_dir=settings.redfin_dir, placement="append",
+        key="redfin",
+        label="Redfin favorites",
+        category="Redfin",
+        table="houses",
+        dest_dir=settings.redfin_dir,
+        placement="append",
         accept=".csv",
         source_url="https://www.redfin.com",
         instructions="This is Redfin's own site, not a direct file \u2014 it can't be, since the export is "
-                      "specific to your saved search and requires your login. From your saved search, use "
-                      "\u201cDownload All\u201d to get the current favorites CSV. Re-uploading a file with the "
-                      "same name as one you've already loaded refreshes it: any house that drops out of that "
-                      "export (sold, delisted, unfavorited) is marked \u201cRemoved from favorites\u201d and "
-                      "gets a history entry, rather than being left showing its last known status.",
+        "specific to your saved search and requires your login. From your saved search, use "
+        "\u201cDownload All\u201d to get the current favorites CSV. Re-uploading a file with the "
+        "same name as one you've already loaded refreshes it: any house that drops out of that "
+        "export (sold, delisted, unfavorited) is marked \u201cRemoved from favorites\u201d and "
+        "gets a history entry, rather than being left showing its last known status.",
         loader=_run_redfin,
         notes="Tract/MSA joins for newly added houses may need a separate tract-resolution pass "
-              "(see README: `python setup_data.py --resolve-tracts`).",
+        "(see README: `python setup_data.py --resolve-tracts`).",
         row_count_sql="SELECT COUNT(*) FROM houses",
         detect=_detect_redfin,
         direct_download=False,
         precheck=_precheck_redfin_file,
     ),
     DataSource(
-        key="sold", label="Sold homes (Allegheny County, PA)", category="Sold homes",
-        table="sold_homes", dest_dir=settings.sold_dir, placement="append",
+        key="sold",
+        label="Sold homes (Allegheny County, PA)",
+        category="Sold homes",
+        table="sold_homes",
+        dest_dir=settings.sold_dir,
+        placement="append",
         accept=".csv",
         source_url="https://data.wprdc.org/dataset/real-estate-sales",
         instructions="This is a WPRDC dataset page, not a direct file \u2014 open it and download the current "
-                      "CSV resource (\u201cAllegheny County Property Sale Transactions\u201d, all sales since "
-                      "2013). Other counties fall back to a generic parser with reduced field coverage "
-                      "\u2014 see README.",
+        "CSV resource (\u201cAllegheny County Property Sale Transactions\u201d, all sales since "
+        "2013). Other counties fall back to a generic parser with reduced field coverage "
+        "\u2014 see README.",
         loader=_run_sold,
         row_count_sql="SELECT COUNT(*) FROM sold_homes",
         detect=_detect_sold_allegheny,
@@ -392,13 +445,17 @@ _STATIC_SOURCES: list[DataSource] = [
         precheck=_precheck_sold_file,
     ),
     DataSource(
-        key="zhvi", label="Zillow Home Value Index (ZHVI)", category="Housing market",
-        table="zhvi", dest_dir=settings.zhvi_dir, placement="append",
+        key="zhvi",
+        label="Zillow Home Value Index (ZHVI)",
+        category="Housing market",
+        table="zhvi",
+        dest_dir=settings.zhvi_dir,
+        placement="append",
         accept=".csv",
         source_url="https://www.zillow.com/research/data/",
         instructions="This is Zillow Research's download page, not a direct file — under Data Type "
-                      "select \u201cZHVI\u201d, pick any geography level (Zip, Neighborhood, City, Metro, "
-                      "County, State) and download the Smoothed, Seasonally Adjusted ($) CSV.",
+        "select \u201cZHVI\u201d, pick any geography level (Zip, Neighborhood, City, Metro, "
+        "County, State) and download the Smoothed, Seasonally Adjusted ($) CSV.",
         loader=_run_zhvi,
         row_count_sql="SELECT COUNT(*) FROM zhvi",
         detect=None,
@@ -406,12 +463,16 @@ _STATIC_SOURCES: list[DataSource] = [
         precheck=_precheck_zillow_file,
     ),
     DataSource(
-        key="market_heat_index", label="Zillow Market Heat Index", category="Housing market",
-        table="market_heat_index", dest_dir=settings.market_heat_dir, placement="append",
+        key="market_heat_index",
+        label="Zillow Market Heat Index",
+        category="Housing market",
+        table="market_heat_index",
+        dest_dir=settings.market_heat_dir,
+        placement="append",
         accept=".csv",
         source_url="https://www.zillow.com/research/data/",
         instructions="This is Zillow Research's download page, not a direct file — under Data Type "
-                      "select \u201cMarket Heat Index\u201d, pick any geography level, and download the CSV.",
+        "select \u201cMarket Heat Index\u201d, pick any geography level, and download the CSV.",
         loader=_run_market_heat_index,
         row_count_sql="SELECT COUNT(*) FROM market_heat_index",
         detect=None,
@@ -433,37 +494,48 @@ def _crime_source_url(city: str) -> tuple[str, str, bool]:
     download every time (see the `direct_download` field's use in list_sources()).
     """
     return {
-        "baltimore": (
-            "https://data.baltimorecity.gov/datasets/baltimore::part1-crime-data", "", False),
+        "baltimore": ("https://data.baltimorecity.gov/datasets/baltimore::part1-crime-data", "", False),
         "boston": (
             "https://data.boston.gov/dataset/crime-incident-reports-august-2015-to-date-source-new-system",
-            "", False),
+            "",
+            False,
+        ),
         "buffalo": (
             "https://data.buffalony.gov/resource/d6g9-xbgu.csv",
             "This is Buffalo's Socrata API endpoint, not a portal page \u2014 it downloads the current "
-            "\u201cCrime Incidents\u201d dataset directly as CSV.", True),
+            "\u201cCrime Incidents\u201d dataset directly as CSV.",
+            True,
+        ),
         "chicago": (
             "https://data.cityofchicago.org/resource/ijzp-q8t2.csv",
             "This is Chicago's Socrata API endpoint, not a portal page \u2014 it downloads the current "
             "\u201cCrimes \u2014 2001 to present\u201d dataset directly as CSV. Socrata caps a single request "
             "at 1,000 rows by default; for the full history use the dataset's own export page instead: "
-            "https://data.cityofchicago.org/Public-Safety/Crimes-2001-to-present/ijzp-q8t2", True),
+            "https://data.cityofchicago.org/Public-Safety/Crimes-2001-to-present/ijzp-q8t2",
+            True,
+        ),
         "indianapolis": (
             "https://data.indy.gov",
             "This is a portal page, not a direct file. IMPD launched a new \u201cIMPD Transparency\u201d "
             "portal in Nov 2025; the old OpenIndy UCR export this parser was built against may no longer "
             "be the current source. If the upload reports missing columns, "
             "services/crime_sources.py's IndianapolisCrimeParser likely needs updating to the new export's "
-            "column names.", False),
+            "column names.",
+            False,
+        ),
         "minneapolis": (
             "http://opendata.minneapolismn.gov/",
             "This is a portal page, not a direct file. Minneapolis has migrated crime reporting to NIBRS "
             "since this parser was written; column names may have shifted. If the upload reports missing "
-            "columns, MinneapolisCrimeParser likely needs a column-name update.", False),
+            "columns, MinneapolisCrimeParser likely needs a column-name update.",
+            False,
+        ),
         "philadelphia": (
             "https://opendataphilly.org/datasets/crime-incidents/",
             "This is a portal page, not a direct file \u2014 it's also a large dataset that OpenDataPhilly "
-            "itself splits by year; download each year you want, or use the API link on that page.", False),
+            "itself splits by year; download each year you want, or use the API link on that page.",
+            False,
+        ),
         "pittsburgh": (
             "https://data.wprdc.org/dataset/uniform-crime-reporting-data/resource/044f2016-1dfd-4ab0-bc1e-065da05fca2e",
             "This is a portal page, not a direct file. It's the specific resource PittsburghCrimeParser's "
@@ -471,7 +543,9 @@ def _crime_source_url(city: str) -> tuple[str, str, bool]:
             "which stopped updating on 11/14/2023 \u2014 this link won't have anything newer than that date. "
             "Its successor, \u201cMonthly Criminal Activity\u201d "
             "(data.wprdc.org/dataset/monthly-criminal-activity-dashboard), covers more recent incidents but "
-            "uses a different NIBRS-based schema that PittsburghCrimeParser doesn't understand yet.", False),
+            "uses a different NIBRS-based schema that PittsburghCrimeParser doesn't understand yet.",
+            False,
+        ),
     }.get(city, ("", "", False))
 
 
@@ -479,41 +553,54 @@ def _crime_sources() -> list[DataSource]:
     out = []
     for parser in CRIME_PARSERS:
         url, notes, direct = _crime_source_url(parser.city)
-        instructions = ("Downloads the current data directly as CSV." if direct else
-                         "This is a portal page, not a direct file \u2014 open it and download the current "
-                         "export.") + (" Re-uploading a file with the same name replaces just that file's "
-                         "incidents; a differently-named file is added alongside what's already loaded "
-                         "(e.g. one file per year).")
-        out.append(DataSource(
-            key=f"crime_{parser.city}", label=f"Crime \u2014 {parser.city_label}",
-            category="Crime", table="crime_incidents",
-            dest_dir=settings.data_dir / "crime" / parser.city, placement="append",
-            accept=".csv,.xlsx,.xls",
-            source_url=url,
-            instructions=instructions,
-            loader=_run_crime,
-            notes=notes,
-            row_count_sql=f"SELECT COUNT(*) FROM crime_incidents WHERE city = '{parser.city}'",
-            detect=_make_crime_detector(parser),
-            direct_download=direct,
-            precheck=_make_crime_precheck(parser),
-        ))
+        instructions = (
+            "Downloads the current data directly as CSV."
+            if direct
+            else "This is a portal page, not a direct file \u2014 open it and download the current export."
+        ) + (
+            " Re-uploading a file with the same name replaces just that file's "
+            "incidents; a differently-named file is added alongside what's already loaded "
+            "(e.g. one file per year)."
+        )
+        out.append(
+            DataSource(
+                key=f"crime_{parser.city}",
+                label=f"Crime \u2014 {parser.city_label}",
+                category="Crime",
+                table="crime_incidents",
+                dest_dir=settings.data_dir / "crime" / parser.city,
+                placement="append",
+                accept=".csv,.xlsx,.xls",
+                source_url=url,
+                instructions=instructions,
+                loader=_run_crime,
+                notes=notes,
+                row_count_sql=f"SELECT COUNT(*) FROM crime_incidents WHERE city = '{parser.city}'",
+                detect=_make_crime_detector(parser),
+                direct_download=direct,
+                precheck=_make_crime_precheck(parser),
+            )
+        )
     return out
 
 
 def _bike_source() -> DataSource:
     return DataSource(
-        key="bike", label="Bike infrastructure (BikePGH)", category="Bike infrastructure",
-        table="bike_routes", dest_dir=settings.data_dir / "bike", placement="append",
+        key="bike",
+        label="Bike infrastructure (BikePGH)",
+        category="Bike infrastructure",
+        table="bike_routes",
+        dest_dir=settings.data_dir / "bike",
+        placement="append",
         accept=".zip",
         source_url="https://data.wprdc.org/dataset/shape-files-for-bikepgh-s-pittsburgh-bike-map",
         instructions="This is a WPRDC dataset page, not a direct file \u2014 open it, download a layer's "
-                     "shapefile zip (e.g. \u201cBike Lanes\u201d), and upload it as-is. It's extracted under "
-                     "data/bike/pittsburgh/<layer name>/ automatically; upload each layer you want "
-                     "separately.",
+        "shapefile zip (e.g. \u201cBike Lanes\u201d), and upload it as-is. It's extracted under "
+        "data/bike/pittsburgh/<layer name>/ automatically; upload each layer you want "
+        "separately.",
         loader=_run_bike,
         notes="Currently only Pittsburgh has recognized layers (see services/data_loader.py's "
-              "_BIKE_LAYER_SPECS) \u2014 uploads are placed under data/bike/pittsburgh/.",
+        "_BIKE_LAYER_SPECS) \u2014 uploads are placed under data/bike/pittsburgh/.",
         row_count_sql="SELECT COUNT(*) FROM bike_routes",
         detect=None,  # shapefile zip — not part of the generic CSV/XLSX upload auto-detect
         direct_download=False,
@@ -553,16 +640,25 @@ def list_sources() -> list[dict]:
     out = []
     for key, s in REGISTRY.items():
         entry = log.get(key, {})
-        out.append({
-            "key": s.key, "label": s.label, "category": s.category, "table": s.table,
-            "placement": s.placement, "accept": s.accept, "source_url": s.source_url,
-            "instructions": s.instructions, "notes": s.notes, "direct_download": s.direct_download,
-            "current_row_count": _current_row_count(s),
-            "last_loaded_at": entry.get("last_loaded_at"),
-            "last_row_count": entry.get("row_count"),
-            "last_source_files": entry.get("source_files", []),
-            "last_message": entry.get("message", ""),
-        })
+        out.append(
+            {
+                "key": s.key,
+                "label": s.label,
+                "category": s.category,
+                "table": s.table,
+                "placement": s.placement,
+                "accept": s.accept,
+                "source_url": s.source_url,
+                "instructions": s.instructions,
+                "notes": s.notes,
+                "direct_download": s.direct_download,
+                "current_row_count": _current_row_count(s),
+                "last_loaded_at": entry.get("last_loaded_at"),
+                "last_row_count": entry.get("row_count"),
+                "last_source_files": entry.get("source_files", []),
+                "last_message": entry.get("message", ""),
+            }
+        )
     return out
 
 
@@ -572,8 +668,15 @@ _HEALTH_TIMEOUT_SECONDS = 10.0
 
 async def _check_one_link(client: httpx.AsyncClient, source: "DataSource") -> dict:
     if not source.source_url:
-        return {"key": source.key, "label": source.label, "url": source.source_url,
-                "ok": None, "status": None, "redirected_to": None, "error": "No URL configured."}
+        return {
+            "key": source.key,
+            "label": source.label,
+            "url": source.source_url,
+            "ok": None,
+            "status": None,
+            "redirected_to": None,
+            "error": "No URL configured.",
+        }
     try:
         resp = await client.head(source.source_url)
         if resp.status_code in (403, 405) or resp.status_code >= 500:
@@ -581,12 +684,22 @@ async def _check_one_link(client: httpx.AsyncClient, source: "DataSource") -> di
             # before concluding anything's actually wrong.
             resp = await client.get(source.source_url)
     except Exception as e:
-        return {"key": source.key, "label": source.label, "url": source.source_url,
-                "ok": False, "status": None, "redirected_to": None, "error": str(e)}
+        return {
+            "key": source.key,
+            "label": source.label,
+            "url": source.source_url,
+            "ok": False,
+            "status": None,
+            "redirected_to": None,
+            "error": str(e),
+        }
     ok = resp.status_code < 400
     redirected = str(resp.url)
     return {
-        "key": source.key, "label": source.label, "url": source.source_url, "ok": ok,
+        "key": source.key,
+        "label": source.label,
+        "url": source.source_url,
+        "ok": ok,
         "status": resp.status_code,
         "redirected_to": redirected if redirected != source.source_url else None,
         "error": None if ok else f"HTTP {resp.status_code}",
@@ -613,7 +726,8 @@ async def check_source_links(keys: Optional[list[str]] = None) -> list[dict]:
     """
     targets = [REGISTRY[k] for k in keys if k in REGISTRY] if keys else list(REGISTRY.values())
     async with httpx.AsyncClient(
-        timeout=_HEALTH_TIMEOUT_SECONDS, follow_redirects=True,
+        timeout=_HEALTH_TIMEOUT_SECONDS,
+        follow_redirects=True,
         headers={"User-Agent": _HEALTH_USER_AGENT},
     ) as client:
         return list(await asyncio.gather(*(_check_one_link(client, s) for s in targets)))
@@ -663,6 +777,7 @@ def peek_header_candidates(path: Path, ext: str) -> list[list[str]]:
 # doesn't. This is what stands between a malformed upload and silently wiping
 # real data (see the Copilot review this responds to).
 
+
 def _backup_aside(paths: list[Path]) -> dict[Path, Path]:
     """Move each existing path to a sibling backup name instead of deleting or
     overwriting it. Returns {original_path: backup_path}."""
@@ -704,30 +819,27 @@ def _discard_backups(backups: dict[Path, Path]) -> None:
             pass
 
 
-def _rows_by_source_file(table: str, id_col: str, source_file_value: str,
-                          city: Optional[str] = None) -> set:
+def _rows_by_source_file(table: str, id_col: str, source_file_value: str, city: Optional[str] = None) -> set:
     """IDs currently in `table` attributed to this exact filename (and city, for
     crime_incidents)."""
     conn = store.get_conn()
     if city is not None:
-        rows = conn.execute(f"SELECT {id_col} FROM {table} WHERE source_file = ? AND city = ?",
-                             [source_file_value, city]).fetchall()
+        rows = conn.execute(
+            f"SELECT {id_col} FROM {table} WHERE source_file = ? AND city = ?", [source_file_value, city]
+        ).fetchall()
     else:
-        rows = conn.execute(f"SELECT {id_col} FROM {table} WHERE source_file = ?",
-                             [source_file_value]).fetchall()
+        rows = conn.execute(f"SELECT {id_col} FROM {table} WHERE source_file = ?", [source_file_value]).fetchall()
     return {r[0] for r in rows}
 
 
-def _snapshot_rows_by_source_file(table: str, source_file_value: str,
-                                   city: Optional[str] = None) -> pd.DataFrame:
+def _snapshot_rows_by_source_file(table: str, source_file_value: str, city: Optional[str] = None) -> pd.DataFrame:
     """Full row data (every column, in table order) for this exact filename —
     enough to restore them verbatim if a refresh needs to be undone, or to
     re-insert a subset with one field changed (see the redfin "removed from
     favorites" handling in refresh_source)."""
     conn = store.get_conn()
     if city is not None:
-        return conn.execute(f"SELECT * FROM {table} WHERE source_file = ? AND city = ?",
-                             [source_file_value, city]).df()
+        return conn.execute(f"SELECT * FROM {table} WHERE source_file = ? AND city = ?", [source_file_value, city]).df()
     return conn.execute(f"SELECT * FROM {table} WHERE source_file = ?", [source_file_value]).df()
 
 
@@ -739,6 +851,7 @@ def _delete_ids(table: str, id_col: str, ids: set) -> None:
 
 
 # ── Placement: "single" sources ─────────────────────────────────────────────
+
 
 def _sniff_is_tract_csv(path: Path) -> bool:
     try:
@@ -775,17 +888,19 @@ def _single_source_matches(source: DataSource) -> list[Path]:
     return matches
 
 
-def _place_single(source: DataSource, tmp_path: Path, orig_filename: str
-                   ) -> tuple[Path, dict[Path, Path], list[Path]]:
+def _place_single(source: DataSource, tmp_path: Path, orig_filename: str) -> tuple[Path, dict[Path, Path], list[Path]]:
     """Stage the new file next to (not over) whatever currently satisfies this
     source's canonical-file slot. Returns (dest, backups, new_files) — new_files
     is every file this call wrote, so a caller can clean all of them up on
     failure (matters for NRI, which writes a whole shapefile's worth)."""
     source.dest_dir.mkdir(parents=True, exist_ok=True)
     matches = _single_source_matches(source)
-    if (source.key == "census_tracts" and len(matches) == 1
-            and matches[0].stat().st_size == tmp_path.stat().st_size
-            and filecmp.cmp(matches[0], tmp_path, shallow=False)):
+    if (
+        source.key == "census_tracts"
+        and len(matches) == 1
+        and matches[0].stat().st_size == tmp_path.stat().st_size
+        and filecmp.cmp(matches[0], tmp_path, shallow=False)
+    ):
         return matches[0], {}, []
 
     backups = _backup_aside(matches)
@@ -843,8 +958,10 @@ def _extract_nri_zip(tmp_path: Path, dest_dir: Path) -> tuple[Path, list[Path]]:
 
 # ── Placement: "append" sources ─────────────────────────────────────────────
 
-def _place_append(source: DataSource, tmp_path: Path, orig_filename: str,
-                   dest_subdir: Optional[Path] = None) -> tuple[Path, dict[Path, Path]]:
+
+def _place_append(
+    source: DataSource, tmp_path: Path, orig_filename: str, dest_subdir: Optional[Path] = None
+) -> tuple[Path, dict[Path, Path]]:
     """Save into an accumulating folder. If a file with this name already exists,
     it's backed up rather than overwritten in place, so a bad upload can't
     destroy it — refresh_source discards the backup on success or restores it on
@@ -905,6 +1022,7 @@ def _extract_bike_zip(tmp_path: Path, dest_root: Path) -> tuple[list[Path], dict
 
 # ── Orchestration ────────────────────────────────────────────────────────────
 
+
 def _invalidate_layer_cache() -> None:
     """Row counts shown in the layer panel just changed; drop the derived specs.
 
@@ -913,6 +1031,7 @@ def _invalidate_layer_cache() -> None:
     """
     try:
         from services import map_layers
+
         map_layers.invalidate_caches()
     except Exception:
         pass
@@ -979,8 +1098,7 @@ def refresh_source(key: str, tmp_path: Path, orig_filename: str) -> dict:
                 _capture(source.loader)
             except Exception:
                 pass
-        return {"ok": False, "error": f"This upload wasn't applied \u2014 {reason}",
-                "warnings": warnings or []}
+        return {"ok": False, "error": f"This upload wasn't applied \u2014 {reason}", "warnings": warnings or []}
 
     # ── Pre-check (only sources that declare one — see the `precheck` field's
     # docstring on DataSource): faithfully replay the loader's own per-file gate
@@ -1034,8 +1152,7 @@ def refresh_source(key: str, tmp_path: Path, orig_filename: str) -> dict:
     elif source.key == "bike":
         shp_files = [p for p in new_files if p.suffix.lower() == ".shp"]
         upload_succeeded = any(
-            _rows_by_source_file("bike_routes", "route_id", str(p.relative_to(source.dest_dir)))
-            for p in shp_files
+            _rows_by_source_file("bike_routes", "route_id", str(p.relative_to(source.dest_dir))) for p in shp_files
         )
     else:
         # "single" sources: each processes exactly one canonical file, so its
@@ -1051,8 +1168,9 @@ def refresh_source(key: str, tmp_path: Path, orig_filename: str) -> dict:
         # date or bounding-box filter). Put back exactly what was cleared.
         if scope_table and not old_snapshot.empty:
             store.upsert_df(scope_table, old_snapshot)
-        detail = load_error or ("the file didn't produce any usable rows \u2014 see the loader's own "
-                                 "message below for why.")
+        detail = load_error or (
+            "the file didn't produce any usable rows \u2014 see the loader's own message below for why."
+        )
         warnings = _warnings_from_log(log_text) if load_error is None else []
         return _rollback(detail, warnings)
 
@@ -1077,17 +1195,23 @@ def refresh_source(key: str, tmp_path: Path, orig_filename: str) -> dict:
     rows_after = _current_row_count(source)
     message_parts = [f"{rows_after:,} row(s) now loaded (was {rows_before:,})."]
     if removed_favorites:
-        message_parts.append(f"{removed_favorites} house(s) no longer in this export were marked "
-                              f"\u201cRemoved from favorites\u201d.")
+        message_parts.append(
+            f"{removed_favorites} house(s) no longer in this export were marked \u201cRemoved from favorites\u201d."
+        )
     if warnings:
         message_parts.append(f"{len(warnings)} file(s)/warning(s) need attention \u2014 see below.")
     message = " ".join(message_parts)
 
     store.record_source_load(source.key, source.label, rows_after, saved_files, message)
-    _invalidate_layer_cache()          # the row counts the map panel shows have changed
+    _invalidate_layer_cache()  # the row counts the map panel shows have changed
 
     return {
-        "ok": True, "source_key": source.key, "rows_before": rows_before, "rows_after": rows_after,
-        "removed_favorites": removed_favorites, "saved_files": saved_files,
-        "warnings": warnings, "message": message,
+        "ok": True,
+        "source_key": source.key,
+        "rows_before": rows_before,
+        "rows_after": rows_after,
+        "removed_favorites": removed_favorites,
+        "saved_files": saved_files,
+        "warnings": warnings,
+        "message": message,
     }

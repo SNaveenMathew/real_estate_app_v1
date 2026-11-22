@@ -15,6 +15,7 @@ exactly the kind of guess that must not be trusted on its own.  So:
   cap, no retries, own circuit breaker), and it can never raise into onboarding: any failure means "no extra candidates",
   i.e. exactly the previous behaviour.
 """
+
 from __future__ import annotations
 
 import json
@@ -36,8 +37,8 @@ _SYSTEM = (
     "You help join a user's uploaded table to existing tables.\n"
     "From SOURCE COLUMNS (name, type, value statistics, sample values) and TARGET COLUMNS (table.column, type), list pairs "
     "whose VALUES likely refer to the same thing (same identifier, same place names, same codes), even when the names differ.\n"
-    "Reply with JSON only, no prose: {\"pairs\": [{\"source\": \"<source column>\", \"target\": \"<table.column>\"}]}\n"
-    f"At most {MAX_PAIRS} pairs, best first. Use only names from the lists. If nothing is plausible reply {{\"pairs\": []}}."
+    'Reply with JSON only, no prose: {"pairs": [{"source": "<source column>", "target": "<table.column>"}]}\n'
+    f'At most {MAX_PAIRS} pairs, best first. Use only names from the lists. If nothing is plausible reply {{"pairs": []}}.'
 )
 
 _client: ChatOpenAI | None = None
@@ -47,8 +48,14 @@ def _get_client() -> ChatOpenAI:
     global _client
     if _client is None:
         _client = ChatOpenAI(
-            base_url=settings.llama_server_base_url, api_key="not-needed", model=settings.llama_server_model,
-            temperature=0.0, max_tokens=400, timeout=settings.relationship_llm_timeout_s, max_retries=0)
+            base_url=settings.llama_server_base_url,
+            api_key="not-needed",
+            model=settings.llama_server_model,
+            temperature=0.0,
+            max_tokens=400,
+            timeout=settings.relationship_llm_timeout_s,
+            max_retries=0,
+        )
     return _client
 
 
@@ -70,7 +77,7 @@ def parse_pairs(text: str, sources: set[str], targets: dict[str, dict]) -> list[
             continue
         src, tgt = item.get("source"), item.get("target")
         if not isinstance(src, str) or not isinstance(tgt, str) or src not in sources or tgt not in targets:
-            continue                                                   # unknown names: invented, not suggested
+            continue  # unknown names: invented, not suggested
         if any(src == s and targets[tgt] is t for s, t in out) or per_source.get(src, 0) >= MAX_PER_SOURCE:
             continue
         out.append((src, targets[tgt]))
@@ -101,18 +108,24 @@ def suggest_pairs(prof: dict, included: list[dict], targets: list[dict]) -> dict
     for name, p in sources.items():
         stats = f"{p['family']}, {p['distinct']} distinct"
         if p["family"] == "text":
-            stats += f", length {p.get('min_len')}-{p.get('max_len')}, {round(100 * p.get('digit_frac', 0))}% all-digits"
+            stats += (
+                f", length {p.get('min_len')}-{p.get('max_len')}, {round(100 * p.get('digit_frac', 0))}% all-digits"
+            )
         src_lines.append(f"- {name} ({stats}); samples: {', '.join(p.get('samples') or [])[:120]}")
     tgt_lines = [f"- {key} ({t['family']})" for key, t in target_index.items()]
     prompt = "SOURCE COLUMNS:\n" + "\n".join(src_lines) + "\n\nTARGET COLUMNS:\n" + "\n".join(tgt_lines)
     try:
-        reply = llm_resilience.invoke(_get_client(), [SystemMessage(content=_SYSTEM), HumanMessage(content=prompt)],
-                                      role="relationship_suggestions", breaker_name="relationships")
+        reply = llm_resilience.invoke(
+            _get_client(),
+            [SystemMessage(content=_SYSTEM), HumanMessage(content=prompt)],
+            role="relationship_suggestions",
+            breaker_name="relationships",
+        )
         content = getattr(reply, "content", reply)
         pairs = parse_pairs(content if isinstance(content, str) else str(content), set(sources), target_index)
     except llm_resilience.ModelUnavailable:
         return {}
-    except Exception as exc:                       # best-effort: a bad reply must never break onboarding
+    except Exception as exc:  # best-effort: a bad reply must never break onboarding
         log.warning("relationship suggestions skipped (%s: %s)", type(exc).__name__, str(exc)[:200])
         return {}
     out: dict[str, list[dict]] = {}

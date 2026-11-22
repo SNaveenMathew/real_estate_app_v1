@@ -32,9 +32,7 @@ def test_load_crime_replaces_stale_rows_for_loaded_cities(tmp_path, monkeypatch)
     duplicate_file = city_dir / "b.csv"
     header = "PK,INCIDENTTIME,X,Y,OFFENSES\n"
     first_file.write_text(
-        header
-        + "101,2005-01-01 08:00:00,-80.0,40.4,Theft\n"
-        + "102,2005-01-02 08:00:00,-80.1,40.5,Assault\n",
+        header + "101,2005-01-01 08:00:00,-80.0,40.4,Theft\n" + "102,2005-01-02 08:00:00,-80.1,40.5,Assault\n",
         encoding="utf-8",
     )
     duplicate_file.write_text(
@@ -103,9 +101,7 @@ def test_load_census_tracts_stores_join_key_in_schema_column_and_replaces_old_ro
     monkeypatch.setattr(data_loader.store, "get_conn", lambda: conn)
 
     assert data_loader.load_census_tracts() == 2
-    rows = conn.execute(
-        "SELECT tract_fips, geo_id, population FROM census_tracts ORDER BY tract_fips"
-    ).fetchall()
+    rows = conn.execute("SELECT tract_fips, geo_id, population FROM census_tracts ORDER BY tract_fips").fetchall()
     assert rows == [
         ("01001020100", "1400000US01001020100", 1775),
         ("42003140100", "1400000US42003140100", 3456),

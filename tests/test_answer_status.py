@@ -1,4 +1,5 @@
 """agents/answer_status.py and the response validator's handling of deliberate non-answers."""
+
 from __future__ import annotations
 
 import re
@@ -28,13 +29,25 @@ def test_multiline_messages_survive():
     assert st.status_message(f"[RESULT]\n{text}") == "line one.\nline two."
 
 
-@pytest.mark.parametrize("not_a_status", [
-    "", None, 42, "ordinary result text", "NOT_ANSWERED", "NOT_ANSWERED[bad code]: x",
-    "[RESULT]\n  name  value\n  NOT_ANSWERED[unplannable]: buried in a data row",     # must sit right after the header
-    "a data cell that says NOT_ANSWERED[unplannable]: inside a sentence",
-])
+@pytest.mark.parametrize(
+    "not_a_status",
+    [
+        "",
+        None,
+        42,
+        "ordinary result text",
+        "NOT_ANSWERED",
+        "NOT_ANSWERED[bad code]: x",
+        "[RESULT]\n  name  value\n  NOT_ANSWERED[unplannable]: buried in a data row",  # must sit right after the header
+        "a data cell that says NOT_ANSWERED[unplannable]: inside a sentence",
+    ],
+)
 def test_only_a_real_status_line_is_a_status(not_a_status):
-    assert st.status_code(not_a_status) is None and st.status_message(not_a_status) == "" and not st.is_not_answered(not_a_status)
+    assert (
+        st.status_code(not_a_status) is None
+        and st.status_message(not_a_status) == ""
+        and not st.is_not_answered(not_a_status)
+    )
 
 
 def test_unknown_codes_are_rejected_at_creation():
@@ -50,8 +63,10 @@ def test_only_requests_a_rewording_could_fix_are_retryable():
 # --------------------------------------------------------------------------------------------------------------------
 # Validator
 # --------------------------------------------------------------------------------------------------------------------
-TABLE_REPLY = ("| Metro | Population |\n|---|---|\n| A | 1,100,200 |\n| B | 2,200,300 |\n| C | 3,300,400 |\n"
-               "| D | 4,400,500 |\n| E | 5,500,600 |\n")
+TABLE_REPLY = (
+    "| Metro | Population |\n|---|---|\n| A | 1,100,200 |\n| B | 2,200,300 |\n| C | 3,300,400 |\n"
+    "| D | 4,400,500 |\n| E | 5,500,600 |\n"
+)
 
 
 def tool_msg(content, name="query_database"):
@@ -76,7 +91,7 @@ def test_invented_numbers_after_a_non_answer_are_replaced_by_the_tools_own_reaso
     reply = rv.validate_response(TABLE_REPLY, [AIMessage(content="x"), tool_msg(non_answer())])
     assert reply.startswith("⚠️ **This question could not be answered from the loaded data.**")
     assert "Portland fits two places; ask which." in reply and "1,100,200" not in reply
-    assert "setup_data.py" not in reply          # NOT the generic "tables are not loaded, run setup" message
+    assert "setup_data.py" not in reply  # NOT the generic "tables are not loaded, run setup" message
 
 
 def test_an_honest_reply_after_a_non_answer_passes_through():
@@ -105,6 +120,7 @@ def test_message_templates_are_digit_free():
     """Templates (not data-dependent parts) must never contain digits - see agents/answer_status.py."""
     import agents.answer_policy as policy
     import inspect
+
     src = inspect.getsource(policy)
     literals = re.findall(r'f?"([^"\n]{20,})"', src)
     status_literals = [s for s in literals if "database error" in s or "No query was run" in s]

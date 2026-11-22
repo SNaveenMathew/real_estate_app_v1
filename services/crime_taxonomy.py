@@ -49,6 +49,7 @@ compounds (e.g. "IDENTITY THEFT" containing the substring "THEFT") can land
 in a neighboring category with a similar weight — acceptable slop for a map
 layer, worth knowing about if you pipe `category` into something stricter.
 """
+
 import re
 from typing import NamedTuple, Optional
 
@@ -56,32 +57,32 @@ from typing import NamedTuple, Optional
 class CrimeCategory(NamedTuple):
     key: str
     label: str
-    weight: float   # 1.0 (least severe) – 10.0 (most severe)
+    weight: float  # 1.0 (least severe) – 10.0 (most severe)
 
 
 # Order here is presentation order only (e.g. for a legend) — classification
 # checks every category and keeps the highest-weight match, so this list's
 # order has no effect on how any given string gets classified.
 CRIME_CATEGORIES: list[CrimeCategory] = [
-    CrimeCategory("homicide",              "Homicide",                        10.0),
-    CrimeCategory("rape_sexual_assault",   "Rape / Sexual Assault",            9.0),
-    CrimeCategory("kidnapping_trafficking","Kidnapping / Trafficking",         8.5),
-    CrimeCategory("robbery",               "Robbery",                          7.5),
-    CrimeCategory("aggravated_assault",    "Aggravated Assault",               7.0),
-    CrimeCategory("arson",                 "Arson",                            6.0),
-    CrimeCategory("burglary",              "Burglary",                         5.0),
-    CrimeCategory("weapons",               "Weapons Violation",                5.0),
-    CrimeCategory("sex_offense_other",     "Other Sex Offense",                4.5),
-    CrimeCategory("motor_vehicle_theft",   "Motor Vehicle Theft",              4.0),
-    CrimeCategory("simple_assault",        "Simple Assault / Battery",         3.5),
-    CrimeCategory("drug_offense",          "Drug / Narcotics",                 3.0),
-    CrimeCategory("theft_larceny",         "Theft / Larceny",                  2.5),
-    CrimeCategory("threats_harassment",    "Threats / Harassment / Stalking",  2.25),
-    CrimeCategory("fraud_forgery",         "Fraud / Forgery / Embezzlement",   2.0),
-    CrimeCategory("vandalism",             "Vandalism / Criminal Mischief",    1.5),
-    CrimeCategory("dui",                   "DUI / Impaired Driving",           1.5),
+    CrimeCategory("homicide", "Homicide", 10.0),
+    CrimeCategory("rape_sexual_assault", "Rape / Sexual Assault", 9.0),
+    CrimeCategory("kidnapping_trafficking", "Kidnapping / Trafficking", 8.5),
+    CrimeCategory("robbery", "Robbery", 7.5),
+    CrimeCategory("aggravated_assault", "Aggravated Assault", 7.0),
+    CrimeCategory("arson", "Arson", 6.0),
+    CrimeCategory("burglary", "Burglary", 5.0),
+    CrimeCategory("weapons", "Weapons Violation", 5.0),
+    CrimeCategory("sex_offense_other", "Other Sex Offense", 4.5),
+    CrimeCategory("motor_vehicle_theft", "Motor Vehicle Theft", 4.0),
+    CrimeCategory("simple_assault", "Simple Assault / Battery", 3.5),
+    CrimeCategory("drug_offense", "Drug / Narcotics", 3.0),
+    CrimeCategory("theft_larceny", "Theft / Larceny", 2.5),
+    CrimeCategory("threats_harassment", "Threats / Harassment / Stalking", 2.25),
+    CrimeCategory("fraud_forgery", "Fraud / Forgery / Embezzlement", 2.0),
+    CrimeCategory("vandalism", "Vandalism / Criminal Mischief", 1.5),
+    CrimeCategory("dui", "DUI / Impaired Driving", 1.5),
     CrimeCategory("disorderly_quality_of_life", "Disorderly Conduct / Quality of Life", 1.0),
-    CrimeCategory("other",                 "Other / Unclassified",             1.0),
+    CrimeCategory("other", "Other / Unclassified", 1.0),
 ]
 
 CATEGORY_BY_KEY: dict[str, CrimeCategory] = {c.key: c for c in CRIME_CATEGORIES}
@@ -95,79 +96,127 @@ _OTHER = CATEGORY_BY_KEY["other"]
 # shows up in real Pittsburgh data as "PUBLIC DRUNKENESS").
 _PATTERNS: dict[str, list[str]] = {
     "homicide": [
-        r"\bHOMICIDES?\b", r"\bMURDERS?\b", r"\bMANSLAUGHTER\b",
+        r"\bHOMICIDES?\b",
+        r"\bMURDERS?\b",
+        r"\bMANSLAUGHTER\b",
     ],
     "rape_sexual_assault": [
-        r"\bRAPES?\b", r"SEXUAL ASSAULT", r"SEXUAL ABUSE", r"\bSODOMY\b",
+        r"\bRAPES?\b",
+        r"SEXUAL ASSAULT",
+        r"SEXUAL ABUSE",
+        r"\bSODOMY\b",
         r"CRIM(?:INAL)?\s*SEXUAL",
     ],
     "kidnapping_trafficking": [
-        r"\bKIDNAP", r"\bABDUCT", r"HUMAN TRAFFICKING", r"\bTRAFFICKING\b",
+        r"\bKIDNAP",
+        r"\bABDUCT",
+        r"HUMAN TRAFFICKING",
+        r"\bTRAFFICKING\b",
     ],
     "robbery": [
-        r"\bROBBERY\b", r"\bROBBED\b", r"CARJACK",
+        r"\bROBBERY\b",
+        r"\bROBBED\b",
+        r"CARJACK",
     ],
     "aggravated_assault": [
-        r"AGGRAVAT\w*\s*ASSAULT", r"\bAGG\.?\s*ASSAULT",
+        r"AGGRAVAT\w*\s*ASSAULT",
+        r"\bAGG\.?\s*ASSAULT",
         r"ASSAULT[^.]{0,25}(FIREARM|WEAPON|DEADLY|GUN|KNIFE)",
-        r"\bSHOOTING\b", r"SHOTS FIRED", r"\bSTABBING\b",
-        r"DISCHARGE[^.]{0,15}FIREARM", r"RECKLESS\w*\s*ENDANGER",
+        r"\bSHOOTING\b",
+        r"SHOTS FIRED",
+        r"\bSTABBING\b",
+        r"DISCHARGE[^.]{0,15}FIREARM",
+        r"RECKLESS\w*\s*ENDANGER",
     ],
     "arson": [
         r"\bARSON\b",
     ],
     "burglary": [
-        r"\bBURGLAR", r"BREAKING\s*(AND|&)\s*ENTERING", r"\bB\s?&\s?E\b",
+        r"\bBURGLAR",
+        r"BREAKING\s*(AND|&)\s*ENTERING",
+        r"\bB\s?&\s?E\b",
     ],
     "weapons": [
-        r"WEAPONS?\s*(VIOLATION|OFFEN[CS]E)", r"ILLEGAL[^.]{0,15}(FIREARM|GUN)",
-        r"CARRYING[^.]{0,20}CONCEALED", r"PROHIBITED\s*(WEAPON|FIREARM)",
+        r"WEAPONS?\s*(VIOLATION|OFFEN[CS]E)",
+        r"ILLEGAL[^.]{0,15}(FIREARM|GUN)",
+        r"CARRYING[^.]{0,20}CONCEALED",
+        r"PROHIBITED\s*(WEAPON|FIREARM)",
         r"FELON[^.]{0,15}(FIREARM|WEAPON)",
     ],
     "sex_offense_other": [
-        r"INDECENT EXPOSURE", r"PUBLIC INDECENCY", r"\bPROSTITUTION\b",
-        r"\bLEWDNESS\b", r"\bOBSCENITY\b",
+        r"INDECENT EXPOSURE",
+        r"PUBLIC INDECENCY",
+        r"\bPROSTITUTION\b",
+        r"\bLEWDNESS\b",
+        r"\bOBSCENITY\b",
     ],
     "motor_vehicle_theft": [
-        r"MOTOR\s*VEH(?:ICLE)?\s*THEFT", r"MTR\s*VEH(?:ICLE)?\s*THEFT",
-        r"\bAUTO\s*THEFT\b", r"\bUUV\b",
-        r"UNAUTHORIZED USE[^.]{0,15}VEHICLE", r"STOLEN\s*(AUTO|VEHICLE|CAR)\b",
+        r"MOTOR\s*VEH(?:ICLE)?\s*THEFT",
+        r"MTR\s*VEH(?:ICLE)?\s*THEFT",
+        r"\bAUTO\s*THEFT\b",
+        r"\bUUV\b",
+        r"UNAUTHORIZED USE[^.]{0,15}VEHICLE",
+        r"STOLEN\s*(AUTO|VEHICLE|CAR)\b",
     ],
     "simple_assault": [
-        r"\bASSAULT\b", r"\bBATTERY\b",
+        r"\bASSAULT\b",
+        r"\bBATTERY\b",
     ],
     "drug_offense": [
-        r"NARCOTIC", r"\bDRUG\b", r"CONTROLLED SUBSTANCE",
+        r"NARCOTIC",
+        r"\bDRUG\b",
+        r"CONTROLLED SUBSTANCE",
         r"POSSESS\w*[^.]{0,20}(COCAINE|HEROIN|MARIJUANA|METH|FENTANYL|NARCOTIC)",
     ],
     "theft_larceny": [
-        r"\bTHEFTS?\b", r"\bLARCEN(?:Y|IES)\b", r"SHOPLIFT", r"STOLEN PROPERTY",
+        r"\bTHEFTS?\b",
+        r"\bLARCEN(?:Y|IES)\b",
+        r"SHOPLIFT",
+        r"STOLEN PROPERTY",
         r"\bPICKPOCKET",
     ],
     "threats_harassment": [
-        r"HAR{1,2}ASSMENT", r"\bTHREAT", r"\bSTALKING\b", r"\bINTIMIDATION\b",
+        r"HAR{1,2}ASSMENT",
+        r"\bTHREAT",
+        r"\bSTALKING\b",
+        r"\bINTIMIDATION\b",
     ],
     "fraud_forgery": [
-        r"\bFRAUD\b", r"\bFORGERY\b", r"EMBEZZLEMENT", r"COUNTERFEIT",
-        r"IDENTITY THEFTS?", r"BAD CHECKS?", r"DECEPTIVE PRACTICE",
+        r"\bFRAUD\b",
+        r"\bFORGERY\b",
+        r"EMBEZZLEMENT",
+        r"COUNTERFEIT",
+        r"IDENTITY THEFTS?",
+        r"BAD CHECKS?",
+        r"DECEPTIVE PRACTICE",
     ],
     "vandalism": [
-        r"VANDALISM", r"CRIMINAL (MISCHIEF|DAMAGE)", r"\bGRAFFITI\b",
+        r"VANDALISM",
+        r"CRIMINAL (MISCHIEF|DAMAGE)",
+        r"\bGRAFFITI\b",
     ],
     "dui": [
-        r"\bDUI\b", r"\bDWI\b", r"\bOVI\b", r"DRIVING UNDER[^.]{0,10}INFLUENCE",
+        r"\bDUI\b",
+        r"\bDWI\b",
+        r"\bOVI\b",
+        r"DRIVING UNDER[^.]{0,10}INFLUENCE",
         r"OPERATING[^.]{0,10}INFLUENCE",
     ],
     "disorderly_quality_of_life": [
-        r"DISORDERLY", r"PUBLIC DRUNK", r"INTOXICAT", r"\bLOITERING\b", r"\bTRESPASS",
-        r"\bCURFEW\b", r"\bNUISANCE\b", r"\bVAGRANCY\b", r"\bPROWLER\b",
+        r"DISORDERLY",
+        r"PUBLIC DRUNK",
+        r"INTOXICAT",
+        r"\bLOITERING\b",
+        r"\bTRESPASS",
+        r"\bCURFEW\b",
+        r"\bNUISANCE\b",
+        r"\bVAGRANCY\b",
+        r"\bPROWLER\b",
         r"NOISE (COMPLAINT|VIOLATION)",
     ],
 }
 
-_COMPILED: dict[str, list[re.Pattern]] = {
-    key: [re.compile(p) for p in pats] for key, pats in _PATTERNS.items()
-}
+_COMPILED: dict[str, list[re.Pattern]] = {key: [re.compile(p) for p in pats] for key, pats in _PATTERNS.items()}
 
 
 def classify_crime_text(text: Optional[str]) -> tuple[str, str, float]:

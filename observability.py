@@ -4,6 +4,7 @@ Phoenix is used as a local, open-source trace collector/UI. The application
 also exposes Prometheus-compatible metrics using the existing
 ``prometheus-client`` package.
 """
+
 from __future__ import annotations
 
 import json
@@ -109,6 +110,7 @@ class EvaluationTraceExporter:
             self._spans.extend(spans)
         try:
             from opentelemetry.sdk.trace.export import SpanExportResult
+
             return SpanExportResult.SUCCESS
         except Exception:
             return None
@@ -139,11 +141,13 @@ def _serialize_span(span) -> dict[str, Any]:
     status_code = getattr(getattr(status, "status_code", None), "name", None)
     events = []
     for event in getattr(span, "events", ()) or ():
-        events.append({
-            "name": event.name,
-            "timestamp_ns": getattr(event, "timestamp", None),
-            "attributes": dict(event.attributes or {}),
-        })
+        events.append(
+            {
+                "name": event.name,
+                "timestamp_ns": getattr(event, "timestamp", None),
+                "attributes": dict(event.attributes or {}),
+            }
+        )
     resource = getattr(span, "resource", None)
     resource_attrs = dict(getattr(resource, "attributes", {}) or {})
     instrumentation = getattr(span, "instrumentation_scope", None)
@@ -169,6 +173,7 @@ def _serialize_span(span) -> dict[str, Any]:
 def export_trace(trace_id: str, output_path, *, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
     """Write one complete local JSON trace for an evaluation example."""
     from pathlib import Path
+
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     spans = _local_trace_exporter.snapshot(trace_id) if _local_trace_exporter else []
@@ -177,7 +182,9 @@ def export_trace(trace_id: str, output_path, *, metadata: dict[str, Any] | None 
         "exported_at": time.time(),
         "metadata": metadata or {},
         "span_count": len(spans),
-        "spans": [_serialize_span(span) for span in sorted(spans, key=lambda x: (getattr(x, "start_time", 0) or 0, x.name))],
+        "spans": [
+            _serialize_span(span) for span in sorted(spans, key=lambda x: (getattr(x, "start_time", 0) or 0, x.name))
+        ],
     }
     output_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
     return payload
@@ -227,8 +234,14 @@ def ensure_phoenix_server(wait_seconds: float = 15.0) -> bool:
         kwargs["creationflags"] = creationflags
 
     cmd = [
-        sys.executable, "-m", "phoenix.server.main", "serve",
-        "--host", host, "--port", str(port),
+        sys.executable,
+        "-m",
+        "phoenix.server.main",
+        "serve",
+        "--host",
+        host,
+        "--port",
+        str(port),
     ]
     try:
         _phoenix_process = subprocess.Popen(cmd, **kwargs)
@@ -315,6 +328,7 @@ def initialize_observability() -> None:
             )
             try:
                 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+
                 _local_trace_exporter = EvaluationTraceExporter()
                 _tracer_provider.add_span_processor(
                     SimpleSpanProcessor(_local_trace_exporter),
@@ -400,6 +414,7 @@ class _make_current_span_context:
 
     def __enter__(self):
         from opentelemetry import trace as trace_api
+
         self._cm = trace_api.use_span(self.span, end_on_exit=True)
         self._cm.__enter__()
         return self.span

@@ -17,6 +17,7 @@ asking about?" - and bad at the rest, so it is given only that job, under a stri
 Boundary, by design: it rescues EMPTY plans only.  A request that matches the wrong alias is not second-guessed - verifying
 working matches would put a model call on flows that already work.
 """
+
 from __future__ import annotations
 
 import json
@@ -34,8 +35,8 @@ from config import settings
 MAX_KEYS = 3
 _SYSTEM = (
     "You map a user's question to the data-model concepts that can answer it.\n"
-    "Choose ONLY from the CONCEPTS list. Reply with JSON only, no prose: {\"concepts\": [\"key\", ...]}\n"
-    "Use at most 3 keys, best first. If nothing in the list fits, reply {\"concepts\": []}.\n"
+    'Choose ONLY from the CONCEPTS list. Reply with JSON only, no prose: {"concepts": ["key", ...]}\n'
+    'Use at most 3 keys, best first. If nothing in the list fits, reply {"concepts": []}.\n'
     "Never write SQL. Never invent a key. A concept marked (NOT LOADED) means the data does not exist: choose it when the "
     "user asks about that topic."
 )
@@ -50,9 +51,14 @@ def _get_client() -> ChatOpenAI:
     global _client
     if _client is None:
         _client = ChatOpenAI(
-            base_url=settings.llama_server_base_url, api_key="not-needed", model=settings.llama_server_model,
-            temperature=0.0, max_tokens=120,                       # a key list is a few dozen tokens
-            timeout=settings.semantic_fallback_timeout_s, max_retries=0)
+            base_url=settings.llama_server_base_url,
+            api_key="not-needed",
+            model=settings.llama_server_model,
+            temperature=0.0,
+            max_tokens=120,  # a key list is a few dozen tokens
+            timeout=settings.semantic_fallback_timeout_s,
+            max_retries=0,
+        )
     return _client
 
 
@@ -100,10 +106,16 @@ def propose_concepts(request: str) -> list[str]:
     listing = "\n".join(f"- {k}: {d}" for k, d in menu)
     try:
         reply = llm_resilience.invoke(
-            _get_client(), [SystemMessage(content=_SYSTEM), HumanMessage(content=f"CONCEPTS:\n{listing}\n\nQUESTION: {request.strip()[:500]}")],
-            role="semantic_fallback", breaker_name="semantic")      # its own breaker: it must never disable the chat models
+            _get_client(),
+            [
+                SystemMessage(content=_SYSTEM),
+                HumanMessage(content=f"CONCEPTS:\n{listing}\n\nQUESTION: {request.strip()[:500]}"),
+            ],
+            role="semantic_fallback",
+            breaker_name="semantic",
+        )  # its own breaker: it must never disable the chat models
     except llm_resilience.ModelUnavailable:
-        return []                                                  # transient: not cached, and the request is then simply unplannable
+        return []  # transient: not cached, and the request is then simply unplannable
     content = getattr(reply, "content", reply)
     keys = parse_keys(content if isinstance(content, str) else str(content), {k for k, _ in menu})
     with _lock:

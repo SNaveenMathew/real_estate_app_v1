@@ -7,6 +7,7 @@ tool below. A house-only capability belongs there, not in this module - the
 second copy this module used to carry is exactly what let the ZHVI estimate go
 missing from the path users actually reach.
 """
+
 import functools
 import json
 import logging
@@ -33,7 +34,7 @@ import threading
 
 from observability import trace_span, mark_span_error, set_span_output
 
-capability = capabilities.capability        # read as a decorator below: @capability("find_bike_route")
+capability = capabilities.capability  # read as a decorator below: @capability("find_bike_route")
 
 
 _FORBIDDEN = re.compile(
@@ -48,6 +49,7 @@ _AGGREGATE_CALL_RE = re.compile(r"\b(?:AVG|SUM|COUNT|MEDIAN|MIN|MAX)\s*\(", re.I
 
 
 # ── Typed results and capability bounds (agents/tool_result.py, agents/capabilities.py) ──
+
 
 def _envelope(text: str) -> tool_result.ToolResult:
     """Wrap query_database's rendered evidence with the facts downstream code needs.
@@ -64,6 +66,7 @@ def _envelope(text: str) -> tool_result.ToolResult:
 
 def _typed_tool(kind: str):
     """Give a JSON-returning tool a ToolResult carrying its own status, and a clean deadline failure."""
+
     def decorator(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
@@ -84,10 +87,14 @@ def _typed_tool(kind: str):
             status = str(payload.get("status") or "").lower()
             ok = status not in ("error", "analysis") and payload.get("kind") != "no_route"
             return tool_result.ToolResult(
-                out, kind=kind if ok else "not_answered", ok=ok,
+                out,
+                kind=kind if ok else "not_answered",
+                ok=ok,
                 status=None if ok else (payload.get("kind") or status or None),
             )
+
         return wrapper
+
     return decorator
 
 
@@ -186,12 +193,14 @@ def generate_sql(request: str, requirements: str = "", plan: str = "", focused: 
     query_plan = build_query_plan(request)
     effective_plan = (plan or "").strip() or query_plan.render()
     targeted = schema.build_query_context(request, plan=effective_plan, focused=focused)
-    prompt = "\n\n".join([
-        f"USER REQUEST:\n{request.strip()}",
-        "STRUCTURED QUERY PLAN (authoritative):\n" + effective_plan,
-        "TARGETED LIVE DATA MODEL (authoritative):\n" + targeted,
-        "Generate exactly one DuckDB SELECT/WITH query. Do not add semantic scope, filters, tables, or joins absent from the plan/model.",
-    ])
+    prompt = "\n\n".join(
+        [
+            f"USER REQUEST:\n{request.strip()}",
+            "STRUCTURED QUERY PLAN (authoritative):\n" + effective_plan,
+            "TARGETED LIVE DATA MODEL (authoritative):\n" + targeted,
+            "Generate exactly one DuckDB SELECT/WITH query. Do not add semantic scope, filters, tables, or joins absent from the plan/model.",
+        ]
+    )
 
     attrs = {
         "openinference.span.kind": "LLM",
@@ -206,10 +215,14 @@ def generate_sql(request: str, requirements: str = "", plan: str = "", focused: 
             except Exception:
                 pass
         try:
-            response = llm_resilience.invoke(get_code_agent(), [
-                SystemMessage(content=SYSTEM_PROMPT),
-                HumanMessage(content=prompt),
-            ], role="sql_agent")
+            response = llm_resilience.invoke(
+                get_code_agent(),
+                [
+                    SystemMessage(content=SYSTEM_PROMPT),
+                    HumanMessage(content=prompt),
+                ],
+                role="sql_agent",
+            )
             raw = _extract_content(response)
             cleaned = _clean_sql(raw)
             if span is not None:
@@ -255,7 +268,8 @@ def _where_clause_text(low_sql: str) -> str:
     """
     segments = re.findall(
         r"\bwhere\b(.*?)(?=\bgroup\s+by\b|\border\s+by\b|\blimit\b|\bwhere\b|$)",
-        low_sql, re.S,
+        low_sql,
+        re.S,
     )
     return " ".join(segments)
 
@@ -263,6 +277,7 @@ def _where_clause_text(low_sql: str) -> str:
 def _validate_sql_against_plan(sql: str, query_plan) -> None:
     """Validate generated SQL against the declarative catalog plan and SQL safety guardrail."""
     from services.guardrails import CodeAgentGuardrail
+
     guard_res = CodeAgentGuardrail.validate_sql(sql)
     if not guard_res.passed:
         raise ValueError(f"SQL Guardrail violation: {'; '.join(guard_res.reasons)}")
@@ -288,8 +303,11 @@ def _validate_sql_against_plan(sql: str, query_plan) -> None:
     # Planned semantic filters must survive generation. We compare normalized
     # field/value atoms, not a brittle full-string representation.
     for filt in query_plan.filters:
-        atoms = [a for a in re.findall(r"[A-Za-z_][A-Za-z0-9_\.]*|true|false|[0-9]+(?:\.[0-9]+)?", filt.lower())
-                 if a not in {"and", "or", "is", "null", "where", "not"}]
+        atoms = [
+            a
+            for a in re.findall(r"[A-Za-z_][A-Za-z0-9_\.]*|true|false|[0-9]+(?:\.[0-9]+)?", filt.lower())
+            if a not in {"and", "or", "is", "null", "where", "not"}
+        ]
         if not all(a in low for a in atoms):
             raise ValueError(f"Generated SQL omitted planned semantic filter: {filt}")
 
@@ -333,14 +351,19 @@ def _verify_plan_contract(sql: str, query_plan) -> None:
     """
     global _inspector_warned
     from agents import plan_contract, sql_inspector
+
     try:
         violations = plan_contract.verify(sql, query_plan)
     except sql_inspector.SqlInspectorUnavailable as exc:
         if not _inspector_warned:
             _inspector_warned = True
             import logging
-            logging.getLogger(__name__).warning("SQL inspector unavailable (%s): falling back to the legacy SQL checks only. "
-                                                "Run tests/test_sql_inspector.py against this DuckDB version.", exc)
+
+            logging.getLogger(__name__).warning(
+                "SQL inspector unavailable (%s): falling back to the legacy SQL checks only. "
+                "Run tests/test_sql_inspector.py against this DuckDB version.",
+                exc,
+            )
         return
     mode = str(getattr(settings, "sql_contract_mode", "enforce") or "enforce").lower()
     blockers = plan_contract.blocking(violations, mode)
@@ -348,7 +371,10 @@ def _verify_plan_contract(sql: str, query_plan) -> None:
         raise ValueError("SQL contract violated: " + " | ".join(v.message for v in blockers))
     if violations:
         import logging
-        logging.getLogger(__name__).info("SQL contract (mode=%s) would reject: %s", mode, "; ".join(v.message for v in violations))
+
+        logging.getLogger(__name__).info(
+            "SQL contract (mode=%s) would reject: %s", mode, "; ".join(v.message for v in violations)
+        )
 
 
 def _qualify_join_expr(table: str, expr: str) -> str:
@@ -366,7 +392,7 @@ def _qualify_join_expr(table: str, expr: str) -> str:
     instead, leaving SQL function names (identifier immediately followed by
     '(') and already-qualified references untouched.
     """
-    return schema.qualify_join_expr(table, expr)   # single shared implementation (db/schema_catalog.py)
+    return schema.qualify_join_expr(table, expr)  # single shared implementation (db/schema_catalog.py)
 
 
 def _group_equality_predicates(filters: list[str]) -> list[str]:
@@ -451,9 +477,11 @@ def _compile_sql_from_plan(query_plan) -> str:
         for rel in rels:
             left, right = rel.left_table, rel.right_table
             if left in connected and right in remaining:
-                picked = (rel, right); break
+                picked = (rel, right)
+                break
             if right in connected and left in remaining:
-                picked = (rel, left); break
+                picked = (rel, left)
+                break
         if not picked:
             raise ValueError("Cannot compile SQL: no catalog join path from current tables.")
         rel, new_table = picked
@@ -494,7 +522,7 @@ def _compile_sql_from_plan(query_plan) -> str:
 
     predicates = []
     predicates.extend(_group_equality_predicates(query_plan.entity_filters))
-    predicates.extend(query_plan.scope_filters)             # mandatory scope (agents/query_scope.py)
+    predicates.extend(query_plan.scope_filters)  # mandatory scope (agents/query_scope.py)
     predicates.extend(query_plan.filters)
     if "exclude NULL" in query_plan.null_policy and expr:
         for field in re.findall(r"\b[a-zA-Z_][\w]*\.[a-zA-Z_][\w]*\b", expr):
@@ -503,13 +531,16 @@ def _compile_sql_from_plan(query_plan) -> str:
 
     group_clause = f" GROUP BY {', '.join(group_sql)}" if group_sql else ""
     order_clause = f" ORDER BY {query_plan.ordering}" if query_plan.ordering else ""
-    limit_clause = f" LIMIT {int(query_plan.result_limit)}" if query_plan.result_limit else ""     # an explicit "top N"
+    limit_clause = f" LIMIT {int(query_plan.result_limit)}" if query_plan.result_limit else ""  # an explicit "top N"
 
     return f"SELECT {select_sql} FROM {from_sql}{where_sql}{group_clause}{order_clause}{limit_clause}"
 
 
 def run_code_query(
-    request: str, requirements: str = "", plan: str = "", presentation: str = "auto",
+    request: str,
+    requirements: str = "",
+    plan: str = "",
+    presentation: str = "auto",
 ) -> tuple[str, str]:
     """Generate, validate, execute and generically repair one analytical query.
 
@@ -533,10 +564,13 @@ def run_code_query(
             effective_plan += "\n\nREPAIR CONTEXT:\n" + repair_note
         try:
             sql = generate_sql(request, plan=effective_plan, focused=(attempt > 0))
-            with trace_span("sql_validation", attributes={
-                "sql.attempt": attempt + 1,
-                "sql.statement": sql,
-            }) as validation_span:
+            with trace_span(
+                "sql_validation",
+                attributes={
+                    "sql.attempt": attempt + 1,
+                    "sql.statement": sql,
+                },
+            ) as validation_span:
                 try:
                     _validate_sql_against_plan(sql, query_plan)
                     if validation_span is not None:
@@ -550,14 +584,15 @@ def run_code_query(
             if not sql.strip():
                 sql = _compile_sql_from_plan(query_plan)
         except llm_resilience.TurnCancelled:
-            raise                                           # the deadline passed: never "recover" by doing more work
+            raise  # the deadline passed: never "recover" by doing more work
         except Exception as exc:
             # Never swallow silently: a model writing bad SQL (ValueError from validation) is routine, but anything else
             # before the model was even reached (prompt building, client set-up) is a defect that the compiled-SQL
             # fallback would otherwise hide.
             _sql_log = logging.getLogger(__name__)
             (_sql_log.info if isinstance(exc, ValueError) else _sql_log.warning)(
-                "SQL attempt %d failed (%s: %s)", attempt + 1, type(exc).__name__, str(exc)[:300])
+                "SQL attempt %d failed (%s: %s)", attempt + 1, type(exc).__name__, str(exc)[:300]
+            )
             try:
                 # The fallback compiler is intentionally limited to the empty/invalid
                 # SQL case; it never replaces valid LLM-generated SQL.
@@ -571,16 +606,19 @@ def run_code_query(
             except Exception:
                 repair_note = f"Generation/validation failed: {exc}. Regenerate from the same authoritative plan; do not change user scope."
                 if isinstance(exc, llm_resilience.ModelUnavailable):
-                    raise exc                               # the REAL cause (not the compile error being handled right now);
-                                                            # a model known to be down will not answer the next attempt either
+                    raise exc  # the REAL cause (not the compile error being handled right now);
+                    # a model known to be down will not answer the next attempt either
                 if attempt == 2:
                     raise
                 continue
         try:
-            with trace_span("sql_execution", attributes={
-                "sql.attempt": attempt + 1,
-                "sql.statement": sql,
-            }) as execution_span:
+            with trace_span(
+                "sql_execution",
+                attributes={
+                    "sql.attempt": attempt + 1,
+                    "sql.statement": sql,
+                },
+            ) as execution_span:
                 try:
                     # Time-limited and row-capped, and served from the shared SQL/CTE cache when the
                     # identical statement already ran against unchanged data (db/duckdb_store.py).
@@ -602,9 +640,12 @@ def run_code_query(
             return sql, answer_status.not_answered(
                 answer_status.LIMIT_EXCEEDED,
                 f"{exc} The question is too broad to answer in one step; narrow it (a place, a time range, a smaller set) "
-                "and ask again.")
+                "and ask again.",
+            )
         except Exception as exc:
-            repair_note = f"Execution failed: {exc}. Previous SQL: {sql}. Correct only the SQL error using the same plan."
+            repair_note = (
+                f"Execution failed: {exc}. Previous SQL: {sql}. Correct only the SQL error using the same plan."
+            )
             if attempt == 2:
                 raise RuntimeError(f"Generated SQL failed: {exc}\nSQL: {sql}") from exc
             continue
@@ -631,13 +672,16 @@ def run_code_query(
         if truncated:
             return sql, df.head(50).to_string(index=False) + (
                 f"\n... (more than {len(df)} rows exist; only the first {len(df)} were loaded and 50 are shown - "
-                "add a filter or a LIMIT for the full picture)")
+                "add a filter or a LIMIT for the full picture)"
+            )
         if len(df) > 50:
             return sql, df.head(50).to_string(index=False) + f"\n... ({len(df)} total rows, showing 50)"
         return sql, df.to_string(index=False)
     return last_sql, "Query could not be completed."
 
+
 # ── General tools ────────────────────────────────────────────────────────────
+
 
 @tool
 @capability("check_data_availability")
@@ -657,8 +701,6 @@ def check_data_availability(_: str = "") -> str:
     except Exception:
         pass
     return tool_result.ToolResult(report, kind="status")
-
-
 
 
 @tool
@@ -682,10 +724,14 @@ def retrieve_data_model_context(query: str) -> str:
         parts.append(f"[VECTOR METADATA FALLBACK] unavailable: {exc}")
     return tool_result.ToolResult("\n\n".join(p for p in parts if p), kind="schema")
 
+
 @tool
 @capability("query_database")
 def query_database(
-    request: str, requirements: str = "", plan: str = "", presentation: str = "auto",
+    request: str,
+    requirements: str = "",
+    plan: str = "",
+    presentation: str = "auto",
 ) -> str:
     """
     Use the shared SQL Code Agent to answer analytical questions from any
@@ -729,6 +775,7 @@ def query_database(
     # evidence the answer model reads is identical to a fresh run.  House Chat delegates here too,
     # which is why the scope (e.g. this house) is part of the signature.
     from services import cache as result_cache
+
     signature = result_cache.semantic_signature(structured_plan)
     cached = result_cache.lookup_semantic("query_database", request, signature)
     if cached is not None:
@@ -737,11 +784,17 @@ def query_database(
     out = _answer(request, requirements, presentation, structured_plan)
     if not answer_status.is_not_answered(out) and "Code Agent error" not in out:
         result_cache.store_semantic(
-            "query_database", request, signature, out,
-            meta={"concepts": structured_plan.semantic_keys,
-                  "tables": structured_plan.required_tables,
-                  "operation": structured_plan.operation or "",
-                  "kind": "semantic"})
+            "query_database",
+            request,
+            signature,
+            out,
+            meta={
+                "concepts": structured_plan.semantic_keys,
+                "tables": structured_plan.required_tables,
+                "operation": structured_plan.operation or "",
+                "kind": "semantic",
+            },
+        )
     return _envelope(out)
 
 
@@ -765,10 +818,14 @@ def _answer(request: str, requirements: str, presentation: str, structured_plan=
     except llm_resilience.TurnCancelled:
         raise
     except llm_resilience.ModelUnavailable:
-        sql, result = "", answer_status.not_answered(
-            answer_status.MODEL_UNAVAILABLE,
-            "The language model service is not responding, and writing a query for this question needs it. Nothing was "
-            "estimated; ask again in a minute.")
+        sql, result = (
+            "",
+            answer_status.not_answered(
+                answer_status.MODEL_UNAVAILABLE,
+                "The language model service is not responding, and writing a query for this question needs it. Nothing was "
+                "estimated; ask again in a minute.",
+            ),
+        )
     except Exception as exc:
         sql, result = "", f"Code Agent error: {exc}"
     result += answer_policy.caveats_after_sql(structured_plan)
@@ -864,24 +921,31 @@ def find_bike_route(
             if result.get("crime_filter_error"):
                 message = f"No — Not possible: {note}"
             else:
-                message = f"No — Not possible: no continuous bike path exists using the filtered BikePGH network. {note}"
+                message = (
+                    f"No — Not possible: no continuous bike path exists using the filtered BikePGH network. {note}"
+                )
             if result.get("analysis_visualization"):
-                emit_artifact({
-                    "type": "map",
-                    "map_kind": "bike_crime_analysis",
-                    "title": "Crime-aware route filtering",
-                    "analysis": result.get("analysis_visualization"),
-                })
-            return json.dumps({
-                "status": "analysis",
-                "kind": "no_route",
-                "message": message,
-                "start": result.get("start"),
-                "end": result.get("end"),
-                "city": result.get("city") or city or "Pittsburgh, PA",
-                "crime_avoidance": result.get("crime_avoidance") or {"enabled": False},
-                "analysis_visualization": result.get("analysis_visualization"),
-            }, indent=2)
+                emit_artifact(
+                    {
+                        "type": "map",
+                        "map_kind": "bike_crime_analysis",
+                        "title": "Crime-aware route filtering",
+                        "analysis": result.get("analysis_visualization"),
+                    }
+                )
+            return json.dumps(
+                {
+                    "status": "analysis",
+                    "kind": "no_route",
+                    "message": message,
+                    "start": result.get("start"),
+                    "end": result.get("end"),
+                    "city": result.get("city") or city or "Pittsburgh, PA",
+                    "crime_avoidance": result.get("crime_avoidance") or {"enabled": False},
+                    "analysis_visualization": result.get("analysis_visualization"),
+                },
+                indent=2,
+            )
 
         crime_meta = result.get("crime_avoidance") or {"enabled": False, "applied": False}
         success_message = (
@@ -890,53 +954,62 @@ def find_bike_route(
             else "Yes — a continuous BikePGH route was found."
         )
         if result.get("analysis_visualization"):
-            emit_artifact({
-                "type": "map",
-                "map_kind": "bike_crime_analysis",
-                "title": "Crime-aware route filtering",
-                "analysis": result.get("analysis_visualization"),
-            })
+            emit_artifact(
+                {
+                    "type": "map",
+                    "map_kind": "bike_crime_analysis",
+                    "title": "Crime-aware route filtering",
+                    "analysis": result.get("analysis_visualization"),
+                }
+            )
         if route_data.get("shape"):
-            emit_artifact({
-                "type": "map",
-                "map_kind": "bike_route",
-                "title": f"Bike route: {result.get('start')} \u2192 {result.get('end')}",
-                "city": result.get("city") or city or "Pittsburgh, PA",
+            emit_artifact(
+                {
+                    "type": "map",
+                    "map_kind": "bike_route",
+                    "title": f"Bike route: {result.get('start')} \u2192 {result.get('end')}",
+                    "city": result.get("city") or city or "Pittsburgh, PA",
+                    "start": result.get("start"),
+                    "end": result.get("end"),
+                    "route_shape": route_data.get("shape", []) or [],
+                    "bbox": route_data.get("bbox"),
+                    "distance_miles": round(float(summary.get("length", 0) or 0), 2),
+                    "duration_minutes": round(float(summary.get("time", 0) or 0) / 60.0, 1),
+                    "turn_by_turn": instructions,
+                    "bike_infrastructure_near_route": facilities.get("facility_segments", []),
+                    "used_infrastructure": route_data.get("used_infrastructure")
+                    or {"type": "FeatureCollection", "features": []},
+                    "provider": result.get("provider"),
+                    "attribution": result.get("attribution"),
+                }
+            )
+        return json.dumps(
+            {
+                "status": "ok",
+                "kind": "route_found",
+                "message": success_message,
+                "presentation": "route_map",
                 "start": result.get("start"),
                 "end": result.get("end"),
-                "route_shape": route_data.get("shape", []) or [],
-                "bbox": route_data.get("bbox"),
+                "city": result.get("city") or city or "Pittsburgh, PA",
+                "provider": result.get("provider"),
                 "distance_miles": round(float(summary.get("length", 0) or 0), 2),
                 "duration_minutes": round(float(summary.get("time", 0) or 0) / 60.0, 1),
-                "turn_by_turn": instructions,
+                "bike_facility_overlap_percent": facilities.get("facility_overlap_pct", 0.0),
                 "bike_infrastructure_near_route": facilities.get("facility_segments", []),
-                "used_infrastructure": route_data.get("used_infrastructure") or {"type": "FeatureCollection", "features": []},
-                "provider": result.get("provider"),
+                "used_infrastructure": route_data.get("used_infrastructure")
+                or {"type": "FeatureCollection", "features": []},
+                "alternatives_considered": result.get("alternatives_considered", 1),
+                "crime_avoidance": result.get("crime_avoidance") or {"enabled": False},
+                "analysis_visualization": result.get("analysis_visualization"),
+                "turn_by_turn": instructions,
+                "route_shape": route_data.get("shape", []) or [],
+                "bbox": route_data.get("bbox"),
                 "attribution": result.get("attribution"),
-            })
-        return json.dumps({
-            "status": "ok",
-            "kind": "route_found",
-            "message": success_message,
-            "presentation": "route_map",
-            "start": result.get("start"),
-            "end": result.get("end"),
-            "city": result.get("city") or city or "Pittsburgh, PA",
-            "provider": result.get("provider"),
-            "distance_miles": round(float(summary.get("length", 0) or 0), 2),
-            "duration_minutes": round(float(summary.get("time", 0) or 0) / 60.0, 1),
-            "bike_facility_overlap_percent": facilities.get("facility_overlap_pct", 0.0),
-            "bike_infrastructure_near_route": facilities.get("facility_segments", []),
-            "used_infrastructure": route_data.get("used_infrastructure") or {"type": "FeatureCollection", "features": []},
-            "alternatives_considered": result.get("alternatives_considered", 1),
-            "crime_avoidance": result.get("crime_avoidance") or {"enabled": False},
-            "analysis_visualization": result.get("analysis_visualization"),
-            "turn_by_turn": instructions,
-            "route_shape": route_data.get("shape", []) or [],
-            "bbox": route_data.get("bbox"),
-            "attribution": result.get("attribution"),
-            "note": result.get("note"),
-        }, indent=2)
+                "note": result.get("note"),
+            },
+            indent=2,
+        )
     except ValueError as exc:
         message = str(exc)
         lower = message.lower()
@@ -946,17 +1019,27 @@ def find_bike_route(
             kind = "no_route"
         else:
             kind = "input"
-        return json.dumps({"status": "error", "kind": kind, "message": message,
-                           "start": start, "end": end, "city": city or "Pittsburgh, PA"})
+        return json.dumps(
+            {
+                "status": "error",
+                "kind": kind,
+                "message": message,
+                "start": start,
+                "end": end,
+                "city": city or "Pittsburgh, PA",
+            }
+        )
     except Exception as exc:
-        return json.dumps({
-            "status": "error",
-            "kind": "routing_service",
-            "message": str(exc),
-            "start": start,
-            "end": end,
-            "city": city or "Pittsburgh, PA",
-        })
+        return json.dumps(
+            {
+                "status": "error",
+                "kind": "routing_service",
+                "message": str(exc),
+                "start": start,
+                "end": end,
+                "city": city or "Pittsburgh, PA",
+            }
+        )
 
 
 @capability("search_all_house_descriptions")
@@ -966,20 +1049,22 @@ def search_all_house_descriptions(query: str) -> str:
     if not docs:
         return tool_result.ToolResult("No documents found in the knowledge base yet.", kind="status")
     try:
-        matches_df = pd.DataFrame([
-            {
-                "house_id": d["metadata"].get("house_id", "?"),
-                "doc_type": d["metadata"].get("doc_type", "text"),
-                "excerpt": d["text"][:200],
-            }
-            for d in docs
-        ])
+        matches_df = pd.DataFrame(
+            [
+                {
+                    "house_id": d["metadata"].get("house_id", "?"),
+                    "doc_type": d["metadata"].get("doc_type", "text"),
+                    "excerpt": d["text"][:200],
+                }
+                for d in docs
+            ]
+        )
         emit_artifact(classify_dataframe(matches_df, title=f'Matches for "{query}"', presentation="table"))
     except Exception:
         pass
     return tool_result.ToolResult(
         "\n\n".join(
-            f"[House {d['metadata'].get('house_id','?')} | {d['metadata'].get('doc_type','text')}]\n{d['text'][:300]}"
+            f"[House {d['metadata'].get('house_id', '?')} | {d['metadata'].get('doc_type', 'text')}]\n{d['text'][:300]}"
             for d in docs
         ),
         kind="data",
@@ -999,8 +1084,6 @@ def get_database_schema(_: str = "") -> str:
     already queried successfully earlier in this conversation.
     """
     return tool_result.ToolResult(schema.render_schema_for_agent(), kind="schema")
-
-
 
 
 @tool
@@ -1037,7 +1120,9 @@ def find_transit_route(
             if instruction:
                 instructions.append(instruction)
 
-        start_name = result.get("start", {}).get("display_name", start) if isinstance(result.get("start"), dict) else start
+        start_name = (
+            result.get("start", {}).get("display_name", start) if isinstance(result.get("start"), dict) else start
+        )
         end_name = result.get("end", {}).get("display_name", end) if isinstance(result.get("end"), dict) else end
         line_names = [
             f"{l.get('route_type_name', 'Line')} {l.get('route_short_name') or l.get('route_long_name')}"
@@ -1045,64 +1130,73 @@ def find_transit_route(
         ]
 
         if route_data.get("shape"):
-            emit_artifact({
-                "type": "map",
-                "map_kind": "transit_route",
-                "title": f"Transit route: {start_name} \u2192 {end_name}",
-                "city": result.get("city") or city or "Pittsburgh, PA",
+            emit_artifact(
+                {
+                    "type": "map",
+                    "map_kind": "transit_route",
+                    "title": f"Transit route: {start_name} \u2192 {end_name}",
+                    "city": result.get("city") or city or "Pittsburgh, PA",
+                    "start": start_name,
+                    "end": end_name,
+                    "route_shape": route_data.get("shape", []) or [],
+                    "bbox": route_data.get("bbox"),
+                    "distance_miles": round(float(summary.get("length", 0) or 0), 2),
+                    "duration_minutes": round(float(summary.get("duration_minutes", 0) or 0), 1),
+                    "transit_lines_used": transit_lines,
+                    "turn_by_turn": instructions,
+                    "transfers": result.get("transfers", 0),
+                    "provider": result.get("provider"),
+                    "attribution": result.get("attribution"),
+                }
+            )
+
+        return json.dumps(
+            {
+                "status": "ok",
+                "kind": "route_found",
+                "message": f"Yes — a transit route was found using {', '.join(line_names) if line_names else 'public transit'}.",
+                "presentation": "route_map",
                 "start": start_name,
                 "end": end_name,
-                "route_shape": route_data.get("shape", []) or [],
-                "bbox": route_data.get("bbox"),
+                "city": result.get("city") or city or "Pittsburgh, PA",
+                "provider": result.get("provider"),
                 "distance_miles": round(float(summary.get("length", 0) or 0), 2),
                 "duration_minutes": round(float(summary.get("duration_minutes", 0) or 0), 1),
+                "transfers": result.get("transfers", 0),
                 "transit_lines_used": transit_lines,
                 "turn_by_turn": instructions,
-                "transfers": result.get("transfers", 0),
-                "provider": result.get("provider"),
+                "route_shape": route_data.get("shape", []) or [],
+                "bbox": route_data.get("bbox"),
                 "attribution": result.get("attribution"),
-            })
-
-        return json.dumps({
-            "status": "ok",
-            "kind": "route_found",
-            "message": f"Yes — a transit route was found using {', '.join(line_names) if line_names else 'public transit'}.",
-            "presentation": "route_map",
-            "start": start_name,
-            "end": end_name,
-            "city": result.get("city") or city or "Pittsburgh, PA",
-            "provider": result.get("provider"),
-            "distance_miles": round(float(summary.get("length", 0) or 0), 2),
-            "duration_minutes": round(float(summary.get("duration_minutes", 0) or 0), 1),
-            "transfers": result.get("transfers", 0),
-            "transit_lines_used": transit_lines,
-            "turn_by_turn": instructions,
-            "route_shape": route_data.get("shape", []) or [],
-            "bbox": route_data.get("bbox"),
-            "attribution": result.get("attribution"),
-            "note": result.get("note"),
-        }, indent=2)
+                "note": result.get("note"),
+            },
+            indent=2,
+        )
     except ValueError as exc:
         message = str(exc)
         lower = message.lower()
         kind = "no_data" if "no transit routes" in lower else "no_route" if "no continuous" in lower else "input"
-        return json.dumps({
-            "status": "error",
-            "kind": kind,
-            "message": message,
-            "start": start,
-            "end": end,
-            "city": city or "Pittsburgh, PA",
-        })
+        return json.dumps(
+            {
+                "status": "error",
+                "kind": kind,
+                "message": message,
+                "start": start,
+                "end": end,
+                "city": city or "Pittsburgh, PA",
+            }
+        )
     except Exception as exc:
-        return json.dumps({
-            "status": "error",
-            "kind": "routing_service",
-            "message": str(exc),
-            "start": start,
-            "end": end,
-            "city": city or "Pittsburgh, PA",
-        })
+        return json.dumps(
+            {
+                "status": "error",
+                "kind": "routing_service",
+                "message": str(exc),
+                "start": start,
+                "end": end,
+                "city": city or "Pittsburgh, PA",
+            }
+        )
 
 
 GENERAL_TOOLS = [

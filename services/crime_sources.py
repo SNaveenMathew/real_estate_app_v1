@@ -40,6 +40,7 @@ another state, another hemisphere) and these catch the obvious ones. Chicago
 had no fixed box in the original script (it used the data's own min/max,
 i.e. no real constraint), so it's None here too.
 """
+
 from pathlib import Path
 from typing import Optional
 
@@ -47,6 +48,7 @@ import pandas as pd
 
 
 # ── Column resolution helpers ─────────────────────────────────────────────
+
 
 def _normalize_key(s: str) -> str:
     return str(s).strip().lower().replace(" ", "").replace("_", "").replace(".", "")
@@ -80,8 +82,7 @@ def _read_full(path: Path, usecols: list[str]) -> pd.DataFrame:
         return pd.read_csv(path, usecols=usecols, encoding="latin-1", low_memory=False)
 
 
-def read_table(path: Path, wanted: dict[str, list[str]],
-                required: list[str]) -> Optional[pd.DataFrame]:
+def read_table(path: Path, wanted: dict[str, list[str]], required: list[str]) -> Optional[pd.DataFrame]:
     """
     Read one file, resolving each logical field in `wanted` (logical name ->
     candidate raw column names) against the file's actual header, and
@@ -108,8 +109,7 @@ def read_table(path: Path, wanted: dict[str, list[str]],
     missing = [f for f in required if f not in resolved]
     if missing:
         preview = header_cols[:12] + (["..."] if len(header_cols) > 12 else [])
-        print(f"    Skipping {path.name}: missing required column(s) {missing} "
-              f"(columns found: {preview})")
+        print(f"    Skipping {path.name}: missing required column(s) {missing} (columns found: {preview})")
         return None
 
     try:
@@ -139,8 +139,9 @@ def _combine_text(df: pd.DataFrame, cols: list[str]) -> pd.Series:
 
 # ── Parser base ─────────────────────────────────────────────────────────────
 
+
 class CrimeParserBase:
-    city: str = "unknown"          # matches the data/crime/<city>/ folder name
+    city: str = "unknown"  # matches the data/crime/<city>/ folder name
     city_label: str = "Unknown"
     state: str = ""
     # (lon_low, lon_high, lat_low, lat_high) — None means "no bounding filter"
@@ -160,6 +161,7 @@ class CrimeParserBase:
 # field carries the offense (e.g. "AGG. ASSAULT", "AUTO THEFT", "LARCENY").
 # Data source: https://data.baltimorecity.gov/datasets/baltimore::part-1-crime-data-legacy-srs/about
 
+
 class BaltimoreCrimeParser(CrimeParserBase):
     city = "baltimore"
     city_label = "Baltimore, MD"
@@ -167,13 +169,13 @@ class BaltimoreCrimeParser(CrimeParserBase):
     bbox = (-76.8, -76.5, 39.0, 39.4)
 
     _WANTED = {
-        "occurred_at":  ["CrimeDateTime", "Crime Date Time"],
-        "lat":          ["Latitude", "Lat"],
-        "lon":          ["Longitude", "Lon", "Long"],
+        "occurred_at": ["CrimeDateTime", "Crime Date Time"],
+        "lat": ["Latitude", "Lat"],
+        "lon": ["Longitude", "Lon", "Long"],
         "type_primary": ["Description"],
-        "type_detail":  ["CrimeCode", "Crime Code"],
-        "location_text":["Location", "Block Address", "Location 1"],
-        "natural_id":   ["ObjectId", "Object_ID", "_id"],
+        "type_detail": ["CrimeCode", "Crime Code"],
+        "location_text": ["Location", "Block Address", "Location 1"],
+        "natural_id": ["ObjectId", "Object_ID", "_id"],
     }
     _REQUIRED = ["occurred_at", "lat", "lon"]
 
@@ -202,6 +204,7 @@ class BaltimoreCrimeParser(CrimeParserBase):
 # a Cambridge file dropped into this folder will simply be skipped with a
 # "missing required column" message rather than silently mis-parsed.)
 
+
 class BostonCrimeParser(CrimeParserBase):
     city = "boston"
     city_label = "Boston, MA"
@@ -209,13 +212,13 @@ class BostonCrimeParser(CrimeParserBase):
     bbox = (-71.4, -71.0, 42.0, 42.5)
 
     _WANTED = {
-        "occurred_at":  ["OCCURRED_ON_DATE", "OCCURRED_ON_DATE "],
-        "lat":          ["Lat"],
-        "lon":          ["Long", "Lon"],
+        "occurred_at": ["OCCURRED_ON_DATE", "OCCURRED_ON_DATE "],
+        "lat": ["Lat"],
+        "lon": ["Long", "Lon"],
         "type_primary": ["OFFENSE_CODE_GROUP"],
-        "type_detail":  ["OFFENSE_DESCRIPTION"],
-        "location_text":["STREET", "Location"],
-        "natural_id":   ["INCIDENT_NUMBER"],
+        "type_detail": ["OFFENSE_DESCRIPTION"],
+        "location_text": ["STREET", "Location"],
+        "natural_id": ["INCIDENT_NUMBER"],
     }
     _REQUIRED = ["occurred_at", "lat", "lon"]
 
@@ -237,6 +240,7 @@ class BostonCrimeParser(CrimeParserBase):
 # process_crime_buffalo.R: single CSV (Crime_Incidents_*.csv),
 # "Incident Datetime" / Latitude / Longitude, parsed with an AM/PM format.
 
+
 class BuffaloCrimeParser(CrimeParserBase):
     city = "buffalo"
     city_label = "Buffalo, NY"
@@ -244,13 +248,13 @@ class BuffaloCrimeParser(CrimeParserBase):
     bbox = (-79.1, -78.4, 42.5, 43.02)
 
     _WANTED = {
-        "occurred_at":  ["Incident Datetime", "Incident Date Time"],
-        "lat":          ["Latitude"],
-        "lon":          ["Longitude"],
+        "occurred_at": ["Incident Datetime", "Incident Date Time"],
+        "lat": ["Latitude"],
+        "lon": ["Longitude"],
         "type_primary": ["Incident Type Primary"],
-        "type_detail":  ["Parent Incident Type", "Incident Description"],
-        "location_text":["Address Line1", "Location"],
-        "natural_id":   ["Case Number"],
+        "type_detail": ["Parent Incident Type", "Incident Description"],
+        "location_text": ["Address Line1", "Location"],
+        "natural_id": ["Case Number"],
     }
     _REQUIRED = ["occurred_at", "lat", "lon"]
 
@@ -274,6 +278,7 @@ class BuffaloCrimeParser(CrimeParserBase):
 # No bounding box in the original script — Chicago's own data quality is
 # used as the only filter, same here.
 
+
 class ChicagoCrimeParser(CrimeParserBase):
     city = "chicago"
     city_label = "Chicago, IL"
@@ -281,13 +286,13 @@ class ChicagoCrimeParser(CrimeParserBase):
     bbox = None
 
     _WANTED = {
-        "occurred_at":  ["Date"],
-        "lat":          ["Latitude"],
-        "lon":          ["Longitude"],
+        "occurred_at": ["Date"],
+        "lat": ["Latitude"],
+        "lon": ["Longitude"],
         "type_primary": ["Primary Type"],
-        "type_detail":  ["Description"],
-        "location_text":["Block"],
-        "natural_id":   ["ID"],
+        "type_detail": ["Description"],
+        "location_text": ["Block"],
+        "natural_id": ["ID"],
     }
     _REQUIRED = ["occurred_at", "lat", "lon"]
 
@@ -302,9 +307,7 @@ class ChicagoCrimeParser(CrimeParserBase):
             # same format the R script specified. Parsing it explicitly (vs.
             # generic inference) matters here: this file can run into the
             # millions of rows.
-            df["occurred_at"] = pd.to_datetime(
-                df["occurred_at"], format="%m/%d/%Y %I:%M:%S %p", errors="coerce"
-            )
+            df["occurred_at"] = pd.to_datetime(df["occurred_at"], format="%m/%d/%Y %I:%M:%S %p", errors="coerce")
             df["raw_type"] = _combine_text(df, ["type_primary", "type_detail"])
             frames.append(df)
         if not frames:
@@ -318,6 +321,7 @@ class ChicagoCrimeParser(CrimeParserBase):
 # field has been spelled a few different ways across yearly extracts, so we
 # try several candidates.
 
+
 class IndianapolisCrimeParser(CrimeParserBase):
     city = "indianapolis"
     city_label = "Indianapolis, IN"
@@ -325,13 +329,13 @@ class IndianapolisCrimeParser(CrimeParserBase):
     bbox = (-86.4, -85.9, 39.6, 40.0)
 
     _WANTED = {
-        "occurred_at":  ["DATE_", "Date"],
-        "time_part":    ["TIME", "Time"],
-        "lat":          ["Y_COORD", "Y"],
-        "lon":          ["X_COORD", "X"],
+        "occurred_at": ["DATE_", "Date"],
+        "time_part": ["TIME", "Time"],
+        "lat": ["Y_COORD", "Y"],
+        "lon": ["X_COORD", "X"],
         "type_primary": ["CRIME", "UCR_CRIME_CATEGORY", "Offense", "CRIME_DESCRIPTION"],
-        "location_text":["ADDRESS", "BLOCK_ADDRESS"],
-        "natural_id":   ["CASE_NUMBER", "INCIDENT_NUMBER"],
+        "location_text": ["ADDRESS", "BLOCK_ADDRESS"],
+        "natural_id": ["CASE_NUMBER", "INCIDENT_NUMBER"],
     }
     _REQUIRED = ["occurred_at", "lat", "lon"]
 
@@ -365,6 +369,7 @@ class IndianapolisCrimeParser(CrimeParserBase):
 # extract will still load if its columns happen to match; if not, it's
 # skipped with a clear message rather than silently dropped.
 
+
 class MinneapolisCrimeParser(CrimeParserBase):
     city = "minneapolis"
     city_label = "Minneapolis, MN"
@@ -372,13 +377,13 @@ class MinneapolisCrimeParser(CrimeParserBase):
     bbox = (-93.4, -93.1, 44.8, 45.1)
 
     _WANTED = {
-        "occurred_at":  ["Occurred_Date", "OccurredDate", "DATE", "Reported_Date"],
-        "lat":          ["Latitude", "Lat"],
-        "lon":          ["Longitude", "Long", "Lon"],
+        "occurred_at": ["Occurred_Date", "OccurredDate", "DATE", "Reported_Date"],
+        "lat": ["Latitude", "Lat"],
+        "lon": ["Longitude", "Long", "Lon"],
         "type_primary": ["Offense", "OFFENSE"],
-        "type_detail":  ["Description", "OffenseDescription"],
-        "location_text":["Address", "Block Address"],
-        "natural_id":   ["ObjectId", "ControlNumber"],
+        "type_detail": ["Description", "OffenseDescription"],
+        "location_text": ["Address", "Block Address"],
+        "natural_id": ["ObjectId", "ControlNumber"],
     }
     _REQUIRED = ["occurred_at", "lat", "lon"]
 
@@ -405,6 +410,7 @@ class MinneapolisCrimeParser(CrimeParserBase):
 # / lat / lng. OpenDataPhilly's incidents carry both text_general_code (a
 # readable category) and ucr_general (a 2-digit UCR code) — we use the text.
 
+
 class PhiladelphiaCrimeParser(CrimeParserBase):
     city = "philadelphia"
     city_label = "Philadelphia, PA"
@@ -412,12 +418,12 @@ class PhiladelphiaCrimeParser(CrimeParserBase):
     bbox = (-75.3, -74.9, 39.8, 40.2)
 
     _WANTED = {
-        "occurred_at":  ["dispatch_date_time", "dispatch_date"],
-        "lat":          ["lat"],
-        "lon":          ["lng", "lon"],
+        "occurred_at": ["dispatch_date_time", "dispatch_date"],
+        "lat": ["lat"],
+        "lon": ["lng", "lon"],
         "type_primary": ["text_general_code"],
-        "location_text":["location_block"],
-        "natural_id":   ["objectid", "dc_key"],
+        "location_text": ["location_block"],
+        "natural_id": ["objectid", "dc_key"],
     }
     _REQUIRED = ["occurred_at", "lat", "lon"]
 
@@ -446,6 +452,7 @@ class PhiladelphiaCrimeParser(CrimeParserBase):
 # "PROP MISSILE INTO OCC VEHICLE" whose OFFENSES list separately includes
 # "Discharge of a Firearm into Occupied Structure").
 
+
 class PittsburghCrimeParser(CrimeParserBase):
     city = "pittsburgh"
     city_label = "Pittsburgh, PA"
@@ -453,13 +460,13 @@ class PittsburghCrimeParser(CrimeParserBase):
     bbox = (-80.3, -79.6, 40.1, 40.7)
 
     _WANTED = {
-        "occurred_at":  ["INCIDENTTIME"],
-        "lat":          ["Y"],
-        "lon":          ["X"],
+        "occurred_at": ["INCIDENTTIME"],
+        "lat": ["Y"],
+        "lon": ["X"],
         "type_primary": ["INCIDENTHIERARCHYDESC", "HIERARCHYDESC", "HIERARCHY_DESC"],
-        "type_detail":  ["OFFENSES"],
-        "location_text":["INCIDENTLOCATION"],
-        "natural_id":   ["PK"],
+        "type_detail": ["OFFENSES"],
+        "location_text": ["INCIDENTLOCATION"],
+        "natural_id": ["PK"],
     }
     _REQUIRED = ["occurred_at", "lat", "lon"]
 

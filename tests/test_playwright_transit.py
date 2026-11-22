@@ -6,8 +6,10 @@ Playwright end-to-end browser verification for FTA transit integration:
 4. General Chat answers transit routing queries with interactive route maps
 5. General Chat answers transit ridership analytical questions using the Code Agent and llama-server
 """
+
 import time
 from playwright.sync_api import sync_playwright
+
 
 def run_transit_ui_verification():
     print("--- Starting Playwright UI Verification ---", flush=True)
@@ -16,7 +18,14 @@ def run_transit_ui_verification():
         context = browser.new_context(viewport={"width": 1280, "height": 800})
         page = context.new_page()
 
-        page.on("console", lambda msg: print(f"[Browser Console] {msg.type}: {msg.text}", flush=True) if msg.type in ("error", "warning") else None)
+        page.on(
+            "console",
+            lambda msg: (
+                print(f"[Browser Console] {msg.type}: {msg.text}", flush=True)
+                if msg.type in ("error", "warning")
+                else None
+            ),
+        )
 
         print("1. Navigating to http://127.0.0.1:8000 ...", flush=True)
         page.goto("http://127.0.0.1:8000", wait_until="networkidle", timeout=30000)
@@ -27,12 +36,12 @@ def run_transit_ui_verification():
 
         # 2. Layers panel & Transit Routes checkbox
         print("2. Verifying Transit Routes layer in layers panel ...", flush=True)
-        transit_row = page.locator('label.ml-row', has_text="Transit Routes")
+        transit_row = page.locator("label.ml-row", has_text="Transit Routes")
         transit_row.wait_for(state="visible", timeout=15000)
         row_text = transit_row.inner_text().replace("\n", " ").strip()
         print(f"PASS: Found Transit Routes row: '{row_text}'", flush=True)
 
-        transit_cb = transit_row.locator('input')
+        transit_cb = transit_row.locator("input")
         assert not transit_cb.is_checked(), "Transit routes should start unchecked"
 
         # Zoom into Pittsburgh where routes are active and dense
@@ -43,8 +52,7 @@ def run_transit_ui_verification():
         # 3. Toggle Transit Routes layer ON
         print("3. Toggling Transit Routes layer ON ...", flush=True)
         with page.expect_response(
-            lambda resp: "/api/layers/transit_routes" in resp.url and resp.status == 200,
-            timeout=45000
+            lambda resp: "/api/layers/transit_routes" in resp.url and resp.status == 200, timeout=45000
         ) as response_info:
             transit_row.click()
 

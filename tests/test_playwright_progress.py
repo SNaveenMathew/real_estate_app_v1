@@ -12,13 +12,14 @@ Run it directly (a local llama-server and loaded database are required, like tes
 
     python tests/test_playwright_progress.py
 """
+
 import os
 import sys
 import threading
 import time
 import urllib.request
 
-if hasattr(sys.stdout, "reconfigure"):   # the panel's ●/✓/✗ bullets are not in the Windows console code page
+if hasattr(sys.stdout, "reconfigure"):  # the panel's ●/✓/✗ bullets are not in the Windows console code page
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -135,9 +136,15 @@ def run_llm_thinking_process_ui_verification():
         live_texts = [live_steps.nth(i).inner_text().replace("\n", " ").strip() for i in range(live_steps.count())]
         running = [t for t in live_texts if t.startswith("●")]
         print("Steps mid-turn:", live_texts, flush=True)
-        assert live_texts[0].startswith("✓") and "Started" in live_texts[0], f"Expected '✓ Started' mid-turn: {live_texts}"
-        assert len(running) == 1 and not running[0].endswith("result"), f"Expected exactly one non-result running step: {live_texts}"
-        assert not any(t.endswith("Starting") for t in live_texts), f"'Starting' should have become 'Started': {live_texts}"
+        assert live_texts[0].startswith("✓") and "Started" in live_texts[0], (
+            f"Expected '✓ Started' mid-turn: {live_texts}"
+        )
+        assert len(running) == 1 and not running[0].endswith("result"), (
+            f"Expected exactly one non-result running step: {live_texts}"
+        )
+        assert not any(t.endswith("Starting") for t in live_texts), (
+            f"'Starting' should have become 'Started': {live_texts}"
+        )
         print("PASS: Panel advanced step by step while the turn was running.", flush=True)
 
         print("6. Waiting for the turn to finish (llama-server, up to 180s)...", flush=True)
@@ -176,8 +183,10 @@ def run_llm_thinking_process_ui_verification():
         page.wait_for_timeout(1500)
         assert page.locator("#thinking-panel").evaluate("el => el.classList.contains('open')")
         assert steps_locator.count() == count
-        assert all(page.locator("#thinking-progress-list .thinking-step").nth(i).inner_text().strip() == step_texts[i]
-                   for i in range(count))
+        assert all(
+            page.locator("#thinking-progress-list .thinking-step").nth(i).inner_text().strip() == step_texts[i]
+            for i in range(count)
+        )
         print("PASS: Thinking process state persisted after the result appeared.", flush=True)
 
         os.makedirs(os.path.join(REPO_ROOT, "screenshots"), exist_ok=True)

@@ -20,6 +20,7 @@ Nothing here mentions a particular dataset.  A new dataset changes behaviour by 
 (``requires_entity``, ``gap``, ``derived``, ``derived_support`` - see ``db/catalog_model.CONCEPT_KNOBS``), not by
 editing this file.
 """
+
 from __future__ import annotations
 
 import db.duckdb_store as store
@@ -87,7 +88,8 @@ def _ambiguity_message(plan) -> str | None:
     return status.not_answered(
         status.PLACE_AMBIGUOUS,
         f"{'. '.join(parts)}. Ask the user which one they mean{hint}. No query was run and nothing was estimated; "
-        "this is not a database error.")
+        "this is not a database error.",
+    )
 
 
 def _gap_only_message(concepts: list[dict]) -> str | None:
@@ -107,7 +109,7 @@ def _derived_answer(plan, request: str, concepts: list[dict], presentation: str)
         spec = c.get("derived")
         if spec:
             wanted.setdefault(spec["provider"], set()).update(spec.get("measures", []))
-    for c in concepts:                      # supporting measures ride along only when a provider is already running
+    for c in concepts:  # supporting measures ride along only when a provider is already running
         spec = c.get("derived_support")
         if spec and spec.get("provider") in wanted:
             wanted[spec["provider"]].update(spec.get("measures", []))
@@ -119,10 +121,19 @@ def _derived_answer(plan, request: str, concepts: list[dict], presentation: str)
             return wrap(_evidence_label([provider_id]), outcome)
         sections.append(outcome)
 
-    skipped = [c["aliases"][0] for c in concepts
-               if c.get("tables") and not c.get("derived") and not c.get("derived_support") and not c.get("gap") and c.get("aliases")]
+    skipped = [
+        c["aliases"][0]
+        for c in concepts
+        if c.get("tables")
+        and not c.get("derived")
+        and not c.get("derived_support")
+        and not c.get("gap")
+        and c.get("aliases")
+    ]
     if skipped:
-        sections.append("Not computed by this call (they need their own query_database request): " + ", ".join(skipped) + ".")
+        sections.append(
+            "Not computed by this call (they need their own query_database request): " + ", ".join(skipped) + "."
+        )
     return wrap(_evidence_label(list(wanted)), "\n".join(sections))
 
 
@@ -131,7 +142,9 @@ def _evidence_label(provider_ids: list[str]) -> str:
     labels = []
     for pid in provider_ids:
         try:
-            labels.append(getattr(derived_measures.get_provider(pid), "evidence_label", None) or f"Derived measures: {pid}")
+            labels.append(
+                getattr(derived_measures.get_provider(pid), "evidence_label", None) or f"Derived measures: {pid}"
+            )
         except Exception:
             labels.append(f"Derived measures: {pid}")
     return "; ".join(dict.fromkeys(labels))
@@ -168,17 +181,26 @@ def _compute_with_provider(provider_id: str, measures: set[str], plan, request: 
         raise RuntimeError(f"derived-measure provider {provider_id!r} is not registered") from None
     # A specific concept already selected this provider; let it add the other measures named in the same sentence.
     measures = set(measures) | derived_measures.detect_measures(provider, request)
-    entities = [e for e in plan.resolved_entities if e["entity_type"] == provider.entity_type and not e.get("ambiguous")]
+    entities = [
+        e for e in plan.resolved_entities if e["entity_type"] == provider.entity_type and not e.get("ambiguous")
+    ]
     if not entities:
         return status.not_answered(
             status.PLACE_MISSING,
             f"This question needs a named {provider.entity_label}, and none in the request matches the data (a principal "
             f"city such as the one in the metro's name works). Derived measures are computed for the {provider.entity_label}s "
             f"the user names; ranking or listing every one of them by these measures is not supported. Ask which "
-            f"{provider.entity_label} or {provider.entity_label}s they mean.")
+            f"{provider.entity_label} or {provider.entity_label}s they mean.",
+        )
     entities = _order_by_request(entities, request, provider.entity_type)
-    with trace_span("derived_measures", attributes={"derived.provider": provider_id, "derived.entity_count": len(entities),
-                                                    "derived.measures": ",".join(sorted(measures))}) as span:
+    with trace_span(
+        "derived_measures",
+        attributes={
+            "derived.provider": provider_id,
+            "derived.entity_count": len(entities),
+            "derived.measures": ",".join(sorted(measures)),
+        },
+    ) as span:
         try:
             result = provider.compute(entities, sorted(measures), request=request)
             if span is not None:
@@ -237,22 +259,32 @@ def _empty_entity_tables() -> list[str]:
 
 
 def unplannable_result(request: str) -> str:
-    parts = ["The request could not be matched to any measure or table in the data model, so no SQL was generated or run. "
-             "This is a planning limitation, not a database error."]
+    parts = [
+        "The request could not be matched to any measure or table in the data model, so no SQL was generated or run. "
+        "This is a planning limitation, not a database error."
+    ]
     places = [e for e in schema.recognized_entities(request) if e["entity_type"] != "tract_fips"]
     if places:
         names = sorted({e["value"] for e in places if not any(ch.isdigit() for ch in e["value"])})[:5]
         examples = _example_measures({e["entity_type"] for e in places})
-        parts.append(f"A place was recognized ({'; '.join(names)}) but no measure." if names else "A place was recognized but no measure.")
+        parts.append(
+            f"A place was recognized ({'; '.join(names)}) but no measure."
+            if names
+            else "A place was recognized but no measure."
+        )
         parts.append("Say which measure is wanted" + (f", for example: {', '.join(examples)}." if examples else "."))
     else:
         examples = _example_measures()
-        parts.append("Name the measure wanted and, where it applies, the place" +
-                     (f". Examples of what the data covers: {', '.join(examples)}." if examples else "."))
+        parts.append(
+            "Name the measure wanted and, where it applies, the place"
+            + (f". Examples of what the data covers: {', '.join(examples)}." if examples else ".")
+        )
     empty = _empty_entity_tables()
     if empty:
-        parts.append("Place names are matched against these tables, which currently have no rows (so places in them cannot "
-                     "be recognized until the data is loaded): " + ", ".join(empty) + ".")
+        parts.append(
+            "Place names are matched against these tables, which currently have no rows (so places in them cannot "
+            "be recognized until the data is loaded): " + ", ".join(empty) + "."
+        )
     return status.not_answered(status.UNPLANNABLE, " ".join(parts))
 
 

@@ -24,6 +24,7 @@ The registry is also the source of the capability table in the docs
 (``scripts/gen_docs_tables.py``), so the documentation cannot drift from the
 functions the agent can actually call.
 """
+
 from __future__ import annotations
 
 import contextvars
@@ -62,40 +63,45 @@ class CapabilityTimeout(RuntimeError):
     """An approved function was refused or cut off because its deadline passed."""
 
     def __init__(self, name: str, deadline_s: float):
-        super().__init__(
-            f"Approved function '{name}' exceeded its {deadline_s:g}s deadline."
-        )
+        super().__init__(f"Approved function '{name}' exceeded its {deadline_s:g}s deadline.")
         self.name = name
         self.deadline_s = deadline_s
 
 
 CAPABILITIES: dict[str, Capability] = {
     "query_database": Capability(
-        (DATABASE, MODEL, "analytics"), 180.0,
+        (DATABASE, MODEL, "analytics"),
+        180.0,
         "Plan, generate and run one read-only SQL statement.",
     ),
     "retrieve_data_model_context": Capability(
-        (DATABASE, METADATA, LOCAL), 30.0,
+        (DATABASE, METADATA, LOCAL),
+        30.0,
         "Plan plus targeted schema and vector metadata for one question.",
     ),
     "check_data_availability": Capability(
-        (DATABASE,), 15.0,
+        (DATABASE,),
+        15.0,
         "Row counts for every agent-visible table.",
     ),
     "get_database_schema": Capability(
-        (DATABASE, METADATA), 15.0,
+        (DATABASE, METADATA),
+        15.0,
         "Human-readable schema summary.",
     ),
     "find_bike_route": Capability(
-        (NETWORK, ROUTING), 60.0,
+        (NETWORK, ROUTING),
+        60.0,
         "Bicycle route between two places (geocoding + local graph).",
     ),
     "find_transit_route": Capability(
-        (NETWORK, ROUTING), 60.0,
+        (NETWORK, ROUTING),
+        60.0,
         "Transit route between two places (geocoding + transit graph).",
     ),
     "search_all_house_descriptions": Capability(
-        (LOCAL, "retrieval"), 30.0,
+        (LOCAL, "retrieval"),
+        30.0,
         "Vector search over saved house descriptions.",
     ),
 }
@@ -143,7 +149,7 @@ def start_turn_budget(seconds: float | None = None) -> contextvars.Token:
 def end_turn_budget(token: contextvars.Token) -> None:
     try:
         _TURN_DEADLINE.reset(token)
-    except ValueError:                    # token from another context; nothing to restore
+    except ValueError:  # token from another context; nothing to restore
         _TURN_DEADLINE.set(None)
 
 
@@ -177,6 +183,7 @@ def capability(name: str) -> Callable:
     records every duration. It does not swallow exceptions: a tool that fails
     still reports its own structured failure.
     """
+
     def decorator(fn: Callable) -> Callable:
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
@@ -189,7 +196,7 @@ def capability(name: str) -> Callable:
             finally:
                 record(name, time.monotonic() - started)
 
-        wrapper.capability = name          # type: ignore[attr-defined]
+        wrapper.capability = name  # type: ignore[attr-defined]
         return wrapper
 
     return decorator

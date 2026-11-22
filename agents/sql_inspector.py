@@ -20,6 +20,7 @@ Robustness
   bad SQL) so callers can fall back to the previous checks and say so loudly, instead of rejecting every query.
   ``selftest()`` and ``tests/test_sql_inspector.py`` exist to catch that at upgrade time.
 """
+
 from __future__ import annotations
 
 import json
@@ -44,36 +45,38 @@ class SqlInspectorUnavailable(RuntimeError):
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class Rel:
-    alias: str            # alias, or the table name when there is none (lower case)
-    kind: str             # table | cte | subquery | function | file | values | other
-    name: str             # table / CTE / function name (lower case); '' for subquery / values
+    alias: str  # alias, or the table name when there is none (lower case)
+    kind: str  # table | cte | subquery | function | file | values | other
+    name: str  # table / CTE / function name (lower case); '' for subquery / values
 
 
 @dataclass(frozen=True)
 class JoinPred:
     """``left = right`` where each side belongs to exactly one (different) base table."""
-    left: str             # canonical expression, e.g. "houses.tract_fips" or "concat(a.x, a.y)"
+
+    left: str  # canonical expression, e.g. "houses.tract_fips" or "concat(a.x, a.y)"
     right: str
     left_table: str
     right_table: str
-    origin: str           # on | where | using
+    origin: str  # on | where | using
 
 
 @dataclass(frozen=True)
 class ValuePred:
     """``column = constant``, ``column IN (constants)`` or an OR-chain of those on one column."""
-    column: str           # canonical, e.g. "census_msa.name"
+
+    column: str  # canonical, e.g. "census_msa.name"
     values: frozenset
 
 
 @dataclass
 class Block:
-    rels: dict = field(default_factory=dict)             # alias -> Rel
-    join_preds: list = field(default_factory=list)       # validated against approved relationships
-    links: list = field(default_factory=list)            # (alias, alias) for ANY condition touching two relations: connectivity
+    rels: dict = field(default_factory=dict)  # alias -> Rel
+    join_preds: list = field(default_factory=list)  # validated against approved relationships
+    links: list = field(default_factory=list)  # (alias, alias) for ANY condition touching two relations: connectivity
     value_preds: list = field(default_factory=list)
     natural_joins: int = 0
-    using: list = field(default_factory=list)            # (right_aliases, left_aliases, column)
+    using: list = field(default_factory=list)  # (right_aliases, left_aliases, column)
 
     @property
     def base_tables(self) -> dict:
@@ -83,12 +86,12 @@ class Block:
 @dataclass
 class Inspection:
     blocks: list = field(default_factory=list)
-    tables: set = field(default_factory=set)             # base tables referenced ANYWHERE (not CTE names)
+    tables: set = field(default_factory=set)  # base tables referenced ANYWHERE (not CTE names)
     ctes: set = field(default_factory=set)
     table_functions: set = field(default_factory=set)
     files: list = field(default_factory=list)
-    functions: set = field(default_factory=set)          # every scalar / aggregate / window function name
-    limit: int | None = None                             # outermost LIMIT, when it is a constant
+    functions: set = field(default_factory=set)  # every scalar / aggregate / window function name
+    limit: int | None = None  # outermost LIMIT, when it is a constant
 
 
 # ---------------------------------------------------------------------------
@@ -103,10 +106,10 @@ def _parse(sql: str) -> dict:
     global _PARSER
     with _PARSER_LOCK:
         if _PARSER is None:
-            _PARSER = duckdb.connect(":memory:")          # parse-only: it never needs the catalog
+            _PARSER = duckdb.connect(":memory:")  # parse-only: it never needs the catalog
         try:
             statements = _PARSER.extract_statements(sql)
-        except Exception as exc:                          # duckdb.ParserException and friends
+        except Exception as exc:  # duckdb.ParserException and friends
             raise SqlInspectionError(f"SQL syntax error: {_first_line(exc)}") from exc
         if len(statements) != 1:
             raise SqlInspectionError(f"exactly one SQL statement is allowed (found {len(statements)})")
@@ -211,19 +214,21 @@ class _Resolver:
             v = _const(node)
             return "null" if v is None else repr(v)
         if c == "CAST":
-            return self.canon(node.get("child"))               # a cast does not change which columns are being joined
+            return self.canon(node.get("child"))  # a cast does not change which columns are being joined
         if c == "FUNCTION":
-            name = _FUNC_ALIASES.get(str(node.get("function_name", "")).lower(), str(node.get("function_name", "")).lower())
+            name = _FUNC_ALIASES.get(
+                str(node.get("function_name", "")).lower(), str(node.get("function_name", "")).lower()
+            )
             args = [self.canon(a) for a in node.get("children", [])]
-            if name == "left" and len(args) == 2:                  # LEFT(x, n) == SUBSTR(x, 1, n)
+            if name == "left" and len(args) == 2:  # LEFT(x, n) == SUBSTR(x, 1, n)
                 return f"substr({args[0]}, '1', {args[1]})"
             if name == "substr" and len(args) == 3 and args[1] == "'1'":
                 return f"substr({args[0]}, '1', {args[2]})"
-            if name == "concat":                                    # flatten (a || b) || c
+            if name == "concat":  # flatten (a || b) || c
                 flat = []
                 for a, child in zip(args, node.get("children", [])):
                     if a.startswith("concat(") and isinstance(child, dict) and child.get("class") == "FUNCTION":
-                        flat.extend(_split_args(a[len("concat("):-1]))
+                        flat.extend(_split_args(a[len("concat(") : -1]))
                     else:
                         flat.append(a)
                 return f"concat({', '.join(flat)})"
@@ -320,7 +325,7 @@ class _Walker:
         typ = node.get("type")
         if typ == "SELECT_NODE":
             self._select(node)
-        elif "left" in node and "right" in node:               # set operations, recursive CTEs
+        elif "left" in node and "right" in node:  # set operations, recursive CTEs
             self._node(node["left"])
             self._node(node["right"])
 
@@ -394,7 +399,7 @@ class _Walker:
             inner = (node.get("subquery") or {}).get("node")
             if inner:
                 saved = self.res.stack
-                self.res.stack = []                             # a derived table cannot see its siblings
+                self.res.stack = []  # a derived table cannot see its siblings
                 try:
                     self._node(inner)
                 finally:
@@ -445,8 +450,8 @@ class _Walker:
             # otherwise fall through: an OR of other conditions still connects the relations it mentions
         if not (c == "COMPARISON" and t == "COMPARE_EQUAL"):
             aliases = sorted({a for _, a in self.res.refs(e) if a})
-            for i, la in enumerate(aliases):                     # connectivity only: not validated against relationships
-                for ra in aliases[i + 1:]:
+            for i, la in enumerate(aliases):  # connectivity only: not validated against relationships
+                for ra in aliases[i + 1 :]:
                     blk.links.append((la, ra))
             return
         lrefs, rrefs = self.res.refs(e["left"]), self.res.refs(e["right"])
@@ -458,8 +463,15 @@ class _Walker:
                     blk.links.append((la, ra))
         ltables, rtables = {t for t, _ in lrefs if t}, {t for t, _ in rrefs if t}
         if len(ltables) == 1 and len(rtables) == 1 and len(laliases) == 1 and len(raliases) == 1 and ltables != rtables:
-            blk.join_preds.append(JoinPred(self.res.canon(e["left"]), self.res.canon(e["right"]),
-                                           next(iter(ltables)), next(iter(rtables)), origin))
+            blk.join_preds.append(
+                JoinPred(
+                    self.res.canon(e["left"]),
+                    self.res.canon(e["right"]),
+                    next(iter(ltables)),
+                    next(iter(rtables)),
+                    origin,
+                )
+            )
 
 
 def inspect_sql(sql: str, *, columns_of: Callable[[str], set | None] | None = None) -> Inspection:
@@ -469,7 +481,7 @@ def inspect_sql(sql: str, *, columns_of: Callable[[str], set | None] | None = No
         return _Walker(tree, columns_of).run()
     except (SqlInspectionError, SqlInspectorUnavailable):
         raise
-    except Exception as exc:                                    # an unexpected tree shape, not bad SQL
+    except Exception as exc:  # an unexpected tree shape, not bad SQL
         raise SqlInspectorUnavailable(f"could not read the syntax tree: {type(exc).__name__}: {exc}") from exc
 
 
@@ -494,7 +506,11 @@ def selftest() -> None:
     """Raises SqlInspectorUnavailable when DuckDB's tree no longer looks the way this module expects."""
     ins = inspect_sql("SELECT 1 FROM a x JOIN b y ON x.k = y.k WHERE x.n = 'v' LIMIT 3")
     blk = ins.blocks[0]
-    ok = (ins.tables == {"a", "b"} and ins.limit == 3 and len(blk.join_preds) == 1
-          and any(p.column == "a.n" and p.values == frozenset({"v"}) for p in blk.value_preds))
+    ok = (
+        ins.tables == {"a", "b"}
+        and ins.limit == 3
+        and len(blk.join_preds) == 1
+        and any(p.column == "a.n" and p.values == frozenset({"v"}) for p in blk.value_preds)
+    )
     if not ok:
         raise SqlInspectorUnavailable("selftest query did not yield the expected structure")

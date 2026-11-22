@@ -29,6 +29,7 @@ the worker.
 Uploads are treated as hostile input: the name is sanitized, the size is capped while it
 streams, and no file survives a rejected request (api/uploads.py).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -91,22 +92,26 @@ def _job_call(job, message: str, fn, *args, **kwargs):
 # Catalog + datasets
 # ---------------------------------------------------------------------------
 
+
 @router.get("/catalog")
 def get_catalog(dataset_id: str | None = None):
     store.get_conn()
     out = schema.describe_catalog()
     out["draft"] = _call(ob.draft_overlay, dataset_id) if dataset_id else None
-    out["house_linked"] = [d["name"] for d in schema.house_linked_datasets()]   # reachable from House Chat
+    out["house_linked"] = [d["name"] for d in schema.house_linked_datasets()]  # reachable from House Chat
     return out
 
 
 @router.get("/datasets")
 def get_datasets():
     store.get_conn()
-    return {"datasets": ob.list_datasets(), "formats": readers.SUPPORTED_EXTENSIONS,
-            "max_upload_mb": int(getattr(settings, "onboarding_max_upload_mb", 250)),
-            "domains": [{"key": k, "label": schema.DOMAIN_LABELS[k]} for k in ob.VALID_DOMAINS],
-            "roles": list(ob.VALID_ROLES)}
+    return {
+        "datasets": ob.list_datasets(),
+        "formats": readers.SUPPORTED_EXTENSIONS,
+        "max_upload_mb": int(getattr(settings, "onboarding_max_upload_mb", 250)),
+        "domains": [{"key": k, "label": schema.DOMAIN_LABELS[k]} for k in ob.VALID_DOMAINS],
+        "roles": list(ob.VALID_ROLES),
+    }
 
 
 def _save_upload(file: UploadFile) -> tuple[Path, str]:
@@ -114,8 +119,10 @@ def _save_upload(file: UploadFile) -> tuple[Path, str]:
     name = sanitize_filename(file.filename, fallback="upload")
     ext = Path(name).suffix.lower()
     if ext not in readers.SUPPORTED_EXTENSIONS:
-        raise HTTPException(status_code=415, detail=f"'{ext or 'that'}' files are not supported. "
-                                                   f"Use one of: {', '.join(readers.SUPPORTED_EXTENSIONS)}.")
+        raise HTTPException(
+            status_code=415,
+            detail=f"'{ext or 'that'}' files are not supported. Use one of: {', '.join(readers.SUPPORTED_EXTENSIONS)}.",
+        )
     dest = Path(settings.uploads_dir) / "datasets" / uuid.uuid4().hex[:10] / name
     save_stream(file.file, dest, max_bytes=_max_upload_bytes())
     return dest, name
@@ -135,7 +142,7 @@ def _ingest_upload(dest: Path, name: str, sheet: str | None, skiprows: int | Non
             break
     if matched_key:
         result = data_sources.refresh_source(matched_key, dest, name)
-        shutil.rmtree(dest.parent, ignore_errors=True)      # refresh_source already copied what it needs
+        shutil.rmtree(dest.parent, ignore_errors=True)  # refresh_source already copied what it needs
         if not result.get("ok"):
             raise HTTPException(status_code=422, detail=result.get("error", "Refresh failed."))
         return {"matched_source": matched_key, "refresh_result": result}
@@ -153,8 +160,9 @@ def _ingest_in_background(job, dest: Path, name: str, sheet, skiprows):
 
 
 @router.post("/datasets", status_code=202)
-async def upload_dataset(file: UploadFile = File(...), sheet: str | None = Form(None),
-                         skiprows: int | None = Form(None)):
+async def upload_dataset(
+    file: UploadFile = File(...), sheet: str | None = Form(None), skiprows: int | None = Form(None)
+):
     """Stage the upload, then ingest it in a background job.
 
     The bytes are streamed to disk here - capped and sanitized (api/uploads.py) - because
@@ -165,10 +173,11 @@ async def upload_dataset(file: UploadFile = File(...), sheet: str | None = Form(
     store.get_conn()
     dest, name = await asyncio.to_thread(_save_upload, file)
     try:
-        return _start_job("ingest", f"Ingesting {name}",
-                          lambda job: _ingest_in_background(job, dest, name, sheet, skiprows))
+        return _start_job(
+            "ingest", f"Ingesting {name}", lambda job: _ingest_in_background(job, dest, name, sheet, skiprows)
+        )
     except BaseException:
-        shutil.rmtree(dest.parent, ignore_errors=True)     # nothing staged survives a refused upload
+        shutil.rmtree(dest.parent, ignore_errors=True)  # nothing staged survives a refused upload
         raise
 
 
@@ -188,7 +197,7 @@ def save_description(dataset_id: str, payload: dict = Body(...)):
 async def draft_description(dataset_id: str):
     store.get_conn()
     ds = _call(ob.get_draftable, dataset_id)
-    result = await asyncio.to_thread(catalog_llm.draft_dataset, ds)      # pure HTTP: no DuckDB in the worker
+    result = await asyncio.to_thread(catalog_llm.draft_dataset, ds)  # pure HTTP: no DuckDB in the worker
     return _call(ob.apply_draft, dataset_id, result)
 
 
@@ -197,26 +206,34 @@ def enrich_dataset(dataset_id: str, payload: dict = Body(...)):
     """Enrichment geocodes and joins thousands of rows: 202, then poll /api/jobs/{id}."""
     store.get_conn()
     kind = str(payload.get("kind", ""))
-    return _start_job("enrich", f"Enriching {dataset_id}",
-                      lambda job: _job_call(job, f"Enriching by {kind or 'rules'}...",
-                                            ob.enrich, dataset_id, kind))
+    return _start_job(
+        "enrich",
+        f"Enriching {dataset_id}",
+        lambda job: _job_call(job, f"Enriching by {kind or 'rules'}...", ob.enrich, dataset_id, kind),
+    )
 
 
 @router.post("/datasets/{dataset_id}/analyze", status_code=202)
 def analyze_dataset(dataset_id: str):
     """Key-overlap probes across every catalog table: 202, then poll /api/jobs/{id}."""
     store.get_conn()
-    return _start_job("analyze", f"Testing {dataset_id}",
-                      lambda job: _job_call(job, "Testing columns against the catalog...",
-                                            ob.analyze, dataset_id))
+    return _start_job(
+        "analyze",
+        f"Testing {dataset_id}",
+        lambda job: _job_call(job, "Testing columns against the catalog...", ob.analyze, dataset_id),
+    )
 
 
 @router.post("/proposals/{proposal_id}/decision")
 async def decide(proposal_id: str, background: BackgroundTasks, payload: dict = Body(...)):
     store.get_conn()
     out = await asyncio.to_thread(
-        _call, ob.decide, proposal_id, str(payload.get("decision", "")),
-        note=str(payload.get("note", "")), edits=payload.get("edits") or {},
+        _call,
+        ob.decide,
+        proposal_id,
+        str(payload.get("decision", "")),
+        note=str(payload.get("note", "")),
+        edits=payload.get("edits") or {},
     )
     if payload.get("decision") == "approve":
         background.add_task(_warm_index)
@@ -227,7 +244,10 @@ async def decide(proposal_id: str, background: BackgroundTasks, payload: dict = 
 async def revoke(background: BackgroundTasks, payload: dict = Body(...)):
     store.get_conn()
     out = await asyncio.to_thread(
-        _call, ob.revoke_relationship, str(payload.get("rel_key", "")), str(payload.get("reason", "")),
+        _call,
+        ob.revoke_relationship,
+        str(payload.get("rel_key", "")),
+        str(payload.get("reason", "")),
     )
     background.add_task(_warm_index)
     return out
@@ -244,6 +264,7 @@ async def retire(dataset_id: str, background: BackgroundTasks):
 # ---------------------------------------------------------------------------
 # Catalog model router
 # ---------------------------------------------------------------------------
+
 
 @router.get("/llm/status")
 async def llm_status():

@@ -11,6 +11,7 @@ Tests:
   4. End-to-End integration: run_general_chat & run_house_chat guardrail activation.
   5. Performance & Latency Benchmark: Multi-iteration latency profiling (microseconds).
 """
+
 import sys
 import time
 from pathlib import Path
@@ -39,6 +40,7 @@ def test_outlines_presence():
     assert OUTLINES_AVAILABLE, "Outlines library is not available!"
     import outlines
     import outlines_core
+
     print(f"  ✓ Outlines core loaded from: {outlines_core.__file__}")
 
 
@@ -101,10 +103,7 @@ def test_code_agent_guardrail():
 def test_house_code_agent_program():
     print("Testing House Code Agent program validation and execution...")
     approved = {"get_house_details", "query_database"}
-    valid_prog = (
-        "details = get_house_details()\n"
-        "final_result = query_database(request='custom house analysis')"
-    )
+    valid_prog = "details = get_house_details()\nfinal_result = query_database(request='custom house analysis')"
     _validate_house_program(valid_prog, approved)
 
     result, calls = _execute_house_program(
@@ -241,7 +240,9 @@ def benchmark_performance(iterations: int = 1000):
         avg, p50, p95, p99 = stats(lat_list)
         print(f"{name:<28} | {avg:<10.2f} | {p50:<10.2f} | {p95:<10.2f} | {p99:<10.2f}")
 
-    total_avg_ms = (sum(latencies_input) + sum(latencies_code) + sum(latencies_sql) + sum(latencies_output)) / (iterations * 1000)
+    total_avg_ms = (sum(latencies_input) + sum(latencies_code) + sum(latencies_sql) + sum(latencies_output)) / (
+        iterations * 1000
+    )
     print("-" * 75)
     print(f"Total Combined Guardrail Overhead per Request: {total_avg_ms:.4f} ms (< 0.05 ms)")
     print(f"Performance Degradation: NEGLIGIBLE (0.000% of typical LLM latency ~500ms - 2000ms)")

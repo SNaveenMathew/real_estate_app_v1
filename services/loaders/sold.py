@@ -3,6 +3,7 @@
 Behaviour is unchanged: the facade in services/data_loader.py re-exports every name here, so
 `from services.data_loader import ...` (and scripts that call it) keep working.
 """
+
 from __future__ import annotations
 
 """
@@ -18,11 +19,20 @@ from config import settings
 import db.duckdb_store as store
 
 
-
-
 from services.loaders.redfin import _REDFIN_COL_MAP, _clean_numeric  # shared Redfin helpers
 
-__all__ = ['_NON_ARMS_LENGTH', '_ESTATE_CODES', '_classify_arms_length', 'CountyParserBase', 'AlleghenyParser', 'GenericSoldParser', '_COUNTY_PARSERS', '_detect_parser', '_SOLD_SCHEMA_COLS', 'load_sold_homes']
+__all__ = [
+    "_NON_ARMS_LENGTH",
+    "_ESTATE_CODES",
+    "_classify_arms_length",
+    "CountyParserBase",
+    "AlleghenyParser",
+    "GenericSoldParser",
+    "_COUNTY_PARSERS",
+    "_detect_parser",
+    "_SOLD_SCHEMA_COLS",
+    "load_sold_homes",
+]
 
 # ── Sold homes — county-parser architecture ───────────────────────────────────
 #
@@ -48,37 +58,36 @@ __all__ = ['_NON_ARMS_LENGTH', '_ESTATE_CODES', '_classify_arms_length', 'County
 # Applies across county parsers; each parser maps its codes to this.
 _NON_ARMS_LENGTH = {
     # Allegheny-specific codes (SALECODE column)
-    "3":   "Love and affection / nominal consideration",
-    "5":   "Quit-claim deed",
-    "6":   "Foreclosure / sheriff's sale",
-    "11":  "Related party transfer",
-    "16":  "Government / tax sale",
-    "99":  "Corrective deed or duplicate sale",
-    "CO":  "Corrective instrument",         # INSTRTYP level
+    "3": "Love and affection / nominal consideration",
+    "5": "Quit-claim deed",
+    "6": "Foreclosure / sheriff's sale",
+    "11": "Related party transfer",
+    "16": "Government / tax sale",
+    "99": "Corrective deed or duplicate sale",
+    "CO": "Corrective instrument",  # INSTRTYP level
     # Multi-parcel (distorts per-unit price)
-    "H":   "Multi-parcel sale",
+    "H": "Multi-parcel sale",
     # Generic
     "LOVE AND AFFECTION": "Love and affection / nominal consideration",
-    "CORRECTIVE":         "Corrective deed",
-    "ESTATE":             "Estate sale",    # flagged but not always excluded
-    "FORECLOSURE":        "Foreclosure",
-    "SHERIFF":            "Sheriff's sale",
+    "CORRECTIVE": "Corrective deed",
+    "ESTATE": "Estate sale",  # flagged but not always excluded
+    "FORECLOSURE": "Foreclosure",
+    "SHERIFF": "Sheriff's sale",
 }
 
-_ESTATE_CODES = {"37"}   # flagged as questionable but kept; analyst can filter
+_ESTATE_CODES = {"37"}  # flagged as questionable but kept; analyst can filter
 
 
-def _classify_arms_length(sale_code: str, sale_desc: str,
-                          instr_type: str, price: float) -> tuple[bool, str]:
+def _classify_arms_length(sale_code: str, sale_desc: str, instr_type: str, price: float) -> tuple[bool, str]:
     """
     Return (is_arms_length, flag_reason).
     Anything clearly not at market value → False.
     Estate sales → True but with a flag noting they may be discounted.
     """
-    sc   = str(sale_code  or "").strip().upper()
-    sd   = str(sale_desc  or "").strip().upper()
-    it   = str(instr_type or "").strip().upper()
-    pr   = price or 0
+    sc = str(sale_code or "").strip().upper()
+    sd = str(sale_desc or "").strip().upper()
+    it = str(instr_type or "").strip().upper()
+    pr = price or 0
 
     # Nominal / token consideration
     if pr <= 1:
@@ -103,7 +112,7 @@ def _classify_arms_length(sale_code: str, sale_desc: str,
 
 class CountyParserBase:
     county_name: str = "Unknown"
-    state_abbr: str  = "XX"
+    state_abbr: str = "XX"
     # Signature: set of uppercase column names that uniquely identify this county's export
     signature: frozenset = frozenset()
 
@@ -133,10 +142,10 @@ class AlleghenyParser(CountyParserBase):
              MUNICODE, MUNIDESC, RECORDDATE, SALEDATE, PRICE,
              DEEDBOOK, DEEDPAGE, SALECODE, SALEDESC, INSTRTYP, INSTRTYPDESC
     """
+
     county_name = "Allegheny, PA"
-    state_abbr  = "PA"
-    signature   = frozenset({"PARID", "MUNIDESC", "SCHOOLDESC",
-                              "SALECODE", "SALEDESC", "INSTRTYP"})
+    state_abbr = "PA"
+    signature = frozenset({"PARID", "MUNIDESC", "SCHOOLDESC", "SALECODE", "SALEDESC", "INSTRTYP"})
 
     @classmethod
     def parse(cls, df: pd.DataFrame, source_file: str) -> pd.DataFrame:
@@ -165,52 +174,45 @@ class AlleghenyParser(CountyParserBase):
                 _clean(row.get("PROPERTYADDRESSSTREET")),
                 _clean(row.get("PROPERTYADDRESSSUF")),
             ]
-            unit   = _clean(row.get("PROPERTYUNITNO"))
+            unit = _clean(row.get("PROPERTYUNITNO"))
             street = " ".join(p for p in parts if p)
             if unit:
                 street += f" #{unit}"
             return street.strip()
 
         street = df.apply(_build_street, axis=1)
-        city   = col("PROPERTYCITY").apply(_clean).str.title()
-        state  = col("PROPERTYSTATE").apply(lambda v: _clean(v) or "PA").str.upper()
-        zip_   = col("PROPERTYZIP").apply(_clean).str[:5]
+        city = col("PROPERTYCITY").apply(_clean).str.title()
+        state = col("PROPERTYSTATE").apply(lambda v: _clean(v) or "PA").str.upper()
+        zip_ = col("PROPERTYZIP").apply(_clean).str[:5]
 
         # Drop rows where the street came out entirely empty
         valid_street = street.str.strip().ne("")
         if not valid_street.all():
             n_blank = (~valid_street).sum()
             print(f"    Skipping {n_blank} rows with no street address")
-        df    = df[valid_street].copy()
-        street= street[valid_street]
-        city  = city[valid_street]
+        df = df[valid_street].copy()
+        street = street[valid_street]
+        city = city[valid_street]
         state = state[valid_street]
-        zip_  = zip_[valid_street]
+        zip_ = zip_[valid_street]
 
-        full_address = (
-            street + ", " + city + ", " + state + " " + zip_
-        ).str.strip(", ")
+        full_address = (street + ", " + city + ", " + state + " " + zip_).str.strip(", ")
 
         # ── Sale price ───────────────────────────────────────────────────
-        sold_price = pd.to_numeric(
-            col("PRICE").astype(str).str.replace(r"[$,]", "", regex=True),
-            errors="coerce"
-        )
+        sold_price = pd.to_numeric(col("PRICE").astype(str).str.replace(r"[$,]", "", regex=True), errors="coerce")
 
         # ── Dates ────────────────────────────────────────────────────────
-        sold_date   = pd.to_datetime(col("SALEDATE"),   errors="coerce").dt.date
+        sold_date = pd.to_datetime(col("SALEDATE"), errors="coerce").dt.date
         record_date = pd.to_datetime(col("RECORDDATE"), errors="coerce").dt.date
 
         # ── Arm's-length classification ──────────────────────────────────
-        sale_codes  = col("SALECODE").astype(str).str.strip()
-        sale_descs  = col("SALEDESC").astype(str).str.strip()
+        sale_codes = col("SALECODE").astype(str).str.strip()
+        sale_descs = col("SALEDESC").astype(str).str.strip()
         instr_types = col("INSTRTYP").astype(str).str.strip()
 
         arms_length_rows = [
             _classify_arms_length(sc, sd, it, pr)
-            for sc, sd, it, pr in zip(
-                sale_codes, sale_descs, instr_types, sold_price.fillna(0)
-            )
+            for sc, sd, it, pr in zip(sale_codes, sale_descs, instr_types, sold_price.fillna(0))
         ]
         is_arms_length = [r[0] for r in arms_length_rows]
         arms_length_flag = [r[1] for r in arms_length_rows]
@@ -219,53 +221,53 @@ class AlleghenyParser(CountyParserBase):
         parid = col("PARID").astype(str).str.strip()
 
         # ── Sale ID ──────────────────────────────────────────────────────
-        sale_id = pd.Series([
-            cls._sale_id(p, str(d))
-            for p, d in zip(parid, sold_date)
-        ])
+        sale_id = pd.Series([cls._sale_id(p, str(d)) for p, d in zip(parid, sold_date)])
 
         # ── County FIPS for Allegheny = 42003 ────────────────────────────
         county_fips = "42003"
 
-        out = pd.DataFrame({
-            "sale_id":          sale_id,
-            "source_county":    cls.county_name,
-            "source_file":      source_file,
-            "parid":            parid,
-            "address":          street,
-            "city":             city,
-            "state":            state,
-            "zip":              zip_,
-            "full_address":     full_address,
-            "sold_price":       sold_price,
-            "sold_date":        sold_date,
-            "record_date":      record_date,
-            "list_price":       None,
-            "sqft":             None,
-            "beds":             None,
-            "baths":            None,
-            "year_built":       None,
-            "sale_code":        sale_codes,
-            "sale_desc":        col("SALEDESC").astype(str).str.strip(),
-            "instr_type":       instr_types,
-            "instr_type_desc":  col("INSTRTYPDESC").astype(str).str.strip()
-                                    if "INSTRTYPDESC" in df.columns else None,
-            "deed_book":        col("DEEDBOOK").astype(str).str.strip(),
-            "deed_page":        col("DEEDPAGE").astype(str).str.strip(),
-            "muni_code":        col("MUNICODE").astype(str).str.strip(),
-            "muni_desc":        col("MUNIDESC").astype(str).str.strip().str.strip(),
-            "school_code":      col("SCHOOLCODE").astype(str).str.strip(),
-            "school_desc":      col("SCHOOLDESC").astype(str).str.strip(),
-            "is_arms_length":   is_arms_length,
-            "arms_length_flag": arms_length_flag,
-            "lat":              None,
-            "lon":              None,
-            "geocode_status":   "pending",
-            "geocode_source":   None,
-            "geocode_accuracy": None,
-            "tract_fips":       None,
-            "county_fips":      county_fips,
-        })
+        out = pd.DataFrame(
+            {
+                "sale_id": sale_id,
+                "source_county": cls.county_name,
+                "source_file": source_file,
+                "parid": parid,
+                "address": street,
+                "city": city,
+                "state": state,
+                "zip": zip_,
+                "full_address": full_address,
+                "sold_price": sold_price,
+                "sold_date": sold_date,
+                "record_date": record_date,
+                "list_price": None,
+                "sqft": None,
+                "beds": None,
+                "baths": None,
+                "year_built": None,
+                "sale_code": sale_codes,
+                "sale_desc": col("SALEDESC").astype(str).str.strip(),
+                "instr_type": instr_types,
+                "instr_type_desc": col("INSTRTYPDESC").astype(str).str.strip()
+                if "INSTRTYPDESC" in df.columns
+                else None,
+                "deed_book": col("DEEDBOOK").astype(str).str.strip(),
+                "deed_page": col("DEEDPAGE").astype(str).str.strip(),
+                "muni_code": col("MUNICODE").astype(str).str.strip(),
+                "muni_desc": col("MUNIDESC").astype(str).str.strip().str.strip(),
+                "school_code": col("SCHOOLCODE").astype(str).str.strip(),
+                "school_desc": col("SCHOOLDESC").astype(str).str.strip(),
+                "is_arms_length": is_arms_length,
+                "arms_length_flag": arms_length_flag,
+                "lat": None,
+                "lon": None,
+                "geocode_status": "pending",
+                "geocode_source": None,
+                "geocode_accuracy": None,
+                "tract_fips": None,
+                "county_fips": county_fips,
+            }
+        )
 
         return out
 
@@ -276,12 +278,13 @@ class GenericSoldParser(CountyParserBase):
     (e.g. the original sample_sold.csv with lat/lon included).
     Tries to map common column names to the standard schema.
     """
+
     county_name = "Unknown"
-    signature   = frozenset()  # always matches as last resort
+    signature = frozenset()  # always matches as last resort
 
     @classmethod
     def matches(cls, columns):
-        return True   # fallback — always try this last
+        return True  # fallback — always try this last
 
     @classmethod
     def parse(cls, df: pd.DataFrame, source_file: str) -> pd.DataFrame:
@@ -299,68 +302,90 @@ class GenericSoldParser(CountyParserBase):
 
         if "address" not in df.columns:
             df["address"] = ""
-        city  = df.get("city",  pd.Series([""] * len(df)))
+        city = df.get("city", pd.Series([""] * len(df)))
         state = df.get("state", pd.Series([""] * len(df)))
-        zip_  = df.get("zip",   pd.Series([""] * len(df)))
+        zip_ = df.get("zip", pd.Series([""] * len(df)))
 
         df["full_address"] = (
-            df["address"].astype(str) + ", " +
-            city.astype(str) + ", " +
-            state.astype(str) + " " +
-            zip_.astype(str)
+            df["address"].astype(str) + ", " + city.astype(str) + ", " + state.astype(str) + " " + zip_.astype(str)
         ).str.strip(", ")
 
         # Generic files may already have lat/lon
         if "lat" in df.columns and "lon" in df.columns:
             df["lat"] = pd.to_numeric(df["lat"], errors="coerce")
             df["lon"] = pd.to_numeric(df["lon"], errors="coerce")
-            geocode_status = df["lat"].notna().map(
-                lambda v: "manual" if v else "pending"
-            )
+            geocode_status = df["lat"].notna().map(lambda v: "manual" if v else "pending")
         else:
             df["lat"] = None
             df["lon"] = None
             geocode_status = "pending"
 
         df["sale_id"] = df.apply(
-            lambda r: hashlib.md5(
-                f"generic:{r.get('address','')}{r.get('sold_date','')}".encode()
-            ).hexdigest()[:14], axis=1
+            lambda r: hashlib.md5(f"generic:{r.get('address', '')}{r.get('sold_date', '')}".encode()).hexdigest()[:14],
+            axis=1,
         )
 
         # Classify arm's-length (best effort with generic data)
         if "sale_code" in df.columns and "sale_desc" in df.columns:
-            alc = [_classify_arms_length(sc, sd, "", pr)
-                   for sc, sd, pr in zip(
-                       df["sale_code"].fillna(""),
-                       df["sale_desc"].fillna(""),
-                       df.get("sold_price", pd.Series([0]*len(df))).fillna(0)
-                   )]
+            alc = [
+                _classify_arms_length(sc, sd, "", pr)
+                for sc, sd, pr in zip(
+                    df["sale_code"].fillna(""),
+                    df["sale_desc"].fillna(""),
+                    df.get("sold_price", pd.Series([0] * len(df))).fillna(0),
+                )
+            ]
         else:
-            price = df.get("sold_price", pd.Series([0]*len(df))).fillna(0)
+            price = df.get("sold_price", pd.Series([0] * len(df))).fillna(0)
             alc = [(p > 1, "" if p > 1 else "Nominal price") for p in price]
 
         schema_cols = [
-            "sale_id", "source_county", "source_file", "parid",
-            "address", "city", "state", "zip", "full_address",
-            "sold_price", "sold_date", "record_date", "list_price",
-            "sqft", "beds", "baths", "year_built",
-            "sale_code", "sale_desc", "instr_type", "instr_type_desc",
-            "deed_book", "deed_page", "muni_code", "muni_desc",
-            "school_code", "school_desc",
-            "is_arms_length", "arms_length_flag",
-            "lat", "lon", "geocode_status", "geocode_source", "geocode_accuracy",
-            "tract_fips", "county_fips",
+            "sale_id",
+            "source_county",
+            "source_file",
+            "parid",
+            "address",
+            "city",
+            "state",
+            "zip",
+            "full_address",
+            "sold_price",
+            "sold_date",
+            "record_date",
+            "list_price",
+            "sqft",
+            "beds",
+            "baths",
+            "year_built",
+            "sale_code",
+            "sale_desc",
+            "instr_type",
+            "instr_type_desc",
+            "deed_book",
+            "deed_page",
+            "muni_code",
+            "muni_desc",
+            "school_code",
+            "school_desc",
+            "is_arms_length",
+            "arms_length_flag",
+            "lat",
+            "lon",
+            "geocode_status",
+            "geocode_source",
+            "geocode_accuracy",
+            "tract_fips",
+            "county_fips",
         ]
         for c in schema_cols:
             if c not in df.columns:
                 df[c] = None
 
-        df["source_county"]    = cls.county_name
-        df["source_file"]      = source_file
-        df["is_arms_length"]   = [r[0] for r in alc]
+        df["source_county"] = cls.county_name
+        df["source_file"] = source_file
+        df["is_arms_length"] = [r[0] for r in alc]
         df["arms_length_flag"] = [r[1] for r in alc]
-        df["geocode_status"]   = geocode_status
+        df["geocode_status"] = geocode_status
 
         return df[schema_cols]
 
@@ -372,7 +397,7 @@ _COUNTY_PARSERS = [AlleghenyParser, GenericSoldParser]
 def _detect_parser(columns: list[str]) -> type:
     """Return the first parser whose signature matches the file's columns."""
     upper = [c.upper() for c in columns]
-    for parser in _COUNTY_PARSERS[:-1]:   # skip generic
+    for parser in _COUNTY_PARSERS[:-1]:  # skip generic
         if parser.matches(upper):
             return parser
     return GenericSoldParser
@@ -380,21 +405,46 @@ def _detect_parser(columns: list[str]) -> type:
 
 # Full schema column list — must match sold_homes table exactly
 _SOLD_SCHEMA_COLS = [
-    "sale_id", "source_county", "source_file", "parid",
-    "address", "city", "state", "zip", "full_address",
-    "lat", "lon", "geocode_status", "geocode_source", "geocode_accuracy",
-    "sold_price", "sold_date", "record_date", "list_price",
-    "sqft", "beds", "baths", "year_built",
-    "sale_code", "sale_desc", "instr_type", "instr_type_desc",
-    "deed_book", "deed_page", "muni_code", "muni_desc",
-    "school_code", "school_desc",
-    "is_arms_length", "arms_length_flag",
-    "tract_fips", "county_fips",
+    "sale_id",
+    "source_county",
+    "source_file",
+    "parid",
+    "address",
+    "city",
+    "state",
+    "zip",
+    "full_address",
+    "lat",
+    "lon",
+    "geocode_status",
+    "geocode_source",
+    "geocode_accuracy",
+    "sold_price",
+    "sold_date",
+    "record_date",
+    "list_price",
+    "sqft",
+    "beds",
+    "baths",
+    "year_built",
+    "sale_code",
+    "sale_desc",
+    "instr_type",
+    "instr_type_desc",
+    "deed_book",
+    "deed_page",
+    "muni_code",
+    "muni_desc",
+    "school_code",
+    "school_desc",
+    "is_arms_length",
+    "arms_length_flag",
+    "tract_fips",
+    "county_fips",
 ]
 
 
-def load_sold_homes(run_geocoding: bool = True,
-                    geo_utils=None) -> int:
+def load_sold_homes(run_geocoding: bool = True, geo_utils=None) -> int:
     """
     Load all sold-homes CSV files from data/sold/.
     Auto-detects the county format and applies the correct parser.
@@ -430,7 +480,9 @@ def load_sold_homes(run_geocoding: bool = True,
             parsed = parser.parse(raw, source_file=path.name)
         except Exception as e:
             print(f"    Parse error: {e}")
-            import traceback; traceback.print_exc()
+            import traceback
+
+            traceback.print_exc()
             continue
 
         # Ensure all schema columns exist
@@ -439,10 +491,9 @@ def load_sold_homes(run_geocoding: bool = True,
                 parsed[col] = None
 
         all_rows.append(parsed[_SOLD_SCHEMA_COLS])
-        n_al  = int((parsed["is_arms_length"] == True).sum())
+        n_al = int((parsed["is_arms_length"] == True).sum())
         n_nal = int((parsed["is_arms_length"] == False).sum())
-        print(f"    {len(parsed)} records: "
-              f"{n_al} arm's-length, {n_nal} non-arm's-length flagged")
+        print(f"    {len(parsed)} records: {n_al} arm's-length, {n_nal} non-arm's-length flagged")
 
     if not all_rows:
         return 0
@@ -473,8 +524,6 @@ def load_sold_homes(run_geocoding: bool = True,
     store.upsert_df("sold_homes", combined)
 
     n_geocoded = int((combined["geocode_status"] == "success").sum())
-    n_pending  = int(combined["geocode_status"].isna().sum() +
-                     (combined["geocode_status"] == "pending").sum())
-    print(f"  ✓ {len(combined)} sold homes loaded "
-          f"({n_geocoded} geocoded, {n_pending} pending)")
+    n_pending = int(combined["geocode_status"].isna().sum() + (combined["geocode_status"] == "pending").sum())
+    print(f"  ✓ {len(combined)} sold homes loaded ({n_geocoded} geocoded, {n_pending} pending)")
     return len(combined)

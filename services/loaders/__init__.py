@@ -3,6 +3,7 @@
 Each module is the block that used to be a section of services/data_loader.py, moved without
 editing. The facade in that module re-exports every public and private name, so existing imports
 (`services.data_loader._clean_numeric`, `data_loader.load_crime`, ...) are unchanged."""
+
 from __future__ import annotations
 
 import warnings

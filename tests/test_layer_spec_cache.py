@@ -4,6 +4,7 @@
 real database - and every map pan used to pay for it. The cache is keyed on
 `schema.catalog_version()` and cleared explicitly after a data-only reload.
 """
+
 from services import map_layers
 
 
@@ -35,7 +36,7 @@ def test_invalidate_forces_a_rebuild(reference_data, monkeypatch):
     monkeypatch.setattr(map_layers, "_build_layer_specs", counted)
     map_layers.invalidate_caches()
     map_layers.derive_layer_specs()
-    map_layers.invalidate_caches()          # what services/data_sources.refresh_source does
+    map_layers.invalidate_caches()  # what services/data_sources.refresh_source does
     map_layers.derive_layer_specs()
     assert calls["build"] == 2
 
@@ -55,7 +56,7 @@ def test_a_new_catalog_version_invalidates_the_cache(reference_data, monkeypatch
 
     map_layers.derive_layer_specs()
     map_layers.derive_layer_specs()
-    map_layers.derive_layer_specs()         # catalog changed under the cache
+    map_layers.derive_layer_specs()  # catalog changed under the cache
     assert calls["build"] == 2
 
 
@@ -83,4 +84,4 @@ def test_describe_layers_is_cached_too(reference_data, monkeypatch):
     again = map_layers.describe_layers()
     assert calls["build"] == 1
     assert payload["catalog_version"] == again["catalog_version"]
-    assert payload["layers"][0]["name"] == "houses"        # the special, JS-driven layer
+    assert payload["layers"][0]["name"] == "houses"  # the special, JS-driven layer

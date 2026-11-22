@@ -10,6 +10,7 @@ Both requests are started before either is awaited, and each records when its re
 arrived. On a blocked loop the fast one cannot finish until the slow one is done; with the
 work off the loop it finishes while the slow one is still running.
 """
+
 import asyncio
 import time
 
@@ -25,6 +26,7 @@ def app(reference_data, tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "uploads_dir", tmp_path / "uploads")
     monkeypatch.setattr(ob, "warm_vector_index", lambda: False)
     import main
+
     return main.app
 
 
@@ -34,7 +36,7 @@ def test_a_slow_db_handler_leaves_the_loop_free_for_other_requests(app, monkeypa
     fast_reads = store.get_all_houses
 
     def slow_reads():
-        time.sleep(0.4)                     # stands in for the measured 1.9 s crime-heat query
+        time.sleep(0.4)  # stands in for the measured 1.9 s crime-heat query
         return fast_reads()
 
     monkeypatch.setattr(store, "get_all_houses", slow_reads)
@@ -45,6 +47,7 @@ def test_a_slow_db_handler_leaves_the_loop_free_for_other_requests(app, monkeypa
         started = time.perf_counter()
 
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+
             async def fetch(name: str, url: str) -> int:
                 response = await client.get(url)
                 ready[name] = time.perf_counter() - started
@@ -58,4 +61,6 @@ def test_a_slow_db_handler_leaves_the_loop_free_for_other_requests(app, monkeypa
 
     fast_done, slow_done = asyncio.run(scenario())
     assert slow_done >= 0.35, "the slow request was expected to still be working when the fast one finished"
-    assert fast_done < 0.25, f"the fast request waited {fast_done:.2f}s behind the slow one: a handler is back on the loop"
+    assert fast_done < 0.25, (
+        f"the fast request waited {fast_done:.2f}s behind the slow one: a handler is back on the loop"
+    )

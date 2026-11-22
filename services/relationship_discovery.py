@@ -16,6 +16,7 @@ Given an uploaded table (staged in DuckDB) this module
 There is no LLM here and no question-specific branching: candidates come from the catalog's own
 tables/columns, and every proposal is only ever *applied* after a person approves it.
 """
+
 from __future__ import annotations
 
 import re
@@ -32,12 +33,14 @@ from services.relationship_suggestions import suggest_pairs
 # Column profiling
 # ---------------------------------------------------------------------------
 
+
 def sql_family(sql_type: str) -> str:
     t = str(sql_type).upper()
     if t.startswith(("VARCHAR", "TEXT", "STRING", "CHAR")):
         return "text"
-    if t.startswith(("TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT",
-                     "UINTEGER", "UBIGINT", "INT")):
+    if t.startswith(
+        ("TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "INT")
+    ):
         return "int"
     if t.startswith(("DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC")):
         return "float"
@@ -59,8 +62,13 @@ def profile_table(conn, table: str, sample_rows: int = 5000) -> dict[str, dict]:
         aggs += [f"COUNT({q})", f"COUNT(DISTINCT {q})"]
         extra = 0
         if fam == "text":
-            aggs += [f"MIN(LENGTH({q}))", f"MAX(LENGTH({q}))", f"AVG(LENGTH({q}))", f"MODE(LENGTH({q}))",
-                     f"AVG(CASE WHEN regexp_matches({q}, '^[0-9]+$') THEN 1.0 ELSE 0.0 END)"]
+            aggs += [
+                f"MIN(LENGTH({q}))",
+                f"MAX(LENGTH({q}))",
+                f"AVG(LENGTH({q}))",
+                f"MODE(LENGTH({q}))",
+                f"AVG(CASE WHEN regexp_matches({q}, '^[0-9]+$') THEN 1.0 ELSE 0.0 END)",
+            ]
             extra = 5
         elif fam in ("int", "float"):
             aggs += [f"MIN({q})", f"MAX({q})", f"AVG({q})"]
@@ -72,14 +80,26 @@ def profile_table(conn, table: str, sample_rows: int = 5000) -> dict[str, dict]:
     pos = 0
     for c, t, fam, extra in layout:
         nn, nd = int(row[pos] or 0), int(row[pos + 1] or 0)
-        vals = row[pos + 2: pos + 2 + extra]
+        vals = row[pos + 2 : pos + 2 + extra]
         pos += 2 + extra
-        p: dict[str, Any] = {"name": c, "sql_type": t, "family": fam, "rows": n, "nulls": n - nn,
-                             "null_pct": round(100 * (n - nn) / n, 1) if n else 0.0,
-                             "distinct": nd, "unique_ratio": round(nd / nn, 4) if nn else 0.0}
+        p: dict[str, Any] = {
+            "name": c,
+            "sql_type": t,
+            "family": fam,
+            "rows": n,
+            "nulls": n - nn,
+            "null_pct": round(100 * (n - nn) / n, 1) if n else 0.0,
+            "distinct": nd,
+            "unique_ratio": round(nd / nn, 4) if nn else 0.0,
+        }
         if fam == "text":
-            p.update(min_len=vals[0], max_len=vals[1], avg_len=float(vals[2] or 0),
-                     mode_len=vals[3], digit_frac=float(vals[4] or 0))
+            p.update(
+                min_len=vals[0],
+                max_len=vals[1],
+                avg_len=float(vals[2] or 0),
+                mode_len=vals[3],
+                digit_frac=float(vals[4] or 0),
+            )
         elif fam in ("int", "float"):
             p.update(min=_num(vals[0]), max=_num(vals[1]), mean=_num(vals[2]))
         if c in head.columns:
@@ -103,16 +123,40 @@ def _num(v: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 # Which "name group" (see NAME_GROUPS) a detected key kind belongs to.
-KIND_GROUP = {"tract_fips": "tract", "block_group_fips": "tract", "block_fips": "tract",
-              "county_fips": "county_fips", "zip": "zip", "cbsa_code": "cbsa", "state_fips": "state_fips",
-              "state_abbr": "state", "city": "city", "house_id": "house", "parcel_id": "parcel"}
+KIND_GROUP = {
+    "tract_fips": "tract",
+    "block_group_fips": "tract",
+    "block_fips": "tract",
+    "county_fips": "county_fips",
+    "zip": "zip",
+    "cbsa_code": "cbsa",
+    "state_fips": "state_fips",
+    "state_abbr": "state",
+    "city": "city",
+    "house_id": "house",
+    "parcel_id": "parcel",
+}
 
 KEY_KINDS = set(KIND_GROUP) | {"code5", "lat", "lon", "address"}
 
 # Column-name families; used only to rank candidate pairs, never to decide a join on its own.
 NAME_GROUPS = {
-    "tract": {"tract", "tract_fips", "tractfips", "tract_id", "geoid", "geoid10", "geoid20",
-              "geoid_tract", "census_tract", "ct_fips", "fips_tract", "tract_geoid", "block_group", "blockgroup"},
+    "tract": {
+        "tract",
+        "tract_fips",
+        "tractfips",
+        "tract_id",
+        "geoid",
+        "geoid10",
+        "geoid20",
+        "geoid_tract",
+        "census_tract",
+        "ct_fips",
+        "fips_tract",
+        "tract_geoid",
+        "block_group",
+        "blockgroup",
+    },
     "county_fips": {"county_fips", "countyfips", "fips", "county_code", "cnty_fips", "fips_county"},
     "state_fips": {"state_fips", "statefips", "statefp", "state_code_fips"},
     "zip": {"zip", "zipcode", "zip_code", "postal", "postal_code", "postcode", "zip5"},
@@ -156,7 +200,7 @@ LON_NAMES = r"(lon|lng|long|longitude|lon_deg|xcoord|x)"
 
 def detect_key_kind(name: str, p: dict) -> str | None:
     n, fam = name.lower(), p.get("family")
-    if fam in ("float", "int"):    # a real-world upload can have whole-degree coordinates, inferred as int
+    if fam in ("float", "int"):  # a real-world upload can have whole-degree coordinates, inferred as int
         lo, hi = p.get("min"), p.get("max")
         if lo is not None and re.fullmatch(LAT_NAMES, n) and -90 <= lo and hi <= 90:
             return "lat"
@@ -195,15 +239,13 @@ def detect_key_kind(name: str, p: dict) -> str | None:
         return "house_id"
     if re.search(r"parcel|parid|apn", n):
         return "parcel_id"
-    if re.search(r"address|street|addr", n) and (p.get("avg_len") or 0) >= 8 \
-            and _sample_match(p, r"\d+\s+.+") >= 0.5:
+    if re.search(r"address|street|addr", n) and (p.get("avg_len") or 0) >= 8 and _sample_match(p, r"\d+\s+.+") >= 0.5:
         return "address"
     return None
 
 
 _SKIP_JOIN_NAMES = {"year", "yr", "month", "day", "quarter", "week", "date"}
-_GEO_NAMES = {"lat", "lon", "geometry_json", "min_lon", "min_lat", "max_lon", "max_lat",
-              "centroid_lat", "centroid_lon"}
+_GEO_NAMES = {"lat", "lon", "geometry_json", "min_lon", "min_lat", "max_lon", "max_lat", "centroid_lat", "centroid_lon"}
 
 
 def guess_role(name: str, p: dict, kind: str | None) -> str:
@@ -220,7 +262,9 @@ def guess_role(name: str, p: dict, kind: str | None) -> str:
         return "dimension"
     rows, distinct = p.get("rows", 0), p.get("distinct", 0)
     if fam in ("int", "float"):
-        if fam == "int" and (re.search(r"(^|_)id$", n) or (rows > 1 and p.get("unique_ratio") == 1.0 and distinct == rows)):
+        if fam == "int" and (
+            re.search(r"(^|_)id$", n) or (rows > 1 and p.get("unique_ratio") == 1.0 and distinct == rows)
+        ):
             return "key"
         lo, hi = p.get("min"), p.get("max")
         if n in ("year", "yr") or (fam == "int" and lo is not None and 1900 <= lo and hi <= 2100 and distinct <= 200):
@@ -305,7 +349,7 @@ def make_transforms(src: dict, tgt: dict) -> list[dict]:
         if tgt.get("digit_frac", 0) >= 0.95 and tgt.get("mode_len"):
             w = int(tgt["mode_len"])
             smin, smax, smode = src.get("min_len") or 0, src.get("max_len") or 0, src.get("mode_len") or 0
-            if w in _KEY_WIDTHS:      # complete identifiers only (county 5, tract 11, block group 12, block 15)
+            if w in _KEY_WIDTHS:  # complete identifiers only (county 5, tract 11, block group 12, block 15)
                 if src.get("digit_frac", 0) >= 0.95 and smax < w and smin >= w - 2:
                     out.append({"kind": "zfill", "width": w})
                 if smode and smode > w:
@@ -318,6 +362,7 @@ def make_transforms(src: dict, tgt: dict) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Evidence SQL
 # ---------------------------------------------------------------------------
+
 
 def eval_pair(conn, src: str, sx: str, tgt: str, tx: str) -> dict:
     """Value-containment statistics for ``sx`` (SQL over src) vs ``tx`` (SQL over tgt)."""
@@ -333,13 +378,20 @@ def eval_pair(conn, src: str, sx: str, tgt: str, tx: str) -> dict:
     v = [int(x or 0) for x in conn.execute(sql).fetchone()]
     l_distinct, l_rows, r_distinct, r_rows, matched, l_rows_m, r_rows_m, r_fan_max, l_dup, r_dup = v
     return {
-        "left_distinct": l_distinct, "left_rows": l_rows, "right_distinct": r_distinct, "right_rows": r_rows,
-        "matched_distinct": matched, "left_rows_matched": l_rows_m, "right_rows_matched": r_rows_m,
+        "left_distinct": l_distinct,
+        "left_rows": l_rows,
+        "right_distinct": r_distinct,
+        "right_rows": r_rows,
+        "matched_distinct": matched,
+        "left_rows_matched": l_rows_m,
+        "right_rows_matched": r_rows_m,
         "left_match_pct": round(100 * matched / l_distinct, 1) if l_distinct else 0.0,
         "right_covered_pct": round(100 * r_rows_m / r_rows, 1) if r_rows else 0.0,
         "left_rows_linked_pct": round(100 * l_rows_m / l_rows, 1) if l_rows else 0.0,
-        "fanout_avg": round(r_rows_m / matched, 2) if matched else 0.0, "fanout_max": r_fan_max,
-        "left_unique": l_dup <= 1, "right_unique": r_dup <= 1,
+        "fanout_avg": round(r_rows_m / matched, 2) if matched else 0.0,
+        "fanout_max": r_fan_max,
+        "left_unique": l_dup <= 1,
+        "right_unique": r_dup <= 1,
     }
 
 
@@ -359,8 +411,23 @@ def containment_score(stats: dict) -> float:
     return max(stats["left_match_pct"], stats["right_covered_pct"]) / 100.0
 
 
-_DISPLAY_PRIORITY = ["address", "full_address", "name", "title", "city", "county_name", "state", "state_name",
-                     "zip", "tract_fips", "house_id", "msa_code", "cbsa_title", "incident_id", "sale_id"]
+_DISPLAY_PRIORITY = [
+    "address",
+    "full_address",
+    "name",
+    "title",
+    "city",
+    "county_name",
+    "state",
+    "state_name",
+    "zip",
+    "tract_fips",
+    "house_id",
+    "msa_code",
+    "cbsa_title",
+    "incident_id",
+    "sale_id",
+]
 
 
 def display_columns(table: str, join_col: str, limit: int = 4) -> list[str]:
@@ -368,7 +435,7 @@ def display_columns(table: str, join_col: str, limit: int = 4) -> list[str]:
     meta = schema._tables().get(table)
     hidden = set(meta.hidden_columns) if meta else set()
     live = [c for c in live if c not in hidden and not c.endswith("_json")]
-    picked = [c for c in _DISPLAY_PRIORITY if c in live and c != join_col][:limit - 1]
+    picked = [c for c in _DISPLAY_PRIORITY if c in live and c != join_col][: limit - 1]
     for c in live:
         if len(picked) >= limit - 1:
             break
@@ -377,34 +444,49 @@ def display_columns(table: str, join_col: str, limit: int = 4) -> list[str]:
     return [join_col] + picked if join_col in live else picked[:limit]
 
 
-def build_examples(conn, src: str, raw_col: str, sx: str, tgt: str, tcol: str, ctx_cols: list[str],
-                   n: int = 5, tx: str | None = None) -> dict:
+def build_examples(
+    conn, src: str, raw_col: str, sx: str, tgt: str, tcol: str, ctx_cols: list[str], n: int = 5, tx: str | None = None
+) -> dict:
     """Concrete rows that show how the mapping works, plus values that found no match."""
     tx = tx or qi(tcol)
     base = f"""
     WITH l AS (SELECT {sx} AS k, MIN({qi(raw_col)}) AS raw, COUNT(*) AS n FROM {qi(src)}
                WHERE {sx} IS NOT NULL GROUP BY 1),
          r AS (SELECT DISTINCT {tx} AS k FROM {qi(tgt)} WHERE {tx} IS NOT NULL)"""
-    matched = conn.execute(base + f" SELECT l.k, l.raw, l.n FROM l JOIN r ON l.k = r.k "
-                                  f"ORDER BY l.n DESC, l.k LIMIT {n}").fetchall()
-    unmatched = conn.execute(base + f" SELECT l.k, l.raw, l.n FROM l WHERE l.k NOT IN (SELECT k FROM r) "
-                                    f"ORDER BY l.n DESC, l.k LIMIT {n}").fetchall()
+    matched = conn.execute(
+        base + f" SELECT l.k, l.raw, l.n FROM l JOIN r ON l.k = r.k ORDER BY l.n DESC, l.k LIMIT {n}"
+    ).fetchall()
+    unmatched = conn.execute(
+        base + f" SELECT l.k, l.raw, l.n FROM l WHERE l.k NOT IN (SELECT k FROM r) ORDER BY l.n DESC, l.k LIMIT {n}"
+    ).fetchall()
     disp = display_columns(tgt, tcol)
     examples = []
     for k, raw, cnt in matched:
         rows = conn.execute(
-            f"SELECT {', '.join(qi(c) for c in disp)} FROM {qi(tgt)} WHERE {tx} = ? LIMIT 3", [k]).fetchall()
+            f"SELECT {', '.join(qi(c) for c in disp)} FROM {qi(tgt)} WHERE {tx} = ? LIMIT 3", [k]
+        ).fetchall()
         total = int(conn.execute(f"SELECT COUNT(*) FROM {qi(tgt)} WHERE {tx} = ?", [k]).fetchone()[0])
         ctx = {}
         if ctx_cols:
-            cr = conn.execute(f"SELECT {', '.join(qi(c) for c in ctx_cols)} FROM {qi(src)} WHERE {sx} = ? LIMIT 1", [k]).fetchone()
+            cr = conn.execute(
+                f"SELECT {', '.join(qi(c) for c in ctx_cols)} FROM {qi(src)} WHERE {sx} = ? LIMIT 1", [k]
+            ).fetchone()
             ctx = {c: _cell(v) for c, v in zip(ctx_cols, cr)} if cr else {}
-        examples.append({"raw": _cell(raw), "normalized": _cell(k), "your_rows": int(cnt), "context": ctx,
-                         "match_count": total,
-                         "matches": [{c: _cell(v) for c, v in zip(disp, r)} for r in rows]})
-    return {"examples": examples, "unmatched": [{"raw": _cell(raw), "normalized": _cell(k), "your_rows": int(cnt)}
-                                                for k, raw, cnt in unmatched],
-            "target_columns": disp}
+        examples.append(
+            {
+                "raw": _cell(raw),
+                "normalized": _cell(k),
+                "your_rows": int(cnt),
+                "context": ctx,
+                "match_count": total,
+                "matches": [{c: _cell(v) for c, v in zip(disp, r)} for r in rows],
+            }
+        )
+    return {
+        "examples": examples,
+        "unmatched": [{"raw": _cell(raw), "normalized": _cell(k), "your_rows": int(cnt)} for k, raw, cnt in unmatched],
+        "target_columns": disp,
+    }
 
 
 def _cell(v: Any) -> Any:
@@ -419,11 +501,34 @@ def _cell(v: Any) -> Any:
 # Address-level link to houses (same normalisation tiers as match_sold_to_houses)
 # ---------------------------------------------------------------------------
 
-_SUFFIX_MAP = {"street": "st", "avenue": "av", "ave": "av", "boulevard": "blvd", "drive": "dr", "road": "rd",
-               "court": "ct", "lane": "ln", "place": "pl", "way": "wy", "terrace": "ter", "circle": "cir",
-               "trail": "trl", "highway": "hwy", "parkway": "pkwy", "pike": "pk"}
-_DIR = {"north": "n", "south": "s", "east": "e", "west": "w", "northeast": "ne", "northwest": "nw",
-        "southeast": "se", "southwest": "sw"}
+_SUFFIX_MAP = {
+    "street": "st",
+    "avenue": "av",
+    "ave": "av",
+    "boulevard": "blvd",
+    "drive": "dr",
+    "road": "rd",
+    "court": "ct",
+    "lane": "ln",
+    "place": "pl",
+    "way": "wy",
+    "terrace": "ter",
+    "circle": "cir",
+    "trail": "trl",
+    "highway": "hwy",
+    "parkway": "pkwy",
+    "pike": "pk",
+}
+_DIR = {
+    "north": "n",
+    "south": "s",
+    "east": "e",
+    "west": "w",
+    "northeast": "ne",
+    "northwest": "nw",
+    "southeast": "se",
+    "southwest": "sw",
+}
 
 
 def norm_address(addr: Any) -> str:
@@ -528,53 +633,93 @@ def _address_proposal(conn, dataset: dict, source_table: str) -> dict | None:
     for r in m.sort_values(["tier", "rid"]).head(5).itertuples(index=False):
         hrow = houses_idx.loc[r.house_id]
         src = info.loc[r.rid]
-        examples.append({
-            "raw": f"{src['address']}" + (f", {src['zip']}" if pd.notna(src["zip"]) else ""),
-            "normalized": f"{norm_address(src['address'])} | {str(src['zip'])[:5] if pd.notna(src['zip']) else str(src['city'])[:3].lower()}",
-            "your_rows": 1, "context": {}, "match_count": 1,
-            "tier": int(r.tier),
-            "matches": [{"address": hrow["address"], "city": hrow["city"], "zip": hrow["zip"], "house_id": r.house_id}]})
+        examples.append(
+            {
+                "raw": f"{src['address']}" + (f", {src['zip']}" if pd.notna(src["zip"]) else ""),
+                "normalized": f"{norm_address(src['address'])} | {str(src['zip'])[:5] if pd.notna(src['zip']) else str(src['city'])[:3].lower()}",
+                "your_rows": 1,
+                "context": {},
+                "match_count": 1,
+                "tier": int(r.tier),
+                "matches": [
+                    {"address": hrow["address"], "city": hrow["city"], "zip": hrow["zip"], "house_id": r.house_id}
+                ],
+            }
+        )
     matched_ids = set(m["rid"])
     um = rows[~rows["rid"].isin(matched_ids)].head(5)
     unmatched = [{"raw": str(a), "normalized": norm_address(a), "your_rows": 1} for a in um["address"]]
     card = "one-to-one" if n_matched == n_houses else "many-to-one"
-    stats = {"left_rows": total, "left_rows_matched": n_matched, "left_match_pct": round(100 * n_matched / max(total, 1), 1),
-             "right_rows": len(houses), "right_rows_matched": n_houses,
-             "right_covered_pct": round(100 * n_houses / len(houses), 1), "matched_distinct": n_houses,
-             "fanout_avg": round(n_matched / n_houses, 2), "fanout_max": int(per_house.max()),
-             "tiers": {str(k): int(v) for k, v in tiers.items()}, "left_unique": card == "one-to-one",
-             "right_unique": True, "left_distinct": total, "right_distinct": len(houses),
-             "left_rows_linked_pct": round(100 * n_matched / max(total, 1), 1)}
+    stats = {
+        "left_rows": total,
+        "left_rows_matched": n_matched,
+        "left_match_pct": round(100 * n_matched / max(total, 1), 1),
+        "right_rows": len(houses),
+        "right_rows_matched": n_houses,
+        "right_covered_pct": round(100 * n_houses / len(houses), 1),
+        "matched_distinct": n_houses,
+        "fanout_avg": round(n_matched / n_houses, 2),
+        "fanout_max": int(per_house.max()),
+        "tiers": {str(k): int(v) for k, v in tiers.items()},
+        "left_unique": card == "one-to-one",
+        "right_unique": True,
+        "left_distinct": total,
+        "right_distinct": len(houses),
+        "left_rows_linked_pct": round(100 * n_matched / max(total, 1), 1),
+    }
     warnings = []
     if stats["left_match_pct"] < 60:
-        warnings.append("Fewer than 60% of your rows matched a house; only rows whose address matches a saved house are linked.")
+        warnings.append(
+            "Fewer than 60% of your rows matched a house; only rows whose address matches a saved house are linked."
+        )
     if 2 in tiers or 3 in tiers:
         warnings.append("Some rows matched on house number + street name only (tiers 2-3); check the examples.")
     return {
         "kind": "relationship",
         "title": f"{dataset['table_name']} rows link to houses by address",
-        "summary": (f"Each {dataset['table_name']} row is linked to the saved house with the same street address "
-                    f"and ZIP (or city). {n_matched:,} of your {total:,} rows match {n_houses:,} of {len(houses):,} houses."),
+        "summary": (
+            f"Each {dataset['table_name']} row is linked to the saved house with the same street address "
+            f"and ZIP (or city). {n_matched:,} of your {total:,} rows match {n_houses:,} of {len(houses):,} houses."
+        ),
         "group_key": "address_house",
-        "payload": {"left_table": dataset["table_name"], "left_expr": "house_id", "right_table": "houses",
-                    "right_expr": "house_id", "cardinality": card, "confidence": "high" if stats["left_match_pct"] >= 60 else "medium",
-                    "preferred": True, "grain_effect": f"{dataset['table_name']} row -> house",
-                    "note": "Address-level link: normalised street address + ZIP (same tiers as sold-home matching).",
-                    "derive": {"kind": "address_house", "column": "house_id", "address_col": cols["address"],
-                               "zip_col": cols["zip"], "city_col": cols["city"],
-                               "rule": "Normalise the street address (abbreviate street types and directions, drop punctuation), then match on address + ZIP5; "
-                                       "fall back to house number + first street word + ZIP5."},
-                    "score": 1.0 if stats["left_match_pct"] >= 60 else 0.5},
-        "evidence": {"stats": stats, "transform": {"kind": "address", "label": "Normalised street address + ZIP"},
-                     "rule_text": "Normalise the street address (abbreviate street types and directions, drop punctuation), then match on address + ZIP5.",
-                     "examples": examples, "unmatched": unmatched, "target": "houses.house_id", "warnings": warnings,
-                     "target_columns": ["address", "city", "zip", "house_id"]},
+        "payload": {
+            "left_table": dataset["table_name"],
+            "left_expr": "house_id",
+            "right_table": "houses",
+            "right_expr": "house_id",
+            "cardinality": card,
+            "confidence": "high" if stats["left_match_pct"] >= 60 else "medium",
+            "preferred": True,
+            "grain_effect": f"{dataset['table_name']} row -> house",
+            "note": "Address-level link: normalised street address + ZIP (same tiers as sold-home matching).",
+            "derive": {
+                "kind": "address_house",
+                "column": "house_id",
+                "address_col": cols["address"],
+                "zip_col": cols["zip"],
+                "city_col": cols["city"],
+                "rule": "Normalise the street address (abbreviate street types and directions, drop punctuation), then match on address + ZIP5; "
+                "fall back to house number + first street word + ZIP5.",
+            },
+            "score": 1.0 if stats["left_match_pct"] >= 60 else 0.5,
+        },
+        "evidence": {
+            "stats": stats,
+            "transform": {"kind": "address", "label": "Normalised street address + ZIP"},
+            "rule_text": "Normalise the street address (abbreviate street types and directions, drop punctuation), then match on address + ZIP5.",
+            "examples": examples,
+            "unmatched": unmatched,
+            "target": "houses.house_id",
+            "warnings": warnings,
+            "target_columns": ["address", "city", "zip", "house_id"],
+        },
     }
 
 
 # ---------------------------------------------------------------------------
 # Candidate generation
 # ---------------------------------------------------------------------------
+
 
 def _target_columns(conn, exclude: set[str]) -> list[dict]:
     out = []
@@ -598,9 +743,17 @@ def _target_profile(conn, cache: dict, table: str, col: str, fam: str) -> dict:
         row = conn.execute(
             f"SELECT COUNT(*), COUNT({q}), COUNT(DISTINCT {q}), MIN(LENGTH({q})), MAX(LENGTH({q})), "
             f"MODE(LENGTH({q})), AVG(CASE WHEN regexp_matches({q}, '^[0-9]+$') THEN 1.0 ELSE 0.0 END) "
-            f"FROM {qi(table)}").fetchone()
-        p = {"family": "text", "rows": row[0], "distinct": row[2], "min_len": row[3], "max_len": row[4],
-             "mode_len": row[5], "digit_frac": float(row[6] or 0)}
+            f"FROM {qi(table)}"
+        ).fetchone()
+        p = {
+            "family": "text",
+            "rows": row[0],
+            "distinct": row[2],
+            "min_len": row[3],
+            "max_len": row[4],
+            "mode_len": row[5],
+            "digit_frac": float(row[6] or 0),
+        }
     else:
         row = conn.execute(f"SELECT COUNT(*), COUNT({q}), COUNT(DISTINCT {q}) FROM {qi(table)}").fetchone()
         p = {"family": "int", "rows": row[0], "distinct": row[2]}
@@ -623,8 +776,9 @@ def _explain(transform: dict, left: str, right_table: str, right_col: str) -> st
     return f"{right_table}.{right_col} {how}"
 
 
-def discover_relationships(conn, dataset: dict, source_table: str, *, max_evals: int = 60,
-                           budget_s: float = 25.0) -> list[dict]:
+def discover_relationships(
+    conn, dataset: dict, source_table: str, *, max_evals: int = 60, budget_s: float = 25.0
+) -> list[dict]:
     """Return relationship proposals (dicts ready for ``catalog_store.replace_proposals``)."""
     started = time.monotonic()
     final = dataset["table_name"]
@@ -643,8 +797,10 @@ def discover_relationships(conn, dataset: dict, source_table: str, *, max_evals:
     proposals: dict[str, dict] = {}
     evals = 0
     # Context shown next to each example: measures first, then genuine labels (city / address), never key fragments.
-    ctx_cols = ([c["name"] for c in included if c.get("role") == "measure"]
-                + [c["name"] for c in included if c.get("role") == "label" and c.get("key_kind") in ("city", "address")])[:3]
+    ctx_cols = (
+        [c["name"] for c in included if c.get("role") == "measure"]
+        + [c["name"] for c in included if c.get("role") == "label" and c.get("key_kind") in ("city", "address")]
+    )[:3]
 
     for col in included:
         cname = col["name"]
@@ -669,8 +825,11 @@ def discover_relationships(conn, dataset: dict, source_table: str, *, max_evals:
                 cands.append((max(ns, 0.9 if same_group else 0.0), t))
         cands.sort(key=lambda x: (-x[0], x[1]["table"], x[1]["column"]))
         name_based = {(t["table"], t["column"]) for _, t in cands[:10]}
-        suggested = [(name_score(cname, t["column"]), t) for t in llm_pairs.get(cname, [])
-                     if (t["table"], t["column"]) not in name_based]
+        suggested = [
+            (name_score(cname, t["column"]), t)
+            for t in llm_pairs.get(cname, [])
+            if (t["table"], t["column"]) not in name_based
+        ]
         for ns, t in cands[:10] + suggested:
             if evals >= max_evals or time.monotonic() - started > budget_s:
                 break
@@ -678,11 +837,13 @@ def discover_relationships(conn, dataset: dict, source_table: str, *, max_evals:
             if not tp["rows"] or tp["distinct"] < 2:
                 continue
             if tp.get("digit_frac", 0) >= 0.95 and (tp.get("mode_len") or 0) <= 3:
-                continue    # component codes (county 001, tract code 040100) repeat across states: not keys
-            best = None   # (score, transform, stats)
+                continue  # component codes (county 001, tract code 040100) repeat across states: not keys
+            best = None  # (score, transform, stats)
             for tr in make_transforms(p, tp):
                 evals += 1
-                st = eval_pair(conn, source_table, transform_sql(tr, qi(cname)), t["table"], target_sql(tr, qi(t["column"])))
+                st = eval_pair(
+                    conn, source_table, transform_sql(tr, qi(cname)), t["table"], target_sql(tr, qi(t["column"]))
+                )
                 cand = (containment_score(st), tr, st)
                 if best is None or _better(cand, best):
                     best = cand
@@ -693,8 +854,12 @@ def discover_relationships(conn, dataset: dict, source_table: str, *, max_evals:
                 continue
             card = cardinality_of(st)
             if card == "many-to-many" and (ns < 0.9 or kind in ("state_fips", "state_abbr")):
-                continue    # too coarse to be a useful join
-            conf = "high" if score >= 0.9 and (st["matched_distinct"] >= 3 or ns >= 0.9) else ("medium" if score >= 0.6 else "low")
+                continue  # too coarse to be a useful join
+            conf = (
+                "high"
+                if score >= 0.9 and (st["matched_distinct"] >= 3 or ns >= 0.9)
+                else ("medium" if score >= 0.6 else "low")
+            )
             derive = None
             left_expr = cname
             if tr["kind"] != "identity":
@@ -708,48 +873,90 @@ def discover_relationships(conn, dataset: dict, source_table: str, *, max_evals:
                     derived_names[dkey] = name
                     taken_cols.add(name)
                 left_expr = derived_names[dkey]
-                derive = {"kind": "sql", "column": left_expr, "from": cname, "transform": tr,
-                          "sql": transform_sql(tr, qi(cname)), "rule": transform_rule_text(tr, cname)}
+                derive = {
+                    "kind": "sql",
+                    "column": left_expr,
+                    "from": cname,
+                    "transform": tr,
+                    "sql": transform_sql(tr, qi(cname)),
+                    "rule": transform_rule_text(tr, cname),
+                }
             warnings = []
             if card == "many-to-many":
-                warnings.append("Rows on both sides repeat this key, so joining multiplies rows (for example, several "
-                                "records of yours per house). Averages over the joined result weight each record equally.")
+                warnings.append(
+                    "Rows on both sides repeat this key, so joining multiplies rows (for example, several "
+                    "records of yours per house). Averages over the joined result weight each record equally."
+                )
             if st["fanout_max"] > 100:
-                warnings.append(f"One key matches up to {st['fanout_max']:,} rows in {t['table']}; averages over the joined result are weighted by that repetition.")
+                warnings.append(
+                    f"One key matches up to {st['fanout_max']:,} rows in {t['table']}; averages over the joined result are weighted by that repetition."
+                )
             if score < 0.6:
                 warnings.append("Fewer than 60% of values match; check that the key's format is what you expect.")
             llm_suggested = (t["table"], t["column"]) not in name_based
             if llm_suggested:
-                warnings.append("The assistant suggested testing this pair because the names differ; the match below is measured "
-                                "from your data. Check the examples before approving.")
+                warnings.append(
+                    "The assistant suggested testing this pair because the names differ; the match below is measured "
+                    "from your data. Check the examples before approving."
+                )
             if tr["kind"] != "identity":
-                warnings.append(f"A new column '{left_expr}' will be added to {final} ({transform_rule_text(tr, cname).lower()}).")
-            ex = build_examples(conn, source_table, cname, transform_sql(tr, qi(cname)), t["table"], t["column"], ctx_cols,
-                                tx=target_sql(tr, qi(t["column"])))
-            direction = ("of your distinct values exist in the target" if st["left_match_pct"] >= st["right_covered_pct"]
-                         else "of target rows have a match in your data")
+                warnings.append(
+                    f"A new column '{left_expr}' will be added to {final} ({transform_rule_text(tr, cname).lower()})."
+                )
+            ex = build_examples(
+                conn,
+                source_table,
+                cname,
+                transform_sql(tr, qi(cname)),
+                t["table"],
+                t["column"],
+                ctx_cols,
+                tx=target_sql(tr, qi(t["column"])),
+            )
+            direction = (
+                "of your distinct values exist in the target"
+                if st["left_match_pct"] >= st["right_covered_pct"]
+                else "of target rows have a match in your data"
+            )
             right_expr = target_sql(tr, t["column"])
             rel_key = f"{final}:{left_expr}={t['table']}:{right_expr}"
             grp = f"{cname}|{transform_key(tr)}"
             proposals[rel_key] = {
                 "kind": "relationship",
                 "title": f"{final}.{left_expr} joins {t['table']}.{right_expr}",
-                "summary": (f"Each {final} row links to the {t['table']} rows where "
-                            f"{_explain(tr, cname, t['table'], right_expr)}. "
-                            f"{max(st['left_match_pct'], st['right_covered_pct']):g}% {direction}."),
+                "summary": (
+                    f"Each {final} row links to the {t['table']} rows where "
+                    f"{_explain(tr, cname, t['table'], right_expr)}. "
+                    f"{max(st['left_match_pct'], st['right_covered_pct']):g}% {direction}."
+                ),
                 "group_key": grp,
-                "payload": {"left_table": final, "left_expr": left_expr, "right_table": t["table"],
-                            "right_expr": right_expr, "cardinality": card, "confidence": conf,
-                            "preferred": (conf in ("high", "medium") and card != "many-to-many") or (conf == "high" and ns >= 0.9),
-                            "grain_effect": f"{final} row -> {t['table']} row(s)",
-                            "note": f"{_explain(tr, cname, t['table'], right_expr)}.",
-                            "derive": derive, "score": round(score, 3), "name_score": ns,
-                            **({"origin": "llm-suggested"} if llm_suggested else {})},
-                "evidence": {"stats": st, "transform": {**tr, "label": transform_rule_text(tr, cname)},
-                             "rule_text": transform_rule_text(tr, cname), "examples": ex["examples"],
-                             "unmatched": ex["unmatched"], "target": f"{t['table']}.{right_expr}",
-                             "target_columns": ex["target_columns"], "warnings": warnings,
-                             "source_column": cname},
+                "payload": {
+                    "left_table": final,
+                    "left_expr": left_expr,
+                    "right_table": t["table"],
+                    "right_expr": right_expr,
+                    "cardinality": card,
+                    "confidence": conf,
+                    "preferred": (conf in ("high", "medium") and card != "many-to-many")
+                    or (conf == "high" and ns >= 0.9),
+                    "grain_effect": f"{final} row -> {t['table']} row(s)",
+                    "note": f"{_explain(tr, cname, t['table'], right_expr)}.",
+                    "derive": derive,
+                    "score": round(score, 3),
+                    "name_score": ns,
+                    **({"origin": "llm-suggested"} if llm_suggested else {}),
+                },
+                "evidence": {
+                    "stats": st,
+                    "transform": {**tr, "label": transform_rule_text(tr, cname)},
+                    "rule_text": transform_rule_text(tr, cname),
+                    "examples": ex["examples"],
+                    "unmatched": ex["unmatched"],
+                    "target": f"{t['table']}.{right_expr}",
+                    "target_columns": ex["target_columns"],
+                    "warnings": warnings,
+                    "source_column": cname,
+                },
             }
 
     addr = _address_proposal(conn, dataset, source_table)

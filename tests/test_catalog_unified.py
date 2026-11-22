@@ -1,4 +1,5 @@
 """One catalog for built-in and uploaded data: seeded, persisted, transactional, hot-reloaded."""
+
 import pytest
 
 import db.schema_catalog as schema
@@ -38,9 +39,12 @@ def test_edited_rows_survive_a_seed_refresh_but_untouched_rows_are_refreshed(fre
 def test_registry_containers_are_refreshed_in_place(fresh_db):
     held_tables, held_rels = schema.TABLES, schema.RELATIONSHIPS
     schema.register_table(TableMeta(name="extra_data", description="x"), origin="upload", dataset_id="d1")
-    schema.register_relationship(Relationship("extra_data", "tract_fips", "houses", "tract_fips", cardinality="many-to-one"),
-                                 origin="upload", dataset_id="d1")
-    assert schema.TABLES is held_tables and "extra_data" in held_tables       # references held elsewhere stay valid
+    schema.register_relationship(
+        Relationship("extra_data", "tract_fips", "houses", "tract_fips", cardinality="many-to-one"),
+        origin="upload",
+        dataset_id="d1",
+    )
+    assert schema.TABLES is held_tables and "extra_data" in held_tables  # references held elsewhere stay valid
     assert schema.RELATIONSHIPS is held_rels and held_rels[-1].key() == "extra_data:tract_fips=houses:tract_fips"
     assert schema.TABLES["extra_data"].origin == "upload"
 
@@ -55,16 +59,19 @@ def test_a_failed_change_is_rolled_back_and_never_visible(fresh_db):
     assert list(schema.TABLES) == before
     conn = fresh_db.get_conn()
     assert conn.execute("SELECT COUNT(*) FROM catalog_tables WHERE name = 'half_done'").fetchone()[0] == 0
-    assert conn.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'half_done'").fetchone()[0] == 0
+    assert (
+        conn.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'half_done'").fetchone()[0] == 0
+    )
 
 
 def test_changes_persist_across_reconnects_and_the_registry_follows_the_database(fresh_db, tmp_path, monkeypatch):
     from config import settings
+
     schema.register_table(TableMeta(name="extra_data", description="x"), origin="upload", dataset_id="d1")
     fresh_db.close()
     fresh_db.get_conn()
-    assert "extra_data" in schema.TABLES                       # same file: still there after a restart
-    monkeypatch.setattr(settings, "duckdb_path", tmp_path / "other.duckdb")   # like the eval harness's fixture DB
+    assert "extra_data" in schema.TABLES  # same file: still there after a restart
+    monkeypatch.setattr(settings, "duckdb_path", tmp_path / "other.duckdb")  # like the eval harness's fixture DB
     fresh_db.close()
     assert "extra_data" not in schema.TABLES and "houses" in schema.TABLES
 
@@ -84,8 +91,16 @@ def test_revoke_and_retire_remove_objects_from_the_agents_view(fresh_db):
 
 def test_a_registered_concept_is_matched_by_the_planner_immediately(fresh_db):
     schema.register_table(TableMeta(name="walk_data", description="w"), origin="upload", dataset_id="d1")
-    concept = _concept("walk_data_idx", ["walk_data"], ["walkability index"], "walk", columns=("walk_data.idx",),
-                       operations=(AVG("walk_data.idx"),), grain="row", default_operation="avg")
+    concept = _concept(
+        "walk_data_idx",
+        ["walk_data"],
+        ["walkability index"],
+        "walk",
+        columns=("walk_data.idx",),
+        operations=(AVG("walk_data.idx"),),
+        grain="row",
+        default_operation="avg",
+    )
     schema.register_concept("walk_data_idx", concept, dataset_id="d1")
     keys = [m["key"] for m in schema.semantic_matches("what is the average walkability index")]
     assert "walk_data_idx" in keys

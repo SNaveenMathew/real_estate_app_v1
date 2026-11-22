@@ -11,6 +11,7 @@ Architecture:
   3. OutputGroundingGuardrail: Domain metric bounds validation (Walk/Bike scores in [0, 100]),
      factual grounding verification against tool output evidence, and hallucination prevention.
 """
+
 from __future__ import annotations
 
 import ast
@@ -26,12 +27,14 @@ from pydantic import BaseModel, Field
 try:
     import outlines
     import outlines_core
+
     OUTLINES_AVAILABLE = True
 except ImportError:
     OUTLINES_AVAILABLE = False
 
 
 # ── Guardrail Result Models ───────────────────────────────────────────────────
+
 
 @dataclass
 class GuardrailResult:
@@ -54,6 +57,7 @@ class GuardrailResult:
 
 class RealEstateMetricSchema(BaseModel):
     """Pydantic schema enforcing valid real estate metric bounds."""
+
     walk_score: Optional[int] = Field(default=None, ge=0, le=100)
     bike_score: Optional[int] = Field(default=None, ge=0, le=100)
     transit_score: Optional[int] = Field(default=None, ge=0, le=100)
@@ -65,14 +69,21 @@ class RealEstateMetricSchema(BaseModel):
 
 # ── 1. Input Guardrail ────────────────────────────────────────────────────────
 
+
 class InputGuardrail:
     """Fast, deterministic input guardrail protecting against prompt injection and malicious payloads."""
 
     # High-confidence prompt injection / system jailbreak signatures
     PROMPT_INJECTION_PATTERNS = [
-        re.compile(r"(?i)\b(?:ignore|disregard|forget|bypass|override)\s+(?:all\s+)?(?:previous|prior|above|existing)\s+(?:instructions|prompts|rules|guidelines|system\s+prompts)\b"),
-        re.compile(r"(?i)\b(?:you\s+are\s+now|act\s+as|switch\s+to|enter|act\s+in)\s+(?:in\s+)?(?:DAN|developer|jailbreak|unrestricted|god)\s+mode\b"),
-        re.compile(r"(?i)\b(?:reveal|show|print|display|output)\s+(?:your\s+)?(?:system\s+prompt|hidden\s+instructions|developer\s+mode|initial\s+prompt)\b"),
+        re.compile(
+            r"(?i)\b(?:ignore|disregard|forget|bypass|override)\s+(?:all\s+)?(?:previous|prior|above|existing)\s+(?:instructions|prompts|rules|guidelines|system\s+prompts)\b"
+        ),
+        re.compile(
+            r"(?i)\b(?:you\s+are\s+now|act\s+as|switch\s+to|enter|act\s+in)\s+(?:in\s+)?(?:DAN|developer|jailbreak|unrestricted|god)\s+mode\b"
+        ),
+        re.compile(
+            r"(?i)\b(?:reveal|show|print|display|output)\s+(?:your\s+)?(?:system\s+prompt|hidden\s+instructions|developer\s+mode|initial\s+prompt)\b"
+        ),
         re.compile(r"(?i)\b(?:output|print)\s+(?:your\s+)?(?:initial|system)\s+instructions\b"),
         re.compile(r"(?i)\bdo\s+anything\s+now\b"),
         re.compile(r"(?i)\bpretend\s+(?:you\s+have|to\s+have)\s+no\s+(?:rules|guidelines|safety|restrictions)\b"),
@@ -103,7 +114,7 @@ class InputGuardrail:
         if len(sanitized) > cls.MAX_INPUT_CHARS:
             reasons.append(f"Input exceeds maximum allowed length of {cls.MAX_INPUT_CHARS} characters.")
             risk_score += 0.5
-            sanitized = sanitized[:cls.MAX_INPUT_CHARS]
+            sanitized = sanitized[: cls.MAX_INPUT_CHARS]
 
         # 2. Prompt injection pattern detection
         matched_injections: list[str] = []
@@ -114,7 +125,9 @@ class InputGuardrail:
                 risk_score += 0.85
 
         if matched_injections:
-            reasons.append(f"Blocked potential prompt injection / jailbreak attempt: {', '.join(matched_injections[:2])}")
+            reasons.append(
+                f"Blocked potential prompt injection / jailbreak attempt: {', '.join(matched_injections[:2])}"
+            )
 
         passed = len(reasons) == 0 or risk_score < 0.8
         t1 = time.perf_counter()
@@ -131,13 +144,16 @@ class InputGuardrail:
 
 # ── 2. Code Agent & SQL Guardrail ─────────────────────────────────────────────
 
+
 class CodeAgentGuardrail:
     """Validates LLM-generated code programs and SQL queries against strict AST & safety constraints."""
 
     DISALLOWED_SQL_PATTERNS = [
         re.compile(r"(?i)\b(DROP|TRUNCATE|DELETE|UPDATE|INSERT|ALTER|CREATE|REPLACE|GRANT|REVOKE)\b"),
         re.compile(r"(?i)\b(ATTACH|DETACH|COPY|INSTALL|LOAD|IMPORT|EXPORT)\b"),
-        re.compile(r"(?i)\bread_csv\b|\bread_parquet\b|\bread_json\b"),  # prevent ad-hoc file reads outside approved tables
+        re.compile(
+            r"(?i)\bread_csv\b|\bread_parquet\b|\bread_json\b"
+        ),  # prevent ad-hoc file reads outside approved tables
     ]
 
     @classmethod
@@ -241,6 +257,7 @@ class CodeAgentGuardrail:
 
 # ── 3. Output Grounding & Metric Guardrail ────────────────────────────────────
 
+
 class OutputGroundingGuardrail:
     """Verifies output truthfulness, domain metric bounds, and hallucination prevention."""
 
@@ -290,7 +307,9 @@ class OutputGroundingGuardrail:
         ensure the LLM never invents a number.
         """
         q_lower = user_question.lower()
-        score_keywords = ["walkability", "walk score", "walkable"] if "walk" in score_name.lower() else [score_name.lower()]
+        score_keywords = (
+            ["walkability", "walk score", "walkable"] if "walk" in score_name.lower() else [score_name.lower()]
+        )
 
         if any(kw in q_lower for kw in score_keywords) and score_value_in_db is None:
             # Check if reply tried to invent a numeric score
@@ -306,6 +325,7 @@ class OutputGroundingGuardrail:
 
 
 # ── Global Guardrail Manager ──────────────────────────────────────────────────
+
 
 class GuardrailManager:
     """Unified entrypoint for executing and monitoring guardrails across the application."""

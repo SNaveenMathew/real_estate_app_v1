@@ -13,6 +13,7 @@ The LLM therefore decides WHAT computation is needed and WHICH approved
 function(s) to call by generating code.  The application owns execution and
 security; it never regex-classifies the user's intent to choose a tool.
 """
+
 from __future__ import annotations
 
 import ast
@@ -64,6 +65,7 @@ APPROVED_FUNCTIONS = {
     "search_all_house_descriptions": search_all_house_descriptions,
 }
 
+
 def _invoke_approved(name: str, function_obj, args: tuple[Any, ...], kwargs: dict[str, Any]):
     """Invoke an approved application function robustly.
 
@@ -81,14 +83,10 @@ def _invoke_approved(name: str, function_obj, args: tuple[Any, ...], kwargs: dic
             fields = list(inspect.signature(function_obj).parameters.keys())
 
         if len(args) > len(fields):
-            raise CodeAgentProgramError(
-                f"Too many positional arguments for approved function '{name}'."
-            )
+            raise CodeAgentProgramError(f"Too many positional arguments for approved function '{name}'.")
         for field, value in zip(fields, args):
             if field in kwargs:
-                raise CodeAgentProgramError(
-                    f"Argument '{field}' was supplied both positionally and by keyword."
-                )
+                raise CodeAgentProgramError(f"Argument '{field}' was supplied both positionally and by keyword.")
             kwargs[field] = value
 
     if hasattr(function_obj, "invoke"):
@@ -165,6 +163,7 @@ def _validate_program(source: str) -> ast.Module:
         raise CodeAgentProgramError("Generated code exceeded the maximum size.")
 
     from services.guardrails import CodeAgentGuardrail
+
     guard_res = CodeAgentGuardrail.validate_code_program(
         source, set(APPROVED_FUNCTIONS.keys()), max_chars=CODE_AGENT_MAX_CHARS
     )
@@ -178,7 +177,12 @@ def _validate_program(source: str) -> ast.Module:
 
     allowed_stmt = (ast.Assign, ast.Expr)
     allowed_expr = (
-        ast.Call, ast.Constant, ast.Name, ast.Dict, ast.List, ast.Tuple,
+        ast.Call,
+        ast.Constant,
+        ast.Name,
+        ast.Dict,
+        ast.List,
+        ast.Tuple,
         ast.keyword,
     )
 
@@ -234,12 +238,15 @@ def _execute_program(source: str) -> tuple[Any, list[tuple[str, Any]]]:
 
     namespace: dict[str, Any] = {}
     for name, fn in APPROVED_FUNCTIONS.items():
+
         def make_wrapper(function_name: str, function_obj):
             def wrapped(*args, **kwargs):
                 result = _invoke_approved(function_name, function_obj, args, kwargs)
                 calls.append((function_name, result))
                 return result
+
             return wrapped
+
         namespace[name] = make_wrapper(name, fn)
 
     namespace["__builtins__"] = {}
@@ -460,7 +467,9 @@ def _program_semantic_consistency_errors(source: str, user_message: str, query_p
     return errors
 
 
-def _generate_program(user_message: str, history: list[dict] | None, prior_evidence: str = "", data_model_context: str = "") -> str:
+def _generate_program(
+    user_message: str, history: list[dict] | None, prior_evidence: str = "", data_model_context: str = ""
+) -> str:
     query_plan = build_query_plan(user_message)
     prompt = [
         _get_data_availability_context(),
@@ -473,12 +482,16 @@ def _generate_program(user_message: str, history: list[dict] | None, prior_evide
         prompt.append("EXECUTED EVIDENCE FROM A PREVIOUS STEP:\n" + prior_evidence[:12000])
     prompt.append("Generate the next small Python program now.")
     try:
-        response = llm_resilience.invoke(_get_code_agent(), [
-            SystemMessage(content="\n\n".join(prompt)),
-            HumanMessage(content=user_message),
-        ], role="code_agent")
+        response = llm_resilience.invoke(
+            _get_code_agent(),
+            [
+                SystemMessage(content="\n\n".join(prompt)),
+                HumanMessage(content=user_message),
+            ],
+            role="code_agent",
+        )
     except llm_resilience.ModelUnavailable:
-        return _deterministic_program(user_message, query_plan)   # model down: degrade, do not fail
+        return _deterministic_program(user_message, query_plan)  # model down: degrade, do not fail
     code = _clean_code(_extract_text(response))
     if code:
         try:
@@ -508,12 +521,16 @@ def _generate_program(user_message: str, history: list[dict] | None, prior_evide
         "Do not invent filters, tables, relationships, or geography grains."
     )
     try:
-        retry = llm_resilience.invoke(_get_code_agent(), [
-            SystemMessage(content=retry_prompt + f"\nFIRST GENERATION ERROR: {first_error}"),
-            HumanMessage(content="Generate the statement now."),
-        ], role="code_agent")
+        retry = llm_resilience.invoke(
+            _get_code_agent(),
+            [
+                SystemMessage(content=retry_prompt + f"\nFIRST GENERATION ERROR: {first_error}"),
+                HumanMessage(content="Generate the statement now."),
+            ],
+            role="code_agent",
+        )
     except llm_resilience.ModelUnavailable:
-        return _deterministic_program(user_message, query_plan)   # model down: degrade, do not fail
+        return _deterministic_program(user_message, query_plan)  # model down: degrade, do not fail
     retry_code = _clean_code(_extract_text(retry))
     if retry_code:
         try:
@@ -586,13 +603,21 @@ def _write_final_answer_with_model(user_message: str, history: list[dict] | None
     context = _messages_to_text(history, user_message)
     prompt = (
         FINAL_RESPONSE_PROMPT
-        + "\n\nCONVERSATION:\n" + context
-        + "\n\nEXECUTED EVIDENCE:\n" + evidence[:FINAL_RESPONSE_MAX_CHARS]
+        + "\n\nCONVERSATION:\n"
+        + context
+        + "\n\nEXECUTED EVIDENCE:\n"
+        + evidence[:FINAL_RESPONSE_MAX_CHARS]
     )
-    response = llm_resilience.invoke(_get_response_agent(), [
-        SystemMessage(content=prompt),
-        HumanMessage(content="Write the final answer to the user's current request. Return non-empty text grounded in the evidence."),
-    ], role="response_agent")
+    response = llm_resilience.invoke(
+        _get_response_agent(),
+        [
+            SystemMessage(content=prompt),
+            HumanMessage(
+                content="Write the final answer to the user's current request. Return non-empty text grounded in the evidence."
+            ),
+        ],
+        role="response_agent",
+    )
     answer = _extract_text(response)
     if answer:
         return answer
@@ -604,10 +629,14 @@ def _write_final_answer_with_model(user_message: str, history: list[dict] | None
         "Do not invent facts. Return concise, non-empty plain text or markdown.\n\n"
         f"USER REQUEST:\n{user_message}\n\nEVIDENCE:\n{evidence[:12000]}"
     )
-    retry = llm_resilience.invoke(_get_response_agent(), [
-        SystemMessage(content=retry_prompt),
-        HumanMessage(content="Answer now."),
-    ], role="response_agent")
+    retry = llm_resilience.invoke(
+        _get_response_agent(),
+        [
+            SystemMessage(content=retry_prompt),
+            HumanMessage(content="Answer now."),
+        ],
+        role="response_agent",
+    )
     answer = _extract_text(retry)
     return answer or _extract_query_result_fallback(evidence)
 
@@ -619,10 +648,14 @@ def _write_final_answer(user_message: str, history: list[dict] | None, evidence:
     except llm_resilience.ModelUnavailable:
         body = _extract_query_result_fallback(evidence).strip()
         if not body:
-            return ("The language model service is not responding and this question needs it. Nothing was estimated; "
-                    "please try again in a minute.")
-        return ("(The language model service is not responding, so this is the data the app retrieved without it, "
-                "not a written answer.)\n\n" + body)
+            return (
+                "The language model service is not responding and this question needs it. Nothing was estimated; "
+                "please try again in a minute."
+            )
+        return (
+            "(The language model service is not responding, so this is the data the app retrieved without it, "
+            "not a written answer.)\n\n" + body
+        )
 
 
 def run_general_chat(
@@ -633,6 +666,7 @@ def run_general_chat(
 ):
     """Run the General Chat Code Agent and emit one Phoenix trace per answer."""
     from agents.artifacts import reset_artifacts, collect_artifacts
+
     reset_artifacts()  # this turn's table/chart/map artifacts start empty (agents/artifacts.py)
 
     from time import perf_counter
@@ -651,6 +685,7 @@ def run_general_chat(
     root_context, root_span, trace_id, trace_url = start_general_chat(message, session_id, len(history or []))
 
     from services.guardrails import GuardrailManager
+
     try:
         input_guard = GuardrailManager.inspect_turn_input(message)
     except Exception as exc:
@@ -688,11 +723,16 @@ def run_general_chat(
             tool_call_count=0,
         )
         if include_metadata:
-            return blocked_reply, updated_history, [], {
-                "trace_id": trace_id,
-                "trace_url": trace_url,
-                "guardrail": input_guard.to_dict(),
-            }
+            return (
+                blocked_reply,
+                updated_history,
+                [],
+                {
+                    "trace_id": trace_id,
+                    "trace_url": trace_url,
+                    "guardrail": input_guard.to_dict(),
+                },
+            )
         return blocked_reply, updated_history
 
     all_tool_messages: list[ToolMessage] = []
@@ -701,6 +741,7 @@ def run_general_chat(
 
     try:
         from agents.turn_progress import get_current_tracker
+
         tracker = get_current_tracker()
         evidence = ""
         if tracker:
@@ -734,12 +775,18 @@ def run_general_chat(
                     "code_agent.step": step + 1,
                 },
             ) as code_span:
-                set_span_input(code_span, {
-                    "message": message,
-                    "prior_evidence": evidence[:6000],
-                }, mime_type="application/json")
+                set_span_input(
+                    code_span,
+                    {
+                        "message": message,
+                        "prior_evidence": evidence[:6000],
+                    },
+                    mime_type="application/json",
+                )
                 try:
-                    program = _generate_program(message, history, prior_evidence=evidence, data_model_context=str(model_context))
+                    program = _generate_program(
+                        message, history, prior_evidence=evidence, data_model_context=str(model_context)
+                    )
                     generated_programs.append(program)
                     set_span_output(code_span, {"generated_code": program}, mime_type="application/json")
                 except Exception as exc:
@@ -763,10 +810,14 @@ def run_general_chat(
                     step_evidence = _render_evidence(calls)
                     evidence = (evidence + "\n\n" + step_evidence).strip()
                     all_tool_messages.extend(_tool_messages_from_calls(calls))
-                    set_span_output(exec_span, {
-                        "function_calls": [name for name, _ in calls],
-                        "result": final_result,
-                    }, mime_type="application/json")
+                    set_span_output(
+                        exec_span,
+                        {
+                            "function_calls": [name for name, _ in calls],
+                            "result": final_result,
+                        },
+                        mime_type="application/json",
+                    )
                 except Exception as exc:
                     mark_span_error(exec_span, exc)
                     # A malformed recovery program from a local model should not
@@ -790,15 +841,25 @@ def run_general_chat(
                 # or SQL fixes in application code.
                 names = [name for name, _ in calls]
                 step_failed = any(
-                    isinstance(result, str) and
-                    ("Query returned 0 rows" in result
-                     or "Code Agent error:" in result
-                     or "does not match" in result.lower()
-                     or "join" in result.lower() and "likely" in result.lower()
-                     or answer_status.is_retryable(result))     # NOT_ANSWERED a reworded request could fix
+                    isinstance(result, str)
+                    and (
+                        "Query returned 0 rows" in result
+                        or "Code Agent error:" in result
+                        or "does not match" in result.lower()
+                        or "join" in result.lower()
+                        and "likely" in result.lower()
+                        or answer_status.is_retryable(result)
+                    )  # NOT_ANSWERED a reworded request could fix
                     for _, result in calls
                 )
-                if not any(name in {"query_database", "find_bike_route", "find_transit_route", "search_all_house_descriptions"} for name in names) or step_failed:
+                if (
+                    not any(
+                        name
+                        in {"query_database", "find_bike_route", "find_transit_route", "search_all_house_descriptions"}
+                        for name in names
+                    )
+                    or step_failed
+                ):
                     continue
             break
 
@@ -809,7 +870,9 @@ def run_general_chat(
             "general_chat.response",
             attributes={"openinference.span.kind": "LLM"},
         ) as response_span:
-            set_span_input(response_span, {"message": message, "evidence": evidence[:12000]}, mime_type="application/json")
+            set_span_input(
+                response_span, {"message": message, "evidence": evidence[:12000]}, mime_type="application/json"
+            )
             raw_reply = _write_final_answer(message, history, evidence)
             set_span_output(response_span, {"reply": raw_reply}, mime_type="application/json")
 
@@ -852,11 +915,16 @@ def run_general_chat(
         )
 
         if include_metadata:
-            return reply, updated_history, artifacts, {
-                "trace_id": trace_id,
-                "trace_url": trace_url,
-                "generated_code": generated_programs,
-            }
+            return (
+                reply,
+                updated_history,
+                artifacts,
+                {
+                    "trace_id": trace_id,
+                    "trace_url": trace_url,
+                    "generated_code": generated_programs,
+                },
+            )
         return reply, updated_history
     except Exception as exc:
         mark_span_error(root_span, exc)

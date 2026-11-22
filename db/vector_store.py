@@ -3,6 +3,7 @@ ChromaDB vector store.
 One collection `house_documents` stores all text/image descriptions.
 Each document is tagged with house_id so we can filter per house.
 """
+
 import base64
 import hashlib
 import threading
@@ -68,8 +69,7 @@ def _make_id(house_id: str, text: str) -> str:
     return f"{house_id}_{h}"
 
 
-def add_document(house_id: str, text: str, doc_type: str = "description",
-                 metadata: dict = None) -> str:
+def add_document(house_id: str, text: str, doc_type: str = "description", metadata: dict = None) -> str:
     """Embed and store a text document for a house. Returns document id."""
     col = _get_collection()
     emb = _get_embeddings()
@@ -92,8 +92,7 @@ def add_document(house_id: str, text: str, doc_type: str = "description",
 def add_photo(house_id: str, file_path: Path, caption: str = "") -> str:
     """Store a photo reference. Caption (if provided) is embedded."""
     text = f"[Photo] {file_path.name}. {caption}".strip()
-    return add_document(house_id, text, doc_type="photo",
-                        metadata={"file_path": str(file_path)})
+    return add_document(house_id, text, doc_type="photo", metadata={"file_path": str(file_path)})
 
 
 def search_house(house_id: str, query: str, n_results: int = 4) -> list[dict]:
@@ -126,8 +125,7 @@ def search_all(query: str, n_results: int = 6) -> list[dict]:
 def get_house_documents(house_id: str) -> list[dict]:
     """Return all stored documents for a house."""
     col = _get_collection()
-    results = col.get(where={"house_id": {"$eq": house_id}},
-                      include=["documents", "metadatas"])
+    results = col.get(where={"house_id": {"$eq": house_id}}, include=["documents", "metadatas"])
     if not results["ids"]:
         return []
     return [
@@ -173,8 +171,7 @@ def _format_results(results: dict) -> list[dict]:
     if not results["ids"] or not results["ids"][0]:
         return out
     for doc_id, doc, meta, dist in zip(
-        results["ids"][0], results["documents"][0],
-        results["metadatas"][0], results["distances"][0]
+        results["ids"][0], results["documents"][0], results["metadatas"][0], results["distances"][0]
     ):
         out.append({"id": doc_id, "text": doc, "metadata": meta, "score": 1 - dist})
     return out
@@ -183,9 +180,11 @@ def _format_results(results: dict) -> list[dict]:
 def collection_count() -> int:
     return _get_collection().count()
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Data-model RAG
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _schema_collection():
     client = _get_client()
@@ -198,20 +197,33 @@ def _schema_collection():
 def _schema_documents():
     """Build deterministic retrieval documents from the declarative catalog."""
     from db import schema_catalog as schema
+
     docs = []
     for name, meta in schema.TABLES.items():
         if not meta.agent_visible:
             continue
         cols = ", ".join(c for c, _ in schema._live_columns(name) if c not in meta.hidden_columns)
         notes = " ".join(f"{n.column}: {n.note}" for n in meta.column_notes)
-        docs.append((f"table:{name}", f"TABLE {name}. {meta.description} Grain={meta.grain}. Columns={cols}. Notes={notes}"))
+        docs.append(
+            (f"table:{name}", f"TABLE {name}. {meta.description} Grain={meta.grain}. Columns={cols}. Notes={notes}")
+        )
     for rel in schema.RELATIONSHIPS:
         docs.append((f"relationship:{rel.key()}", f"RELATIONSHIP {rel.render()}"))
     for domain in schema.ENTITY_DOMAINS:
-        docs.append((f"entity:{domain.name}", f"ENTITY DOMAIN {domain.name}. Type={domain.entity_type}. Source={domain.table}.{domain.column}. Match={domain.match_mode}. {domain.description}. Preferred for={domain.preferred_for}"))
+        docs.append(
+            (
+                f"entity:{domain.name}",
+                f"ENTITY DOMAIN {domain.name}. Type={domain.entity_type}. Source={domain.table}.{domain.column}. Match={domain.match_mode}. {domain.description}. Preferred for={domain.preferred_for}",
+            )
+        )
     for key, item in schema.SEMANTIC_GLOSSARY.items():
         ops = "; ".join(str(o) for o in item.get("operations", []))
-        docs.append((f"semantic:{key}", f"SEMANTIC {key}. {item.get('description','')} Tables={item.get('tables',[])} Columns={item.get('columns',[])} Aliases={item.get('aliases',[])} Operations={ops} Filters={item.get('filters',[])} Grain={item.get('grain','')} EntityTypes={item.get('entity_types',[])} Rollup={item.get('rollup',False)} RollupSpec={item.get('rollup_spec',{})} RequiredTerms={item.get('required_terms',[])}"))
+        docs.append(
+            (
+                f"semantic:{key}",
+                f"SEMANTIC {key}. {item.get('description', '')} Tables={item.get('tables', [])} Columns={item.get('columns', [])} Aliases={item.get('aliases', [])} Operations={ops} Filters={item.get('filters', [])} Grain={item.get('grain', '')} EntityTypes={item.get('entity_types', [])} Rollup={item.get('rollup', False)} RollupSpec={item.get('rollup_spec', {})} RequiredTerms={item.get('required_terms', [])}",
+            )
+        )
     return docs
 
 
@@ -231,6 +243,7 @@ def ensure_schema_metadata_index(force: bool = False) -> int:
     """
     global _SYNCED_CATALOG_VERSION
     from db import schema_catalog as schema
+
     docs = _schema_documents()
     version = schema.catalog_version()
     if not force and _SYNCED_CATALOG_VERSION == version:
@@ -282,6 +295,7 @@ def search_data_model(query: str, n_results: int = 10) -> list[dict]:
     # unified catalog the planner reads, so it is current even if Chroma/Ollama are down or the vector
     # index has not been refreshed since the last approval.
     import re
+
     q_tokens = set(re.findall(r"[a-z0-9_]+", (query or "").lower()))
     scored = []
     for doc_id, doc in _schema_documents():

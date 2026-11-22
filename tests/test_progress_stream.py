@@ -5,6 +5,7 @@
 final `is_complete` one - could sit in the queue until the 10 s keep-alive ping. The
 listener hands the put to the loop with `call_soon_threadsafe` instead.
 """
+
 import asyncio
 import threading
 
@@ -42,4 +43,4 @@ def test_a_closed_loop_is_not_an_error():
     queue: asyncio.Queue = asyncio.Queue()
     listener = _queue_listener(queue, loop)
     loop.close()
-    listener({"is_complete": True})          # the tab went away: must not raise
+    listener({"is_complete": True})  # the tab went away: must not raise

@@ -3,6 +3,7 @@
 Behaviour is unchanged: the facade in services/data_loader.py re-exports every name here, so
 `from services.data_loader import ...` (and scripts that call it) keep working.
 """
+
 from __future__ import annotations
 
 """
@@ -19,18 +20,34 @@ import db.duckdb_store as store
 from services.zillow_sources import ZhviParser, MarketHeatIndexParser
 
 
-
 from services.loaders.census import _build_cbsa_lookup, _match_msa_to_cbsa
 
-__all__ = ['_ZILLOW_ID_COLS', '_ZILLOW_UPSERT_CHUNK_ROWS', '_compute_zillow_msa_codes', '_finish_zillow_load', 'load_zhvi', 'load_market_heat_index']
+__all__ = [
+    "_ZILLOW_ID_COLS",
+    "_ZILLOW_UPSERT_CHUNK_ROWS",
+    "_compute_zillow_msa_codes",
+    "_finish_zillow_load",
+    "load_zhvi",
+    "load_market_heat_index",
+]
 
 # ── Zillow Research Data (ZHVI + Market Heat Index) ──────────────────────────
 # Source: https://www.zillow.com/research/data/ — see services/zillow_sources.py
 # for the shared wide-to-long parser both of these build on.
 
-_ZILLOW_ID_COLS = ["region_id", "region_type", "region_name", "size_rank",
-                   "state_name", "state", "city", "metro", "county_name",
-                   "msa_code", "date"]
+_ZILLOW_ID_COLS = [
+    "region_id",
+    "region_type",
+    "region_name",
+    "size_rank",
+    "state_name",
+    "state",
+    "city",
+    "metro",
+    "county_name",
+    "msa_code",
+    "date",
+]
 
 # A neighborhood- or zip-level ZHVI export can melt out to several million rows.
 # INSERT OR REPLACE against a same-sized existing table (re-running the loader
@@ -79,9 +96,11 @@ def _compute_zillow_msa_codes(df: pd.DataFrame) -> pd.Series:
         cbsa_df = pd.DataFrame(columns=["cbsa_code", "cbsa_title"])
 
     if cbsa_df.empty:
-        print("    Note: cbsa_counties is empty, so msa_code will be NULL for this load "
-              "(metro-level fallback matching won't be available for these rows). "
-              "Run `python setup_data.py --only census` first to enable it, then reload.")
+        print(
+            "    Note: cbsa_counties is empty, so msa_code will be NULL for this load "
+            "(metro-level fallback matching won't be available for these rows). "
+            "Run `python setup_data.py --only census` first to enable it, then reload."
+        )
         return pd.Series(None, index=df.index, dtype="object")
 
     cbsa_lookup = _build_cbsa_lookup(cbsa_df)
@@ -124,7 +143,7 @@ def _finish_zillow_load(long_df: pd.DataFrame, value_col: str, table: str, label
     total = len(out)
     n_chunks = max(1, math.ceil(total / _ZILLOW_UPSERT_CHUNK_ROWS))
     for i in range(n_chunks):
-        chunk = out.iloc[i * _ZILLOW_UPSERT_CHUNK_ROWS: (i + 1) * _ZILLOW_UPSERT_CHUNK_ROWS]
+        chunk = out.iloc[i * _ZILLOW_UPSERT_CHUNK_ROWS : (i + 1) * _ZILLOW_UPSERT_CHUNK_ROWS]
         store.upsert_df(table, chunk)
         if n_chunks > 1:
             print(f"    Upserted chunk {i + 1}/{n_chunks} ({len(chunk):,} rows)")
@@ -161,5 +180,6 @@ def load_market_heat_index() -> int:
     Heat Index" -> pick a geography -> save the CSV into data/market_heat_index/.
     """
     long_df = MarketHeatIndexParser.load_dir(settings.market_heat_dir)
-    return _finish_zillow_load(long_df, MarketHeatIndexParser.value_column,
-                                MarketHeatIndexParser.table, MarketHeatIndexParser.label)
+    return _finish_zillow_load(
+        long_df, MarketHeatIndexParser.value_column, MarketHeatIndexParser.table, MarketHeatIndexParser.label
+    )

@@ -12,6 +12,7 @@ The pipeline is a fixed, deterministic sequence of stages; a model is used only 
 Approved changes are written through ``db.schema_catalog`` in ONE transaction and the in-memory
 registry is reloaded on commit, so General Chat and House Chat see them on their next turn.
 """
+
 from __future__ import annotations
 
 import re
@@ -26,8 +27,19 @@ import db.duckdb_store as store
 import db.schema_catalog as schema
 from config import settings
 from db import catalog_store
-from db.catalog_model import (AVG, MAX, MEDIAN, MIN, RANK_ASC, RANK_DESC, SUM, EntityDomain,
-                              Relationship, TableMeta, _concept)
+from db.catalog_model import (
+    AVG,
+    MAX,
+    MEDIAN,
+    MIN,
+    RANK_ASC,
+    RANK_DESC,
+    SUM,
+    EntityDomain,
+    Relationship,
+    TableMeta,
+    _concept,
+)
 from services import dataset_readers as readers
 from services import relationship_discovery as disc
 from services.dataset_readers import qi
@@ -37,9 +49,39 @@ VALID_DOMAINS = [k for k in schema.DOMAIN_LABELS if k != "system"]
 _TABLE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{2,47}$")
 
 _UNIT_TOKENS = {"pct", "percent", "percentage", "pctl", "amt", "num", "cnt", "ct", "idx"}
-_GENERIC_ALIASES = {"value", "values", "score", "rate", "data", "number", "count", "total", "index", "rating",
-                    "level", "type", "name", "id", "code", "year", "date", "status", "city", "state", "price",
-                    "risk", "population", "average", "area", "size", "list", "rank", "house", "home", "houses"}
+_GENERIC_ALIASES = {
+    "value",
+    "values",
+    "score",
+    "rate",
+    "data",
+    "number",
+    "count",
+    "total",
+    "index",
+    "rating",
+    "level",
+    "type",
+    "name",
+    "id",
+    "code",
+    "year",
+    "date",
+    "status",
+    "city",
+    "state",
+    "price",
+    "risk",
+    "population",
+    "average",
+    "area",
+    "size",
+    "list",
+    "rank",
+    "house",
+    "home",
+    "houses",
+}
 _ADDITIVE_UNITS = {"count", "people", "households", "units", "usd", "$", "dollars", "acres", "sqft"}
 
 
@@ -52,6 +94,7 @@ class OnboardingError(Exception):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _conn():
     return store.get_conn()
@@ -73,7 +116,16 @@ def _default_domain(columns: list[dict]) -> str:
     kinds = {c.get("key_kind") for c in columns}
     if kinds & {"address", "house_id"}:
         return "housing"
-    if kinds & {"tract_fips", "block_group_fips", "block_fips", "county_fips", "cbsa_code", "zip", "state_fips", "city"}:
+    if kinds & {
+        "tract_fips",
+        "block_group_fips",
+        "block_fips",
+        "county_fips",
+        "cbsa_code",
+        "zip",
+        "state_fips",
+        "city",
+    }:
         return "geography"
     return "other"
 
@@ -97,8 +149,10 @@ def _existing_names(conn) -> set[str]:
 def validate_table_name(conn, name: str, *, allow: str | None = None) -> str:
     name = (name or "").strip().lower()
     if not _TABLE_NAME_RE.match(name):
-        raise OnboardingError("Table names use lowercase letters, digits and underscores, start with a letter, "
-                              "and are 3-48 characters long.")
+        raise OnboardingError(
+            "Table names use lowercase letters, digits and underscores, start with a letter, "
+            "and are 3-48 characters long."
+        )
     if name in readers.RESERVED_WORDS or name.startswith(("stg_", "catalog_", "sqlite_", "duckdb_")):
         raise OnboardingError(f"'{name}' is reserved. Choose another table name.")
     if name != allow and name in _existing_names(conn):
@@ -145,8 +199,8 @@ def _supersede_proposals(conn, ds: dict) -> None:
 # Create / describe
 # ---------------------------------------------------------------------------
 
-def create_dataset(path: str | Path, filename: str, *, sheet: str | None = None,
-                   skiprows: int | None = None) -> dict:
+
+def create_dataset(path: str | Path, filename: str, *, sheet: str | None = None, skiprows: int | None = None) -> dict:
     """Read an uploaded file, stage it in DuckDB and profile it. Nothing enters the catalog yet."""
     conn = _conn()
     try:
@@ -162,18 +216,41 @@ def create_dataset(path: str | Path, filename: str, *, sheet: str | None = None,
     for r in recs:
         p = prof[r["name"]]
         kind = disc.detect_key_kind(r["name"], p)
-        columns.append({**r, "role": disc.guess_role(r["name"], p, kind), "role_source": "rules",
-                        "key_kind": kind, "description": "", "synonyms": [], "unit": "", "include": True,
-                        "drafted_by": "", "derived": False, "stats": _stats(p), "samples": p["samples"]})
+        columns.append(
+            {
+                **r,
+                "role": disc.guess_role(r["name"], p, kind),
+                "role_source": "rules",
+                "key_kind": kind,
+                "description": "",
+                "synonyms": [],
+                "unit": "",
+                "include": True,
+                "drafted_by": "",
+                "derived": False,
+                "stats": _stats(p),
+                "samples": p["samples"],
+            }
+        )
     title = _title_from_filename(filename)
     ds = {
-        "dataset_id": dataset_id, "table_name": _unique_table_name(conn, readers.slugify_table_name(title)),
-        "title": title, "description": f"Uploaded from {filename}: {len(df):,} rows, {len(df.columns)} columns.",
-        "grain": "", "domain": _default_domain(columns), "status": "draft", "source_filename": filename, "source_path": str(path),
-        "format": res.format, "row_count": len(df), "staging_table": staging, "columns": columns,
-        "notes": res.notes, "enrichments": [], "pipeline": [],
-        "options": {"sheet": res.sheet, "sheets": res.sheets, "skiprows": skiprows,
-                    "geometry": res.geometry},
+        "dataset_id": dataset_id,
+        "table_name": _unique_table_name(conn, readers.slugify_table_name(title)),
+        "title": title,
+        "description": f"Uploaded from {filename}: {len(df):,} rows, {len(df.columns)} columns.",
+        "grain": "",
+        "domain": _default_domain(columns),
+        "status": "draft",
+        "source_filename": filename,
+        "source_path": str(path),
+        "format": res.format,
+        "row_count": len(df),
+        "staging_table": staging,
+        "columns": columns,
+        "notes": res.notes,
+        "enrichments": [],
+        "pipeline": [],
+        "options": {"sheet": res.sheet, "sheets": res.sheets, "skiprows": skiprows, "geometry": res.geometry},
     }
     _record_stage(ds, "read", "ok", f"{len(df):,} rows, {len(df.columns)} columns ({res.format})")
     _record_stage(ds, "profile", "ok", "Column types, key kinds and roles detected")
@@ -240,6 +317,7 @@ def _clean_synonyms(value: Any) -> list[str]:
 # Model drafting (optional; see services/catalog_llm.py)
 # ---------------------------------------------------------------------------
 
+
 def get_draftable(dataset_id: str) -> dict:
     ds = _get(dataset_id)
     if ds["status"] != "draft":
@@ -278,19 +356,29 @@ def apply_draft(dataset_id: str, result) -> dict:
         _record_stage(ds, "model_draft", "ok", f"Drafted by {result.endpoint}")
     else:
         _record_stage(ds, "model_draft", "skipped", result.error or "No model was reachable; nothing was drafted.")
-    ds["options"]["draft_meta"] = {"mode": "model" if result.ok else "rules", "endpoint": result.endpoint,
-                                   "notes": notes, "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    ds["options"]["draft_meta"] = {
+        "mode": "model" if result.ok else "rules",
+        "endpoint": result.endpoint,
+        "notes": notes,
+        "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
     catalog_store.save_dataset(conn, ds)
     _supersede_proposals(conn, ds)
     out = detail(dataset_id)
-    out["draft"] = {"ok": result.ok, "mode": ds["options"]["draft_meta"]["mode"], "endpoint": result.endpoint,
-                    "error": result.error, "notes": notes}
+    out["draft"] = {
+        "ok": result.ok,
+        "mode": ds["options"]["draft_meta"]["mode"],
+        "endpoint": result.endpoint,
+        "error": result.error,
+        "notes": notes,
+    }
     return out
 
 
 def draft_with_model(dataset_id: str) -> dict:
     """Synchronous convenience wrapper (the API runs the model call in a worker thread instead)."""
     from services import catalog_llm
+
     return apply_draft(dataset_id, catalog_llm.draft_dataset(get_draftable(dataset_id)))
 
 
@@ -304,6 +392,7 @@ _GEOM_SOURCE: dict[str, str] = {}
 def _geometry_source() -> str:
     if "v" not in _GEOM_SOURCE:
         from services import geo_utils
+
         _GEOM_SOURCE["v"] = geo_utils.geometry_source()
     return _GEOM_SOURCE["v"]
 
@@ -323,13 +412,21 @@ def available_enrichments(ds: dict) -> list[dict]:
         note = f"Point-in-polygon against {src}."
         if api:
             note += f" No local tract geometry is loaded, so this uses the Census API and is limited to {cap} rows."
-        out.append({"kind": "spatial_tract", "label": "Add census tract from coordinates", "possible": True, "note": note})
+        out.append(
+            {"kind": "spatial_tract", "label": "Add census tract from coordinates", "possible": True, "note": note}
+        )
     addr = disc.address_columns(cols)
     if addr["address"] and (addr["zip"] or addr["city"]) and not (lat and lon):
         cap = int(getattr(settings, "onboarding_geocode_row_cap", 2000))
-        out.append({"kind": "geocode", "label": "Geocode addresses (US Census)", "possible": True,
-                    "note": f"Sends addresses to the Census geocoder over the internet, caches results in geocode_cache, "
-                            f"and handles up to {cap:,} rows per run."})
+        out.append(
+            {
+                "kind": "geocode",
+                "label": "Geocode addresses (US Census)",
+                "possible": True,
+                "note": f"Sends addresses to the Census geocoder over the internet, caches results in geocode_cache, "
+                f"and handles up to {cap:,} rows per run.",
+            }
+        )
     return out
 
 
@@ -337,7 +434,9 @@ def _add_column_from_series(conn, table: str, name: str, sql_type: str, mapping:
     conn.execute(f"ALTER TABLE {qi(table)} ADD COLUMN {qi(name)} {sql_type}")
     conn.register("__enrich_map", mapping[["rid", col]])
     try:
-        conn.execute(f"UPDATE {qi(table)} SET {qi(name)} = m.{qi(col)} FROM __enrich_map m WHERE {qi(table)}.rowid = m.rid")
+        conn.execute(
+            f"UPDATE {qi(table)} SET {qi(name)} = m.{qi(col)} FROM __enrich_map m WHERE {qi(table)}.rowid = m.rid"
+        )
     finally:
         conn.unregister("__enrich_map")
 
@@ -345,6 +444,7 @@ def _add_column_from_series(conn, table: str, name: str, sql_type: str, mapping:
 def _tract_lookup(work: pd.DataFrame) -> pd.Series:
     """tract_fips for each point, via services/geo_utils (local geometry first, API fallback)."""
     from services import geo_utils
+
     gdf = geo_utils._load_tracts_gdf()
     if gdf is None:
         cap = int(getattr(settings, "onboarding_api_row_cap", 500))
@@ -352,7 +452,8 @@ def _tract_lookup(work: pd.DataFrame) -> pd.Series:
             raise OnboardingError(
                 f"No local tract geometry is loaded (NRI geometry cache or TIGER/Line shapefiles) and the Census "
                 f"API fallback is limited to {cap} rows for uploads. Load the NRI shapefile with setup_data.py, "
-                "or add TIGER/Line files to data/shapefiles/, then try again.")
+                "or add TIGER/Line files to data/shapefiles/, then try again."
+            )
     probe = work[["rid", "lat", "lon"]].copy()
     probe["tract_fips"] = None
     try:
@@ -363,9 +464,13 @@ def _tract_lookup(work: pd.DataFrame) -> pd.Series:
         pass
     if gdf is None:
         raise OnboardingError("Tract lookup failed.")
-    import geopandas as gpd    # fall back to a de-duplicated join (a point on a shared border can match two tracts)
-    pts = gpd.GeoDataFrame(work[["rid"]].reset_index(drop=True),
-                           geometry=gpd.points_from_xy(work["lon"].values, work["lat"].values), crs="EPSG:4326")
+    import geopandas as gpd  # fall back to a de-duplicated join (a point on a shared border can match two tracts)
+
+    pts = gpd.GeoDataFrame(
+        work[["rid"]].reset_index(drop=True),
+        geometry=gpd.points_from_xy(work["lon"].values, work["lat"].values),
+        crs="EPSG:4326",
+    )
     joined = gpd.sjoin(pts, gdf[["tract_fips", "geometry"]], how="left", predicate="within")
     joined = joined[~joined.index.duplicated(keep="first")]
     return joined["tract_fips"].reindex(pts.index).reset_index(drop=True)
@@ -391,41 +496,82 @@ def enrich(dataset_id: str, kind: str) -> dict:
         ok["tract_fips"] = _tract_lookup(ok)
         _add_column_from_series(conn, stg, "tract_fips", "VARCHAR", ok, "tract_fips")
         matched = int(ok["tract_fips"].notna().sum())
-        result = {"kind": kind, "matched": matched, "total": len(ok), "source": _geometry_source(),
-                  "examples": [{"lat": float(r.lat), "lon": float(r.lon), "tract_fips": r.tract_fips}
-                               for r in ok[ok["tract_fips"].notna()].head(5).itertuples(index=False)],
-                  "message": f"{matched:,} of {len(ok):,} points fall inside a census tract."}
-        new_cols = [{"name": "tract_fips", "note": "Census tract FIPS derived from lat/lon by point-in-polygon "
-                     "against the tract geometry used for houses (services/geo_utils.py)."}]
+        result = {
+            "kind": kind,
+            "matched": matched,
+            "total": len(ok),
+            "source": _geometry_source(),
+            "examples": [
+                {"lat": float(r.lat), "lon": float(r.lon), "tract_fips": r.tract_fips}
+                for r in ok[ok["tract_fips"].notna()].head(5).itertuples(index=False)
+            ],
+            "message": f"{matched:,} of {len(ok):,} points fall inside a census tract.",
+        }
+        new_cols = [
+            {
+                "name": "tract_fips",
+                "note": "Census tract FIPS derived from lat/lon by point-in-polygon "
+                "against the tract geometry used for houses (services/geo_utils.py).",
+            }
+        ]
     else:
         from services.geocoder import geocode_dataframe
+
         addr = disc.address_columns(cols)
         cap = int(getattr(settings, "onboarding_geocode_row_cap", 2000))
-        sel = ["rowid AS rid", f"{qi(addr['address'])} AS street",
-               f"{qi(addr['city'])} AS city" if addr["city"] else "'' AS city",
-               "'' AS state", f"{qi(addr['zip'])} AS zip" if addr["zip"] else "'' AS zip"]
+        sel = [
+            "rowid AS rid",
+            f"{qi(addr['address'])} AS street",
+            f"{qi(addr['city'])} AS city" if addr["city"] else "'' AS city",
+            "'' AS state",
+            f"{qi(addr['zip'])} AS zip" if addr["zip"] else "'' AS zip",
+        ]
         df = conn.execute(f"SELECT {', '.join(sel)} FROM {qi(stg)} LIMIT {cap}").df()
         # sale_id_col points at a column that does not exist so geocode_dataframe never writes to sold_homes.
-        out = geocode_dataframe(df, street_col="street", city_col="city", state_col="state", zip_col="zip",
-                                full_addr_col="full_address", sale_id_col="__no_such_column__",
-                                single_fallback_limit=0, verbose=False)
+        out = geocode_dataframe(
+            df,
+            street_col="street",
+            city_col="city",
+            state_col="state",
+            zip_col="zip",
+            full_addr_col="full_address",
+            sale_id_col="__no_such_column__",
+            single_fallback_limit=0,
+            verbose=False,
+        )
         out["lat"] = pd.to_numeric(out["lat"], errors="coerce")
         out["lon"] = pd.to_numeric(out["lon"], errors="coerce")
-        for name, sql_type, col in (("lat", "DOUBLE", "lat"), ("lon", "DOUBLE", "lon"),
-                                    ("tract_fips", "VARCHAR", "tract_fips"),
-                                    ("geocode_status", "VARCHAR", "geocode_status")):
+        for name, sql_type, col in (
+            ("lat", "DOUBLE", "lat"),
+            ("lon", "DOUBLE", "lon"),
+            ("tract_fips", "VARCHAR", "tract_fips"),
+            ("geocode_status", "VARCHAR", "geocode_status"),
+        ):
             if name not in {c["name"] for c in ds["columns"]}:
                 _add_column_from_series(conn, stg, name, sql_type, out, col)
         matched = int(out["lat"].notna().sum())
-        result = {"kind": kind, "matched": matched, "total": len(out), "source": "US Census Geocoder (with local cache)",
-                  "examples": [{"address": r.street, "lat": float(r.lat), "lon": float(r.lon), "tract_fips": r.tract_fips}
-                               for r in out[out["lat"].notna()].head(5).itertuples(index=False)],
-                  "message": f"{matched:,} of {len(out):,} addresses were geocoded."
-                             + (f" Only the first {cap:,} rows were processed." if int(conn.execute(f'SELECT COUNT(*) FROM {qi(stg)}').fetchone()[0]) > cap else "")}
-        new_cols = [{"name": "lat", "note": "Latitude from the Census geocoder."},
-                    {"name": "lon", "note": "Longitude from the Census geocoder."},
-                    {"name": "tract_fips", "note": "Census tract FIPS returned by the Census geocoder."},
-                    {"name": "geocode_status", "note": "success or pending, as set by services/geocoder.py."}]
+        result = {
+            "kind": kind,
+            "matched": matched,
+            "total": len(out),
+            "source": "US Census Geocoder (with local cache)",
+            "examples": [
+                {"address": r.street, "lat": float(r.lat), "lon": float(r.lon), "tract_fips": r.tract_fips}
+                for r in out[out["lat"].notna()].head(5).itertuples(index=False)
+            ],
+            "message": f"{matched:,} of {len(out):,} addresses were geocoded."
+            + (
+                f" Only the first {cap:,} rows were processed."
+                if int(conn.execute(f"SELECT COUNT(*) FROM {qi(stg)}").fetchone()[0]) > cap
+                else ""
+            ),
+        }
+        new_cols = [
+            {"name": "lat", "note": "Latitude from the Census geocoder."},
+            {"name": "lon", "note": "Longitude from the Census geocoder."},
+            {"name": "tract_fips", "note": "Census tract FIPS returned by the Census geocoder."},
+            {"name": "geocode_status", "note": "success or pending, as set by services/geocoder.py."},
+        ]
     prof = disc.profile_table(conn, stg)
     have = {c["name"] for c in ds["columns"]}
     for nc in new_cols:
@@ -433,11 +579,27 @@ def enrich(dataset_id: str, kind: str) -> dict:
         if not p or nc["name"] in have:
             continue
         k = disc.detect_key_kind(nc["name"], p)
-        ds["columns"].append({"name": nc["name"], "source_name": "(derived)", "dtype": "text" if p["family"] == "text" else "float",
-                              "role": disc.guess_role(nc["name"], p, k), "role_source": "rules", "key_kind": k,
-                              "description": nc["note"], "synonyms": [], "unit": "", "include": True,
-                              "drafted_by": "", "derived": True, "stats": _stats(p), "samples": p["samples"]})
-    ds["enrichments"].append({k: v for k, v in result.items() if k != "examples"} | {"at": time.strftime("%Y-%m-%d %H:%M:%S")})
+        ds["columns"].append(
+            {
+                "name": nc["name"],
+                "source_name": "(derived)",
+                "dtype": "text" if p["family"] == "text" else "float",
+                "role": disc.guess_role(nc["name"], p, k),
+                "role_source": "rules",
+                "key_kind": k,
+                "description": nc["note"],
+                "synonyms": [],
+                "unit": "",
+                "include": True,
+                "drafted_by": "",
+                "derived": True,
+                "stats": _stats(p),
+                "samples": p["samples"],
+            }
+        )
+    ds["enrichments"].append(
+        {k: v for k, v in result.items() if k != "examples"} | {"at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    )
     _record_stage(ds, "enrich", "ok", result["message"])
     catalog_store.save_dataset(conn, ds)
     catalog_store.audit(conn, "enrich_dataset", "dataset", dataset_id, {"kind": kind, "matched": result["matched"]})
@@ -450,6 +612,7 @@ def enrich(dataset_id: str, kind: str) -> dict:
 # ---------------------------------------------------------------------------
 # Semantic concepts (generated from the human-approved description)
 # ---------------------------------------------------------------------------
+
 
 def _known_aliases() -> dict[str, str]:
     known: dict[str, str] = {}
@@ -474,7 +637,7 @@ def _alias_ok(alias: str) -> bool:
 
 
 def _alias_candidates(col: dict) -> list[str]:
-    raw = list(col.get("synonyms", []))          # the user's own phrasing comes first
+    raw = list(col.get("synonyms", []))  # the user's own phrasing comes first
     src = col.get("source_name")
     if src and src != "(derived)":
         raw.append(_humanize(src))
@@ -530,12 +693,16 @@ def build_concepts(ds: dict) -> dict:
         if dropped:
             warnings.append(f"{c['name']}: skipped alias {'; '.join(dropped)}.")
         for other, phrases in overrides.items():
-            notices.append(f"{c['name']}: {', '.join(repr(x) for x in phrases)} takes precedence over the existing concept "
-                           f"'{other}', whose phrase sits inside yours. Questions that use it will not also pull in "
-                           f"{other}'s tables or filters.")
+            notices.append(
+                f"{c['name']}: {', '.join(repr(x) for x in phrases)} takes precedence over the existing concept "
+                f"'{other}', whose phrase sits inside yours. Questions that use it will not also pull in "
+                f"{other}'s tables or filters."
+            )
         if not kept:
-            warnings.append(f"{c['name']}: no usable alias, so the assistant can only reach it through the table name. "
-                            "Add synonyms to this column to make it discoverable.")
+            warnings.append(
+                f"{c['name']}: no usable alias, so the assistant can only reach it through the table name. "
+                "Add synonyms to this column to make it discoverable."
+            )
             continue
         for a in kept:
             used[a] = f"{table}.{c['name']}"
@@ -546,25 +713,46 @@ def build_concepts(ds: dict) -> dict:
             ops.insert(1, SUM(expr))
         text = c["description"] or _humanize(c["name"])
         key = f"{table}_{c['name']}"
-        concept = _concept(key, [table], kept, f"{text}" + (f" (unit: {c['unit']})" if c.get("unit") else "")
-                           + f" - from the '{ds['title']}' dataset.",
-                           columns=(expr,), operations=tuple(ops), null_policy="exclude NULL",
-                           grain=ds["grain"] or "row", default_operation="avg")
-        concept["scope_guard"] = False    # measure columns are legitimately filterable; see agents/tools.py
+        concept = _concept(
+            key,
+            [table],
+            kept,
+            f"{text}" + (f" (unit: {c['unit']})" if c.get("unit") else "") + f" - from the '{ds['title']}' dataset.",
+            columns=(expr,),
+            operations=tuple(ops),
+            null_policy="exclude NULL",
+            grain=ds["grain"] or "row",
+            default_operation="avg",
+        )
+        concept["scope_guard"] = False  # measure columns are legitimately filterable; see agents/tools.py
         if overrides:
-            concept["overrides"] = sorted(overrides)      # declared precedence; honored by semantic_matches
+            concept["overrides"] = sorted(overrides)  # declared precedence; honored by semantic_matches
         concepts[key] = concept
         alias_report[key] = kept
     domains: list[dict] = []
-    label_cols = [c for c in cols if c["role"] == "label" and c.get("dtype") == "text"
-                  and 2 <= (c.get("stats", {}).get("distinct") or 0) <= 5000
-                  and (c.get("stats", {}).get("min_len") or 0) >= 2 and c.get("key_kind") != "address"]
+    label_cols = [
+        c
+        for c in cols
+        if c["role"] == "label"
+        and c.get("dtype") == "text"
+        and 2 <= (c.get("stats", {}).get("distinct") or 0) <= 5000
+        and (c.get("stats", {}).get("min_len") or 0) >= 2
+        and c.get("key_kind") != "address"
+    ]
     label_cols.sort(key=lambda c: (c.get("key_kind") != "city", c.get("stats", {}).get("distinct") or 0))
     for c in label_cols[:2]:
-        domains.append({"name": f"{table}_{c['name']}", "table": table, "column": c["name"],
-                        "entity_type": c["name"], "description": f"{ds['title']}: {_humanize(c['name'])} values",
-                        "display_column": None, "match_mode": "exact_or_prefix",
-                        "preferred_for": list(concepts)})
+        domains.append(
+            {
+                "name": f"{table}_{c['name']}",
+                "table": table,
+                "column": c["name"],
+                "entity_type": c["name"],
+                "description": f"{ds['title']}: {_humanize(c['name'])} values",
+                "display_column": None,
+                "match_mode": "exact_or_prefix",
+                "preferred_for": list(concepts),
+            }
+        )
     suggestions: list[str] = []
     for key, concept in list(concepts.items())[:2]:
         a = concept["aliases"][0]
@@ -576,10 +764,18 @@ def build_concepts(ds: dict) -> dict:
         if sample:
             suggestions.append(f"What is the average {next(iter(concepts.values()))['aliases'][0]} in {sample}?")
     if not concepts:
-        warnings.append("No measure columns were found, so no questions can be answered from this table's numbers. "
-                        "You can still approve it to make it reachable by table name and use it in joins.")
-    return {"concepts": concepts, "entity_domains": domains, "warnings": warnings, "notices": notices,
-            "suggestions": suggestions[:5], "aliases": alias_report}
+        warnings.append(
+            "No measure columns were found, so no questions can be answered from this table's numbers. "
+            "You can still approve it to make it reachable by table name and use it in joins."
+        )
+    return {
+        "concepts": concepts,
+        "entity_domains": domains,
+        "warnings": warnings,
+        "notices": notices,
+        "suggestions": suggestions[:5],
+        "aliases": alias_report,
+    }
 
 
 def _column_note(c: dict) -> str:
@@ -592,6 +788,7 @@ def _column_note(c: dict) -> str:
 # ---------------------------------------------------------------------------
 # Analyze -> proposals
 # ---------------------------------------------------------------------------
+
 
 def analyze(dataset_id: str) -> dict:
     conn = _conn()
@@ -606,33 +803,68 @@ def analyze(dataset_id: str) -> dict:
             ds["grain"] = _default_grain(ds)
         built = build_concepts(ds)
         cols = [c for c in ds["columns"] if c.get("include", True)]
-        proposals.append({
-            "kind": "table", "group_key": "table",
-            "title": f"Add {ds['table_name']} to the data model",
-            "summary": (f"Registers {ds['table_name']} ({ds['row_count']:,} rows, {len(cols)} columns) so the assistant can "
-                        f"query it. {len(built['concepts'])} measure(s) become searchable concepts."),
-            "payload": {"table": {"name": ds["table_name"], "description": ds["description"], "grain": ds["grain"],
-                                  "domain": ds["domain"]},
-                        "columns": [{"name": c["name"], "source_name": c["source_name"], "role": c["role"],
-                                     "unit": c["unit"], "description": c["description"], "dtype": c["dtype"],
-                                     "synonyms": c["synonyms"], "derived": c.get("derived", False)} for c in cols],
-                        "concepts": built["concepts"], "entity_domains": built["entity_domains"]},
-            "evidence": {"row_count": ds["row_count"], "column_count": len(cols), "warnings": built["warnings"], "notices": built["notices"],
-                         "suggestions": built["suggestions"], "aliases": built["aliases"],
-                         "entity_domains": [d["name"] for d in built["entity_domains"]]},
-        })
+        proposals.append(
+            {
+                "kind": "table",
+                "group_key": "table",
+                "title": f"Add {ds['table_name']} to the data model",
+                "summary": (
+                    f"Registers {ds['table_name']} ({ds['row_count']:,} rows, {len(cols)} columns) so the assistant can "
+                    f"query it. {len(built['concepts'])} measure(s) become searchable concepts."
+                ),
+                "payload": {
+                    "table": {
+                        "name": ds["table_name"],
+                        "description": ds["description"],
+                        "grain": ds["grain"],
+                        "domain": ds["domain"],
+                    },
+                    "columns": [
+                        {
+                            "name": c["name"],
+                            "source_name": c["source_name"],
+                            "role": c["role"],
+                            "unit": c["unit"],
+                            "description": c["description"],
+                            "dtype": c["dtype"],
+                            "synonyms": c["synonyms"],
+                            "derived": c.get("derived", False),
+                        }
+                        for c in cols
+                    ],
+                    "concepts": built["concepts"],
+                    "entity_domains": built["entity_domains"],
+                },
+                "evidence": {
+                    "row_count": ds["row_count"],
+                    "column_count": len(cols),
+                    "warnings": built["warnings"],
+                    "notices": built["notices"],
+                    "suggestions": built["suggestions"],
+                    "aliases": built["aliases"],
+                    "entity_domains": [d["name"] for d in built["entity_domains"]],
+                },
+            }
+        )
     rels = disc.discover_relationships(conn, ds, source)
-    known = {r.key() for r in schema._relationships()}     # already approved (published datasets can be re-analysed)
-    rels = [r for r in rels if f"{r['payload']['left_table']}:{r['payload']['left_expr']}="
-                               f"{r['payload']['right_table']}:{r['payload']['right_expr']}" not in known]
+    known = {r.key() for r in schema._relationships()}  # already approved (published datasets can be re-analysed)
+    rels = [
+        r
+        for r in rels
+        if f"{r['payload']['left_table']}:{r['payload']['left_expr']}="
+        f"{r['payload']['right_table']}:{r['payload']['right_expr']}" not in known
+    ]
     proposals += rels
     _record_stage(ds, "discover", "ok", f"{len(rels)} link(s) proposed in {time.monotonic() - t0:.1f}s")
     if getattr(settings, "catalog_llm_judge_enabled", False) and rels:
         try:
             from services import catalog_llm
+
             note = catalog_llm.judge_links(ds, rels)
-            _record_stage(ds, "model_judge", "ok" if note.ok else "skipped", note.error or f"Annotated by {note.endpoint}")
-        except Exception as exc:    # annotation only; never blocks the review
+            _record_stage(
+                ds, "model_judge", "ok" if note.ok else "skipped", note.error or f"Annotated by {note.endpoint}"
+            )
+        except Exception as exc:  # annotation only; never blocks the review
             _record_stage(ds, "model_judge", "skipped", str(exc))
     catalog_store.save_dataset(conn, ds)
     saved = catalog_store.replace_proposals(conn, dataset_id, proposals)
@@ -643,9 +875,15 @@ def analyze(dataset_id: str) -> dict:
 
 def _default_grain(ds: dict) -> str:
     kinds = [c.get("key_kind") for c in ds["columns"] if c.get("include", True)]
-    for k, label in (("address", "address"), ("house_id", "house"), ("tract_fips", "census tract"),
-                     ("block_group_fips", "census block group"), ("zip", "ZIP code"),
-                     ("county_fips", "county"), ("city", "city")):
+    for k, label in (
+        ("address", "address"),
+        ("house_id", "house"),
+        ("tract_fips", "census tract"),
+        ("block_group_fips", "census block group"),
+        ("zip", "ZIP code"),
+        ("county_fips", "county"),
+        ("city", "city"),
+    ):
         if k in kinds:
             return f"one row per {label}"
     return "one row per record"
@@ -654,6 +892,7 @@ def _default_grain(ds: dict) -> str:
 # ---------------------------------------------------------------------------
 # Decisions: approve / reject
 # ---------------------------------------------------------------------------
+
 
 def decide(proposal_id: str, decision: str, *, note: str = "", edits: dict | None = None) -> dict:
     conn = _conn()
@@ -690,10 +929,26 @@ def _publish_table(conn, ds: dict, prop: dict, note: str) -> None:
     stg = ds["staging_table"]
     cols = [c for c in ds["columns"] if c.get("include", True)]
     select = ", ".join(qi(c["name"]) for c in cols)
-    meta = TableMeta(name=table, description=ds["description"], grain=ds["grain"], agent_visible=True,
-                     domain=ds["domain"], origin="upload", dataset_id=ds["dataset_id"])
-    notes = [{"column_name": c["name"], "note": _column_note(c), "role": c["role"], "unit": c["unit"],
-              "source_name": c["source_name"], "derived_from": "derived" if c.get("derived") else ""} for c in cols]
+    meta = TableMeta(
+        name=table,
+        description=ds["description"],
+        grain=ds["grain"],
+        agent_visible=True,
+        domain=ds["domain"],
+        origin="upload",
+        dataset_id=ds["dataset_id"],
+    )
+    notes = [
+        {
+            "column_name": c["name"],
+            "note": _column_note(c),
+            "role": c["role"],
+            "unit": c["unit"],
+            "source_name": c["source_name"],
+            "derived_from": "derived" if c.get("derived") else "",
+        }
+        for c in cols
+    ]
     ds = dict(ds, status="published", staging_table="")
     with schema.catalog_transaction():
         conn.execute(f"CREATE TABLE {qi(table)} AS SELECT {select} FROM {qi(stg)}")
@@ -702,11 +957,20 @@ def _publish_table(conn, ds: dict, prop: dict, note: str) -> None:
         for key, definition in payload["concepts"].items():
             schema.register_concept(key, definition, origin="upload", dataset_id=ds["dataset_id"])
         for d in payload["entity_domains"]:
-            schema.register_entity_domain(EntityDomain(
-                name=d["name"], table=d["table"], column=d["column"], entity_type=d["entity_type"],
-                description=d["description"], display_column=d.get("display_column"),
-                match_mode=d.get("match_mode", "exact_or_prefix"), preferred_for=tuple(d.get("preferred_for", []))),
-                origin="upload", dataset_id=ds["dataset_id"])
+            schema.register_entity_domain(
+                EntityDomain(
+                    name=d["name"],
+                    table=d["table"],
+                    column=d["column"],
+                    entity_type=d["entity_type"],
+                    description=d["description"],
+                    display_column=d.get("display_column"),
+                    match_mode=d.get("match_mode", "exact_or_prefix"),
+                    preferred_for=tuple(d.get("preferred_for", [])),
+                ),
+                origin="upload",
+                dataset_id=ds["dataset_id"],
+            )
         _record_stage(ds, "publish", "ok", f"{table} registered with {len(payload['concepts'])} concept(s)")
         catalog_store.save_dataset(conn, ds)
         catalog_store.update_proposal(conn, prop["proposal_id"], status="approved", decision_note=note)
@@ -724,10 +988,15 @@ def _materialize(conn, table: str, derive: dict) -> None:
         conn.execute(f"ALTER TABLE {qi(table)} ADD COLUMN {qi(col)} VARCHAR")
         conn.execute(f"UPDATE {qi(table)} SET {qi(col)} = {derive['sql']}")
     elif kind == "address_house":
-        sel = ["rowid AS rid", f"{qi(derive['address_col'])} AS address",
-               f"{qi(derive['zip_col'])} AS zip" if derive.get("zip_col") else "NULL AS zip",
-               f"{qi(derive['city_col'])} AS city" if derive.get("city_col") else "NULL AS city"]
-        rows = conn.execute(f"SELECT {', '.join(sel)} FROM {qi(table)} WHERE {qi(derive['address_col'])} IS NOT NULL").df()
+        sel = [
+            "rowid AS rid",
+            f"{qi(derive['address_col'])} AS address",
+            f"{qi(derive['zip_col'])} AS zip" if derive.get("zip_col") else "NULL AS zip",
+            f"{qi(derive['city_col'])} AS city" if derive.get("city_col") else "NULL AS city",
+        ]
+        rows = conn.execute(
+            f"SELECT {', '.join(sel)} FROM {qi(table)} WHERE {qi(derive['address_col'])} IS NOT NULL"
+        ).df()
         m = disc.match_addresses(rows, disc.load_houses(conn))
         conn.execute(f"ALTER TABLE {qi(table)} ADD COLUMN {qi(col)} VARCHAR")
         if not m.empty:
@@ -755,32 +1024,68 @@ def _approve_relationship(conn, ds: dict, prop: dict, note: str, edits: dict) ->
         pl["preferred"] = bool(edits["preferred"])
     if pl["cardinality"] not in {"one-to-one", "many-to-one", "one-to-many", "many-to-many"}:
         raise OnboardingError("Cardinality must be one-to-one, many-to-one, one-to-many or many-to-many.")
-    rel = Relationship(left_table=pl["left_table"], left_expr=pl["left_expr"], right_table=pl["right_table"],
-                       right_expr=pl["right_expr"], note=pl.get("note", ""), cardinality=pl["cardinality"],
-                       confidence=pl.get("confidence", "medium"), bridge=False, preferred=bool(pl.get("preferred", True)),
-                       grain_effect=pl.get("grain_effect", ""), origin="upload", dataset_id=ds["dataset_id"])
+    rel = Relationship(
+        left_table=pl["left_table"],
+        left_expr=pl["left_expr"],
+        right_table=pl["right_table"],
+        right_expr=pl["right_expr"],
+        note=pl.get("note", ""),
+        cardinality=pl["cardinality"],
+        confidence=pl.get("confidence", "medium"),
+        bridge=False,
+        preferred=bool(pl.get("preferred", True)),
+        grain_effect=pl.get("grain_effect", ""),
+        origin="upload",
+        dataset_id=ds["dataset_id"],
+    )
     derive = pl.get("derive")
     with schema.catalog_transaction():
         if derive:
             _materialize(conn, pl["left_table"], derive)
             catalog_store.upsert_column_note(
-                conn, pl["left_table"], derive["column"], note=f"Derived key: {derive.get('rule', '')}",
-                role="key", source_name="(derived)", derived_from=derive.get("from") or derive["kind"])
+                conn,
+                pl["left_table"],
+                derive["column"],
+                note=f"Derived key: {derive.get('rule', '')}",
+                role="key",
+                source_name="(derived)",
+                derived_from=derive.get("from") or derive["kind"],
+            )
             if not any(c["name"] == derive["column"] for c in ds["columns"]):
-                ds["columns"].append({"name": derive["column"], "source_name": "(derived)", "dtype": "text", "role": "key",
-                                      "role_source": "rules", "key_kind": None, "description": derive.get("rule", ""),
-                                      "synonyms": [], "unit": "", "include": True, "drafted_by": "", "derived": True,
-                                      "stats": {}, "samples": []})
+                ds["columns"].append(
+                    {
+                        "name": derive["column"],
+                        "source_name": "(derived)",
+                        "dtype": "text",
+                        "role": "key",
+                        "role_source": "rules",
+                        "key_kind": None,
+                        "description": derive.get("rule", ""),
+                        "synonyms": [],
+                        "unit": "",
+                        "include": True,
+                        "drafted_by": "",
+                        "derived": True,
+                        "stats": {},
+                        "samples": [],
+                    }
+                )
                 catalog_store.save_dataset(conn, ds)
         schema.register_relationship(rel, origin="upload", dataset_id=ds["dataset_id"], evidence=prop["evidence"])
         catalog_store.update_proposal(conn, prop["proposal_id"], status="approved", decision_note=note, payload=pl)
-        catalog_store.audit(conn, "approve_relationship", "relationship", rel.key(),
-                            {"dataset": ds["dataset_id"], "cardinality": rel.cardinality})
+        catalog_store.audit(
+            conn,
+            "approve_relationship",
+            "relationship",
+            rel.key(),
+            {"dataset": ds["dataset_id"], "cardinality": rel.cardinality},
+        )
 
 
 # ---------------------------------------------------------------------------
 # Revoke / retire / discard
 # ---------------------------------------------------------------------------
+
 
 def revoke_relationship(rel_key: str, reason: str = "") -> dict:
     conn = _conn()
@@ -794,8 +1099,11 @@ def revoke_relationship(rel_key: str, reason: str = "") -> dict:
         raise OnboardingError("Relationship not found.", 404)
     for p in catalog_store.list_proposals(conn, rel.dataset_id):
         pl = p["payload"]
-        if p["kind"] == "relationship" and p["status"] == "approved" and \
-                f"{pl['left_table']}:{pl['left_expr']}={pl['right_table']}:{pl['right_expr']}" == rel_key:
+        if (
+            p["kind"] == "relationship"
+            and p["status"] == "approved"
+            and f"{pl['left_table']}:{pl['left_expr']}={pl['right_table']}:{pl['right_expr']}" == rel_key
+        ):
             catalog_store.update_proposal(conn, p["proposal_id"], status="revoked", decision_note=reason)
     return {"revoked": rel_key, "catalog_version": schema.catalog_version()}
 
@@ -808,8 +1116,12 @@ def retire_dataset(dataset_id: str) -> dict:
     counts = schema.retire_dataset_objects(dataset_id)
     ds["status"] = "retired"
     catalog_store.save_dataset(conn, ds)
-    return {"retired": dataset_id, **counts, "note": f"The data table '{ds['table_name']}' was kept but is hidden from the assistant.",
-            "catalog_version": schema.catalog_version()}
+    return {
+        "retired": dataset_id,
+        **counts,
+        "note": f"The data table '{ds['table_name']}' was kept but is hidden from the assistant.",
+        "catalog_version": schema.catalog_version(),
+    }
 
 
 def discard_draft(dataset_id: str) -> dict:
@@ -830,6 +1142,7 @@ def discard_draft(dataset_id: str) -> dict:
 # Read models for the API
 # ---------------------------------------------------------------------------
 
+
 def detail(dataset_id: str) -> dict:
     conn = _conn()
     ds = _get(dataset_id)
@@ -845,8 +1158,12 @@ def list_datasets() -> list[dict]:
     for d in catalog_store.list_datasets(_conn()):
         if d["status"] == "discarded":
             continue
-        out.append({k: d[k] for k in ("dataset_id", "table_name", "title", "status", "row_count",
-                                      "source_filename", "created_at")})
+        out.append(
+            {
+                k: d[k]
+                for k in ("dataset_id", "table_name", "title", "status", "row_count", "source_filename", "created_at")
+            }
+        )
     return out
 
 
@@ -862,17 +1179,35 @@ def draft_overlay(dataset_id: str) -> dict | None:
     for p in catalog_store.list_proposals(conn, dataset_id):
         if p["kind"] == "relationship":
             pl = p["payload"]
-            rels.append({"proposal_id": p["proposal_id"], "status": p["status"], "left_table": pl["left_table"],
-                         "left_expr": pl["left_expr"], "right_table": pl["right_table"], "right_expr": pl["right_expr"],
-                         "cardinality": pl["cardinality"], "confidence": pl["confidence"]})
+            rels.append(
+                {
+                    "proposal_id": p["proposal_id"],
+                    "status": p["status"],
+                    "left_table": pl["left_table"],
+                    "left_expr": pl["left_expr"],
+                    "right_table": pl["right_table"],
+                    "right_expr": pl["right_expr"],
+                    "cardinality": pl["cardinality"],
+                    "confidence": pl["confidence"],
+                }
+            )
             d = pl.get("derive")
-            if d and p["status"] == "pending" and d["column"] not in have:     # a key column the approval will add
+            if d and p["status"] == "pending" and d["column"] not in have:  # a key column the approval will add
                 cols.append({"name": d["column"], "type": "text", "role": "key"})
                 have.add(d["column"])
-    return {"dataset_id": dataset_id, "status": ds["status"],
-            "table": {"name": ds["table_name"], "description": ds["description"], "grain": ds["grain"],
-                      "domain": ds["domain"], "rows": ds["row_count"], "columns": cols},
-            "relationships": rels}
+    return {
+        "dataset_id": dataset_id,
+        "status": ds["status"],
+        "table": {
+            "name": ds["table_name"],
+            "description": ds["description"],
+            "grain": ds["grain"],
+            "domain": ds["domain"],
+            "rows": ds["row_count"],
+            "columns": cols,
+        },
+        "relationships": rels,
+    }
 
 
 def warm_vector_index() -> bool:
@@ -883,6 +1218,7 @@ def warm_vector_index() -> bool:
     """
     try:
         import db.vector_store as vs
+
         vs.ensure_schema_metadata_index()
         return True
     except Exception:

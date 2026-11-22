@@ -6,6 +6,7 @@ neither into the other, and an un-geocodable endpoint used to end the turn with
 "address could not be found" even though the house's coordinates were already in
 the database. No test here touches the network: the geocoder client is replaced.
 """
+
 import asyncio
 
 import pytest
@@ -38,11 +39,15 @@ def nominatim(monkeypatch, fresh_db):
     return fake_get_json
 
 
-PIKE = [{
-    "lat": "40.4089261", "lon": "-79.9438914", "importance": 1e-05,
-    "display_name": "4940, Second Avenue, Hazelwood, Pittsburgh, Allegheny County, Pennsylvania, 15207, United States",
-    "address": {"house_number": "4940", "road": "Second Avenue", "city": "Pittsburgh"},
-}]
+PIKE = [
+    {
+        "lat": "40.4089261",
+        "lon": "-79.9438914",
+        "importance": 1e-05,
+        "display_name": "4940, Second Avenue, Hazelwood, Pittsburgh, Allegheny County, Pennsylvania, 15207, United States",
+        "address": {"house_number": "4940", "road": "Second Avenue", "city": "Pittsburgh"},
+    }
+]
 
 
 # --------------------------------------------------------------- canonical form
@@ -53,7 +58,7 @@ def test_ordinal_abbreviations_are_normalised_so_one_address_has_one_key():
     assert rc._canonical_address("112 S 18th St") == "112 south eighteenth street"
     assert rc._canonical_address("1 N Main St, Pittsburgh") == "1 north main street, pittsburgh"
     assert rc._ordinal_word(21) == "twenty first" and rc._ordinal_word(30) == "thirtieth"
-    assert rc._ordinal_word(112) == "112th"                                # rare: keep the digits
+    assert rc._ordinal_word(112) == "112th"  # rare: keep the digits
 
 
 def test_every_spelling_of_an_address_shares_one_cache_key():
@@ -67,11 +72,18 @@ def test_every_spelling_of_an_address_shares_one_cache_key():
 
 
 def test_the_city_is_appended_only_when_the_query_does_not_already_name_it():
-    assert rc._raw_search_text("954 Gladys Ave, Pittsburgh, PA 15216", "Pittsburgh, PA") == "954 Gladys Ave, Pittsburgh, PA 15216"
-    assert rc._canonical_search_text("4940 2nd Ave, Hazelwood, PA 15207", "Pittsburgh, PA") == \
-        "4940 second avenue, hazelwood, pa 15207, pittsburgh, pa"
-    assert rc._canonical_search_text("4940 Second Avenue, Hazelwood, PA 15207, Pittsburgh, PA", "Pittsburgh, PA") == \
-        "4940 second avenue, hazelwood, pa 15207, pittsburgh, pa"
+    assert (
+        rc._raw_search_text("954 Gladys Ave, Pittsburgh, PA 15216", "Pittsburgh, PA")
+        == "954 Gladys Ave, Pittsburgh, PA 15216"
+    )
+    assert (
+        rc._canonical_search_text("4940 2nd Ave, Hazelwood, PA 15207", "Pittsburgh, PA")
+        == "4940 second avenue, hazelwood, pa 15207, pittsburgh, pa"
+    )
+    assert (
+        rc._canonical_search_text("4940 Second Avenue, Hazelwood, PA 15207, Pittsburgh, PA", "Pittsburgh, PA")
+        == "4940 second avenue, hazelwood, pa 15207, pittsburgh, pa"
+    )
 
 
 # ------------------------------------------------------------- the house shortcut
@@ -84,7 +96,7 @@ def test_a_listed_house_is_geocoded_from_the_database_without_any_http(fresh_db,
     assert (place["lat"], place["lon"]) == (40.408895, -79.943894)
     assert place["source"] == "houses" and place["cached"] is True
     assert "Hazelwood" in place["display_name"]
-    assert nominatim.calls == []                                          # no geocoder needed at all
+    assert nominatim.calls == []  # no geocoder needed at all
 
 
 def test_the_house_shortcut_is_written_to_the_cache_for_reuse(fresh_db, nominatim):
@@ -93,8 +105,7 @@ def test_the_house_shortcut_is_written_to_the_cache_for_reuse(fresh_db, nominati
         "('haz','4940 2nd Ave','Hazelwood','PA','15207',40.408895,-79.943894)"
     )
     run(rc.geocode_place("4940 2nd Ave, Hazelwood, PA 15207"))
-    row = fresh_db.get_conn().execute(
-        "SELECT geocode_source, geocode_accuracy FROM geocode_cache").fetchall()
+    row = fresh_db.get_conn().execute("SELECT geocode_source, geocode_accuracy FROM geocode_cache").fetchall()
     assert row == [("houses", "house_coordinates")]
 
 
@@ -114,15 +125,17 @@ def test_the_second_spelling_is_tried_when_the_first_returns_nothing(fresh_db, n
     place = run(rc.geocode_place("4940 2nd Ave, Hazelwood, PA 15207"))
     assert place["lat"] == pytest.approx(40.4089261) and place["cached"] is False
     assert nominatim.calls == [
-        "4940 2nd Ave, Hazelwood, PA 15207, Pittsburgh, PA",               # the spelling sent before the fix
-        "4940 second avenue, hazelwood, pa 15207, pittsburgh, pa",         # OSM's spelling
+        "4940 2nd Ave, Hazelwood, PA 15207, Pittsburgh, PA",  # the spelling sent before the fix
+        "4940 second avenue, hazelwood, pa 15207, pittsburgh, pa",  # OSM's spelling
     ]
 
 
 def test_digit_ordinals_are_kept_in_the_third_spelling(fresh_db, nominatim):
     """OSM keeps "South 18th Street" in digits, so the words form must not be the only retry."""
-    assert rc._canonical_search_text("112 S 18th St, South Side, PA 15203", "Pittsburgh, PA",
-                                     ordinal_words=False) == "112 south 18th street, south side, pa 15203, pittsburgh, pa"
+    assert (
+        rc._canonical_search_text("112 S 18th St, South Side, PA 15203", "Pittsburgh, PA", ordinal_words=False)
+        == "112 south 18th street, south side, pa 15203, pittsburgh, pa"
+    )
 
 
 def test_a_resolved_address_is_cached_and_served_for_every_spelling(fresh_db, nominatim):
@@ -132,17 +145,17 @@ def test_a_resolved_address_is_cached_and_served_for_every_spelling(fresh_db, no
     second = run(rc.geocode_place("4940 Second Avenue, Hazelwood, PA 15207"))
     assert second["cached"] is True and second["lat"] == first["lat"]
     assert second["display_name"].startswith("4940, Second Avenue")
-    assert len(nominatim.calls) == calls_after_first                        # no second lookup
+    assert len(nominatim.calls) == calls_after_first  # no second lookup
 
 
 def test_a_remembered_miss_is_not_retried_on_the_next_turn(fresh_db, nominatim):
     with pytest.raises(ValueError, match="Could not find"):
         run(rc.geocode_place("1 Nowhere At All, Hazelwood, PA 15207"))
     first = len(nominatim.calls)
-    assert first == 1                          # no ordinal here, so all three spellings coincide
+    assert first == 1  # no ordinal here, so all three spellings coincide
     with pytest.raises(ValueError, match="Could not find"):
         run(rc.geocode_place("1 Nowhere At All, Hazelwood, PA 15207"))
-    assert len(nominatim.calls) == first                                  # served from the miss entry
+    assert len(nominatim.calls) == first  # served from the miss entry
 
 
 def test_an_expired_miss_is_retried(fresh_db, nominatim):
@@ -171,10 +184,17 @@ def test_cached_coordinates_outside_pittsburgh_are_rejected(fresh_db, nominatim)
     key = rc._address_cache_key("500 Grant St, Pittsburgh, PA", "Pittsburgh, PA")
     fresh_db.get_conn().execute(
         "INSERT INTO geocode_cache (address_key, full_address, lat, lon, geocode_source, geocode_accuracy) "
-        "VALUES (?, 'Somewhere else', 47.6, -122.3, 'nominatim', 'pittsburgh_bounded_place')", [key])
-    nominatim.hits["500 grant street, pittsburgh, pa"] = [{
-        "lat": "40.4395", "lon": "-79.9965", "display_name": "500 Grant St, Pittsburgh, PA", "importance": 1.0,
-    }]
+        "VALUES (?, 'Somewhere else', 47.6, -122.3, 'nominatim', 'pittsburgh_bounded_place')",
+        [key],
+    )
+    nominatim.hits["500 grant street, pittsburgh, pa"] = [
+        {
+            "lat": "40.4395",
+            "lon": "-79.9965",
+            "display_name": "500 Grant St, Pittsburgh, PA",
+            "importance": 1.0,
+        }
+    ]
     assert run(rc.geocode_place("500 Grant St, Pittsburgh, PA"))["lat"] == pytest.approx(40.4395)
 
 
@@ -184,7 +204,8 @@ def test_legacy_cache_rows_stay_reachable(fresh_db, nominatim):
     fresh_db.get_conn().execute(
         "INSERT INTO geocode_cache (address_key, full_address, lat, lon, geocode_source, geocode_accuracy) "
         "VALUES (?, '500 Grant St, Pittsburgh, PA', 40.4395, -79.9965, 'nominatim', 'pittsburgh_bounded_place')",
-        [legacy])
+        [legacy],
+    )
     place = run(rc.geocode_place("500 Grant St, Pittsburgh, PA, Pittsburgh, PA"))
     assert place["cached"] is True and place["lat"] == pytest.approx(40.4395)
     assert nominatim.calls == []

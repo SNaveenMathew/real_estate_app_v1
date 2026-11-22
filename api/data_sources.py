@@ -17,6 +17,7 @@ The health check makes up to 15 outbound HTTP requests, but they run concurrentl
 Uploads are treated as hostile input: the name is sanitized, the size is capped while it
 streams, and no file survives a rejected request (api/uploads.py).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -89,12 +90,14 @@ async def refresh_data_source(key: str, file: UploadFile = File(...)):
         dest, name = await asyncio.to_thread(_save_refresh_upload, file, folder)
         allowed = {e.strip() for e in source.accept.split(",")}
         ext = Path(name).suffix.lower()
-        if ext not in allowed:              # cheap, client-input validation: answer it now, not from the job
-            raise HTTPException(status_code=422,
-                                detail=f"Expected one of {sorted(allowed)} for this source, got '{ext}'.")
+        if ext not in allowed:  # cheap, client-input validation: answer it now, not from the job
+            raise HTTPException(
+                status_code=422, detail=f"Expected one of {sorted(allowed)} for this source, got '{ext}'."
+            )
         try:
-            job = jobs.start("refresh", f"Reloading {key}",
-                             lambda j: _refresh_in_background(j, key, dest, name, folder))
+            job = jobs.start(
+                "refresh", f"Reloading {key}", lambda j: _refresh_in_background(j, key, dest, name, folder)
+            )
         except jobs.JobBusy as busy:
             raise HTTPException(status_code=409, detail=str(busy), headers={"Retry-After": "5"})
     except BaseException:

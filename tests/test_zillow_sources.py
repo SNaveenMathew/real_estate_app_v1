@@ -8,6 +8,7 @@ Unit tests for Zillow research data sources (ZHVI and Market Heat Index):
 - House Chat price estimator output (agents/house_agent.py::make_house_approved_functions)
 - Unified catalog registration of tables, relationships, and concepts
 """
+
 import io
 import textwrap
 from pathlib import Path
@@ -27,6 +28,7 @@ from db import catalog_seed as seed
 
 
 # ─── 1. Zip Code Normalization Tests ─────────────────────────────────────────
+
 
 def test_normalize_zip5_standard_and_variations():
     assert normalize_zip5("15213") == "15213"
@@ -57,6 +59,7 @@ def test_normalize_zip5_invalid_and_empty():
 
 
 # ─── 2. Wide CSV Parsing and Melting Tests ────────────────────────────────────
+
 
 def test_melt_wide_file_success(tmp_path):
     csv_content = textwrap.dedent("""\
@@ -120,6 +123,7 @@ def test_melt_wide_file_no_date_columns(tmp_path):
 
 # ─── 3. Parser Configurations and Directory Loading ──────────────────────────
 
+
 def test_parser_configurations():
     assert ZhviParser.key == "zhvi"
     assert ZhviParser.table == "zhvi"
@@ -135,16 +139,22 @@ def test_parser_configurations():
 
 def test_zillow_load_dir_multiple_files(tmp_path):
     f1 = tmp_path / "zhvi_zip.csv"
-    f1.write_text(textwrap.dedent("""\
+    f1.write_text(
+        textwrap.dedent("""\
         RegionID,RegionName,RegionType,2024-01-31
         101,15213,zip,350000
-    """), encoding="utf-8")
+    """),
+        encoding="utf-8",
+    )
 
     f2 = tmp_path / "zhvi_metro.csv"
-    f2.write_text(textwrap.dedent("""\
+    f2.write_text(
+        textwrap.dedent("""\
         RegionID,RegionName,RegionType,2024-01-31
         202,"Pittsburgh, PA",msa,240000
-    """), encoding="utf-8")
+    """),
+        encoding="utf-8",
+    )
 
     # A non-csv file that should be ignored
     (tmp_path / "notes.txt").write_text("ignore me")
@@ -157,6 +167,7 @@ def test_zillow_load_dir_multiple_files(tmp_path):
 
 # ─── 4. CBSA / MSA Resolution Tests ──────────────────────────────────────────
 
+
 def test_compute_zillow_msa_codes(fresh_db):
     conn = fresh_db.get_conn()
     conn.execute("""
@@ -164,11 +175,13 @@ def test_compute_zillow_msa_codes(fresh_db):
         VALUES ('38300', 'Pittsburgh, PA', '42003')
     """)
 
-    sample_df = pd.DataFrame([
-        {"region_type": "metro", "region_name": "Pittsburgh, PA", "metro": None},
-        {"region_type": "zip", "region_name": "15213", "metro": "Pittsburgh, PA"},
-        {"region_type": "state", "region_name": "PA", "metro": None},
-    ])
+    sample_df = pd.DataFrame(
+        [
+            {"region_type": "metro", "region_name": "Pittsburgh, PA", "metro": None},
+            {"region_type": "zip", "region_name": "15213", "metro": "Pittsburgh, PA"},
+            {"region_type": "state", "region_name": "PA", "metro": None},
+        ]
+    )
 
     msa_codes = data_loader._compute_zillow_msa_codes(sample_df)
     assert msa_codes.iloc[0] == "38300"
@@ -177,6 +190,7 @@ def test_compute_zillow_msa_codes(fresh_db):
 
 
 # ─── 5. DuckDB Store ZHVI Price Estimation & 3-Tier Fallback ──────────────────
+
 
 def test_get_last_sold_snapshot(fresh_db):
     conn = fresh_db.get_conn()
@@ -381,6 +395,7 @@ def test_house_chat_turn_reports_the_zhvi_estimate(fresh_db, monkeypatch):
         def invoke(self, messages):
             class _R:
                 content = "final_result = estimate_price_with_code()"
+
             return _R()
 
     class _EvidenceEchoLLM:
@@ -389,12 +404,14 @@ def test_house_chat_turn_reports_the_zhvi_estimate(fresh_db, monkeypatch):
 
             class _R:
                 content = evidence.strip()
+
             return _R()
 
     monkeypatch.setattr(house_agent, "_get_house_code_agent", lambda: _CodeLLM())
     monkeypatch.setattr(house_agent, "_get_house_response_agent", lambda: _EvidenceEchoLLM())
     monkeypatch.setattr(
-        GuardrailManager, "inspect_turn_input",
+        GuardrailManager,
+        "inspect_turn_input",
         staticmethod(lambda msg: GuardrailResult(passed=True, sanitized_text=msg, reasons=[])),
     )
     monkeypatch.setattr(house_agent, "validate_response", lambda reply, *a, **kw: reply)
@@ -409,6 +426,7 @@ def test_house_chat_turn_reports_the_zhvi_estimate(fresh_db, monkeypatch):
 
 
 # ─── 7. Unified Catalog Registration Tests ────────────────────────────────────
+
 
 def test_zhvi_and_heat_index_in_catalog(fresh_db):
     assert "zhvi" in schema.TABLES
@@ -438,6 +456,7 @@ def test_zhvi_and_heat_index_in_catalog(fresh_db):
 
 
 # ─── 8. Data Sources Registry & Refresh Orchestration Tests ──────────────────
+
 
 def test_zhvi_and_heat_index_in_data_sources_registry():
     from services import data_sources as ds
@@ -479,12 +498,14 @@ def test_zhvi_refresh_orchestration_and_precheck(fresh_db, tmp_path, monkeypatch
 
     # 2. Accept and load valid wide CSV
     good_file = tmp_path / "good.csv"
-    good_file.write_text(textwrap.dedent("""\
+    good_file.write_text(
+        textwrap.dedent("""\
         RegionID,RegionName,RegionType,StateName,2024-01-31
         999,15213,zip,PA,320000
-    """), encoding="utf-8")
+    """),
+        encoding="utf-8",
+    )
     res = ds.refresh_source("zhvi", good_file, "good.csv")
     assert res["ok"] is True
     assert res["rows_after"] >= 1
     assert fresh_db.get_conn().execute("SELECT COUNT(*) FROM zhvi").fetchone()[0] == 1
-

@@ -3,6 +3,7 @@
 Behaviour is unchanged: the facade in services/data_loader.py re-exports every name here, so
 `from services.data_loader import ...` (and scripts that call it) keep working.
 """
+
 from __future__ import annotations
 
 """
@@ -18,9 +19,7 @@ from config import settings
 import db.duckdb_store as store
 
 
-
-
-__all__ = ['_BIKE_LAYER_SPECS', '_norm_folder_name', '_bike_route_id', '_json_safe_value', 'load_bike_routes']
+__all__ = ["_BIKE_LAYER_SPECS", "_norm_folder_name", "_bike_route_id", "_json_safe_value", "load_bike_routes"]
 
 # ── Bike routes ────────────────────────────────────────────────────────────────
 # Standardizes any BikePGH-style line datasets stored as:
@@ -29,18 +28,19 @@ __all__ = ['_BIKE_LAYER_SPECS', '_norm_folder_name', '_bike_route_id', '_json_sa
 # colors are preserved verbatim for the frontend visualization.
 
 _BIKE_LAYER_SPECS = {
-    "bike lanes":               ("bike_lanes", "Bike Lanes", "steelblue"),
-    "bikeable sidewalks":       ("bikeable_sidewalks", "Bikeable Sidewalks", "lightblue"),
-    "cautionary bike route":    ("cautionary_bike_route", "Cautionary Bike Route", "red"),
-    "on street bike route":     ("on_street_bike_route", "On Street Bike Route", "lightgreen"),
-    "protected bike lanes":     ("protected_bike_lanes", "Protected Bike Lanes", "darkgreen"),
-    "sharrows":                 ("sharrows", "Sharrows", "orange"),
-    "trails":                   ("trails", "Trails", "pink"),
+    "bike lanes": ("bike_lanes", "Bike Lanes", "steelblue"),
+    "bikeable sidewalks": ("bikeable_sidewalks", "Bikeable Sidewalks", "lightblue"),
+    "cautionary bike route": ("cautionary_bike_route", "Cautionary Bike Route", "red"),
+    "on street bike route": ("on_street_bike_route", "On Street Bike Route", "lightgreen"),
+    "protected bike lanes": ("protected_bike_lanes", "Protected Bike Lanes", "darkgreen"),
+    "sharrows": ("sharrows", "Sharrows", "orange"),
+    "trails": ("trails", "Trails", "pink"),
 }
 
 
 def _norm_folder_name(value: str) -> str:
     import re as _re
+
     return _re.sub(r"\s+", " ", str(value).strip().lower())
 
 
@@ -70,7 +70,7 @@ def _json_safe_value(value):
 def load_bike_routes() -> int:
     """
     Load all recognized bike-route shapefiles beneath data/bike/<city>/.\n
-    No city-specific parser is required. The city folder and recognized layer\n    folder determine the standardized metadata, while GeoPandas handles each\n    source CRS and reprojects geometry to EPSG:4326. Multiple shapefiles per\n    layer/city are supported.\n    """
+    No city-specific parser is required. The city folder and recognized layer\n    folder determine the standardized metadata, while GeoPandas handles each\n    source CRS and reprojects geometry to EPSG:4326. Multiple shapefiles per\n    layer/city are supported.\n"""
     import geopandas as gpd
     import json as _json
 
@@ -117,27 +117,30 @@ def load_bike_routes() -> int:
                         geom = feature.geometry
                         minx, miny, maxx, maxy = geom.bounds
                         props = {
-                            str(k): _json_safe_value(v)
-                            for k, v in feature.drop(labels=["geometry"]).to_dict().items()
+                            str(k): _json_safe_value(v) for k, v in feature.drop(labels=["geometry"]).to_dict().items()
                         }
-                        rows.append({
-                            "route_id": _bike_route_id(city, layer_type, shp_path.name, i),
-                            "city": city,
-                            "layer_type": layer_type,
-                            "layer_label": layer_label,
-                            "color": color,
-                            "source_file": str(shp_path.relative_to(bike_root)),
-                            "min_lon": float(minx),
-                            "min_lat": float(miny),
-                            "max_lon": float(maxx),
-                            "max_lat": float(maxy),
-                            "geometry_json": _json.dumps(geom.__geo_interface__, ensure_ascii=False),
-                            "properties_json": _json.dumps(props, ensure_ascii=False),
-                        })
+                        rows.append(
+                            {
+                                "route_id": _bike_route_id(city, layer_type, shp_path.name, i),
+                                "city": city,
+                                "layer_type": layer_type,
+                                "layer_label": layer_label,
+                                "color": color,
+                                "source_file": str(shp_path.relative_to(bike_root)),
+                                "min_lon": float(minx),
+                                "min_lat": float(miny),
+                                "max_lon": float(maxx),
+                                "max_lat": float(maxy),
+                                "geometry_json": _json.dumps(geom.__geo_interface__, ensure_ascii=False),
+                                "properties_json": _json.dumps(props, ensure_ascii=False),
+                            }
+                        )
                     print(f"    ✓ {len(gdf):,} features")
                 except Exception as e:
                     print(f"    Error loading {shp_path}: {e}")
-                    import traceback; traceback.print_exc()
+                    import traceback
+
+                    traceback.print_exc()
 
     if not rows:
         print("  No recognized bike route shapefiles found. Expected paths like")

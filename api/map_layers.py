@@ -13,6 +13,7 @@ to build its toggle panel from) but have no data route here — they are already
 ``/api/houses`` and ``/api/commute/*`` respectively, with the interactive behavior (selection,
 favoriting, chat handoff) that only makes sense built into the map page itself.
 """
+
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query

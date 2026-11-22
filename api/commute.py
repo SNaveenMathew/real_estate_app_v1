@@ -14,6 +14,7 @@ that stay ``async`` do so because they schedule the background compute job on th
 ``put_work``, look the address up over HTTP first); the job itself does its routing calls in worker
 threads too.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -38,7 +39,7 @@ async def put_work(payload: dict = Body(...)):
     address = str(payload.get("address") or "").strip()
     try:
         if address:
-            place = await asyncio.to_thread(commute.geocode_work_address, address)     # HTTP only; no DuckDB in the worker
+            place = await asyncio.to_thread(commute.geocode_work_address, address)  # HTTP only; no DuckDB in the worker
         elif payload.get("lat") is not None and payload.get("lon") is not None:
             lat, lon = float(payload["lat"]), float(payload["lon"])
             if not (-90 <= lat <= 90 and -180 <= lon <= 180):
@@ -51,7 +52,7 @@ async def put_work(payload: dict = Body(...)):
     except (TypeError, ValueError):
         raise HTTPException(status_code=422, detail="Latitude and longitude must be numbers.")
     commute.set_work(place)
-    job = commute.start_refresh("missing")        # every row is stale for a new location, so this computes all of them
+    job = commute.start_refresh("missing")  # every row is stale for a new location, so this computes all of them
     return {"work": place.as_dict(), "job": job}
 
 
@@ -84,7 +85,10 @@ def get_status():
 def get_house_commute(house_id: str):
     store.get_conn()
     place = commute.get_work()
-    return {"work": place.as_dict() if place else None, "commute": commute.commute_for_house(house_id) if place else None}
+    return {
+        "work": place.as_dict() if place else None,
+        "commute": commute.commute_for_house(house_id) if place else None,
+    }
 
 
 @router.get("/summary")

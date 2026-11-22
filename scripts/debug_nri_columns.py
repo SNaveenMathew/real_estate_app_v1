@@ -5,14 +5,17 @@ and show which ones made it into nri_tracts vs which are NULL.
 Usage:
     python debug_nri_columns.py
 """
+
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import settings
 import db.duckdb_store as store
 
 SEP = "─" * 70
+
 
 def run():
     print(SEP)
@@ -21,8 +24,26 @@ def run():
 
     # ── 1. What's in nri_tracts right now ────────────────────────────────
     print("\n[1] nri_tracts — NULL counts for all hazard columns")
-    hazards = ["avln","cfld","cwav","drgt","erqk","hail","hwav","hrcn",
-               "istm","lnds","ltng","rfld","swnd","trnd","tsun","vlcn","wfir","wntw"]
+    hazards = [
+        "avln",
+        "cfld",
+        "cwav",
+        "drgt",
+        "erqk",
+        "hail",
+        "hwav",
+        "hrcn",
+        "istm",
+        "lnds",
+        "ltng",
+        "rfld",
+        "swnd",
+        "trnd",
+        "tsun",
+        "vlcn",
+        "wfir",
+        "wntw",
+    ]
 
     rows = []
     for hz in hazards:
@@ -34,15 +55,15 @@ def run():
                        AVG({col}) as avg_val
                 FROM nri_tracts
             """)
-            total    = int(df.iloc[0]["total"])
+            total = int(df.iloc[0]["total"])
             non_null = int(df.iloc[0]["non_null"])
-            avg_val  = df.iloc[0]["avg_val"]
-            rows.append((col, total, non_null, f"{avg_val:.2f}" if avg_val and avg_val==avg_val else "NULL"))
+            avg_val = df.iloc[0]["avg_val"]
+            rows.append((col, total, non_null, f"{avg_val:.2f}" if avg_val and avg_val == avg_val else "NULL"))
         except Exception as e:
             rows.append((col, 0, 0, f"ERROR: {e}"))
 
     print(f"  {'Column':<20} {'Total':>8} {'Non-NULL':>9} {'Avg':>10}")
-    print(f"  {'-'*20} {'-'*8} {'-'*9} {'-'*10}")
+    print(f"  {'-' * 20} {'-' * 8} {'-' * 9} {'-' * 10}")
     all_null = True
     for col, total, non_null, avg in rows:
         flag = " ← ALL NULL" if non_null == 0 else ""
@@ -62,6 +83,7 @@ def run():
     else:
         try:
             import geopandas as gpd
+
             print(f"  Reading column names from: {shp_path.name}")
             print("  (reading only 1 row to get schema — fast)")
             gdf = gpd.read_file(shp_path, rows=1)
@@ -69,12 +91,34 @@ def run():
             print(f"\n  Found {len(cols)} columns:")
 
             # Group by likely category
-            risk_cols  = [c for c in cols if "RISK" in c.upper()]
-            hazard_cols= [c for c in cols if any(
-                hz.upper() in c.upper() for hz in
-                ["AVLN","CFLD","CWAV","DRGT","ERQK","HAIL","HWAV","HRCN",
-                 "ISTM","LNDS","LTNG","RFLD","SWND","TRND","TSUN","VLCN","WFIR","WNTW"]
-            )]
+            risk_cols = [c for c in cols if "RISK" in c.upper()]
+            hazard_cols = [
+                c
+                for c in cols
+                if any(
+                    hz.upper() in c.upper()
+                    for hz in [
+                        "AVLN",
+                        "CFLD",
+                        "CWAV",
+                        "DRGT",
+                        "ERQK",
+                        "HAIL",
+                        "HWAV",
+                        "HRCN",
+                        "ISTM",
+                        "LNDS",
+                        "LTNG",
+                        "RFLD",
+                        "SWND",
+                        "TRND",
+                        "TSUN",
+                        "VLCN",
+                        "WFIR",
+                        "WNTW",
+                    ]
+                )
+            ]
             other_cols = [c for c in cols if c not in risk_cols and c not in hazard_cols]
 
             print(f"\n  Composite risk columns ({len(risk_cols)}):")

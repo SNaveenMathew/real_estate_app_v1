@@ -12,6 +12,7 @@ general-agent-facing wrappers query_database / find_bike_route).
 All tests use the `reference_data` fixture from conftest.py so they run
 against a real DuckDB schema with the same dtypes the production code sees.
 """
+
 import pandas as pd
 import pytest
 
@@ -23,9 +24,7 @@ from agents import artifacts as A
 
 def _nri_row(conn, tract_fips: str) -> bool:
     """Return True if nri_tracts has a row for the given tract."""
-    result = conn.execute(
-        "SELECT COUNT(*) FROM nri_tracts WHERE tract_fips = ?", [tract_fips]
-    ).fetchone()
+    result = conn.execute("SELECT COUNT(*) FROM nri_tracts WHERE tract_fips = ?", [tract_fips]).fetchone()
     return result[0] > 0
 
 
@@ -253,7 +252,7 @@ def test_multiple_house_functions_accumulate_artifacts(reference_data):
     A.reset_artifacts()
     funcs = make_house_approved_functions("h1")
 
-    funcs["get_nri_risk_data"]()      # emits 1 chart
+    funcs["get_nri_risk_data"]()  # emits 1 chart
     funcs["get_nearby_sold_homes"]()  # emits 1 table
 
     produced = A.collect_artifacts()
@@ -279,12 +278,14 @@ def test_run_house_chat_returns_three_tuple(reference_data, monkeypatch):
         def invoke(self, messages):
             class _R:
                 content = "final_result = get_house_details()"
+
             return _R()
 
     class _FakeResponseLLM:
         def invoke(self, messages):
             class _R:
                 content = "This is a stub answer about the house."
+
             return _R()
 
     monkeypatch.setattr(house_agent, "_get_house_code_agent", lambda: _FakeCodeLLM())
@@ -292,18 +293,15 @@ def test_run_house_chat_returns_three_tuple(reference_data, monkeypatch):
 
     # Stub guardrails to always pass
     from services.guardrails import GuardrailManager, GuardrailResult
-    monkeypatch.setattr(
-        GuardrailManager, "inspect_turn_input",
-        staticmethod(lambda msg: GuardrailResult(passed=True, sanitized_text=msg, reasons=[]))
-    )
-    monkeypatch.setattr(
-        house_agent, "validate_response",
-        lambda reply, *a, **kw: reply
-    )
 
-    reply, history, artifacts = house_agent.run_house_chat(
-        "h1", "Tell me about this house."
+    monkeypatch.setattr(
+        GuardrailManager,
+        "inspect_turn_input",
+        staticmethod(lambda msg: GuardrailResult(passed=True, sanitized_text=msg, reasons=[])),
     )
+    monkeypatch.setattr(house_agent, "validate_response", lambda reply, *a, **kw: reply)
+
+    reply, history, artifacts = house_agent.run_house_chat("h1", "Tell me about this house.")
 
     assert isinstance(reply, str) and reply
     assert isinstance(history, list)

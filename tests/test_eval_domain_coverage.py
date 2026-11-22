@@ -8,6 +8,7 @@ Two independent things are checked, neither of which needs a model:
 2. Each question reaches the intended table through the deterministic query planner,
    so the examples are answerable with the tools the agent actually has.
 """
+
 from __future__ import annotations
 
 import db.duckdb_store as store
@@ -36,7 +37,10 @@ def scalar(conn, sql: str):
 
 def test_crime_constants_match_sql(fixture_conn):
     conn = fixture_conn
-    assert scalar(conn, "SELECT COUNT(*) FROM crime_incidents WHERE city = 'pittsburgh'") == fixtures.PITTSBURGH_CRIME_COUNT
+    assert (
+        scalar(conn, "SELECT COUNT(*) FROM crime_incidents WHERE city = 'pittsburgh'")
+        == fixtures.PITTSBURGH_CRIME_COUNT
+    )
     assert scalar(conn, "SELECT COUNT(*) FROM crime_incidents") == fixtures.TOTAL_CRIME_COUNT
     assert scalar(conn, "SELECT COUNT(DISTINCT city) FROM crime_incidents") == fixtures.CRIME_CITY_COUNT
     assert scalar(conn, "SELECT AVG(severity_weight) FROM crime_incidents") == pytest.approx(
@@ -62,7 +66,10 @@ def test_crime_severity_comes_from_the_taxonomy(fixture_conn):
 
 def test_bike_and_transit_constants_match_sql(fixture_conn):
     conn = fixture_conn
-    assert scalar(conn, "SELECT COUNT(*) FROM bike_routes WHERE city = 'pittsburgh'") == fixtures.PITTSBURGH_BIKE_ROUTE_COUNT
+    assert (
+        scalar(conn, "SELECT COUNT(*) FROM bike_routes WHERE city = 'pittsburgh'")
+        == fixtures.PITTSBURGH_BIKE_ROUTE_COUNT
+    )
     assert scalar(conn, "SELECT COUNT(*) FROM bike_routes") == fixtures.TOTAL_BIKE_ROUTE_COUNT
     assert scalar(conn, "SELECT COUNT(DISTINCT ntd_id) FROM transit_agencies") == fixtures.TRANSIT_AGENCY_COUNT
     assert scalar(conn, "SELECT SUM(upt) FROM transit_ridership") == pytest.approx(
@@ -112,11 +119,19 @@ def test_question_routes_to_its_table(example_id, table):
 
 def test_new_examples_carry_domain_tags():
     tags = {
-        "crime": {"crime_incident_count_pittsburgh", "crime_city_count", "crime_avg_severity_weight",
-                  "crime_miami_severity_total"},
+        "crime": {
+            "crime_incident_count_pittsburgh",
+            "crime_city_count",
+            "crime_avg_severity_weight",
+            "crime_miami_severity_total",
+        },
         "bike": {"bike_route_count_pittsburgh", "bike_route_count_loaded"},
-        "transit": {"transit_agency_count", "transit_ridership_total", "transit_top_ridership_agency",
-                    "transit_route_count"},
+        "transit": {
+            "transit_agency_count",
+            "transit_ridership_total",
+            "transit_top_ridership_agency",
+            "transit_route_count",
+        },
         "commute": {"commute_avg_drive_time", "commute_shortest_bike_ride"},
     }
     for tag, ids in tags.items():

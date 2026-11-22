@@ -22,6 +22,7 @@ Performance and reliability
   the geometry can never serve stale areas.  Access is lock-protected (the API serves requests on a thread pool).
 * At most ``MAX_METROS`` metro areas per call bounds the work; unbounded "rank every metro by area" is declined clearly.
 """
+
 from __future__ import annotations
 
 import re
@@ -37,11 +38,11 @@ from services.derived_measures import DerivedError, DerivedResult, MeasureInfo
 
 SQ_M_PER_SQ_MI = 2_589_988.110336
 KM2_PER_MI2 = 2.589988110336
-EQUAL_AREA_CRS = "EPSG:5070"            # NAD83 / CONUS Albers: equal-area, so polygon areas are meaningful anywhere
+EQUAL_AREA_CRS = "EPSG:5070"  # NAD83 / CONUS Albers: equal-area, so polygon areas are meaningful anywhere
 MAX_METROS = 25
-MIN_TRACT_COVERAGE = 0.95               # share of a metro's census tracts that must have a polygon
-MIN_POPULATION_COVERAGE = 0.98          # ... and the share of its population those tracts hold
-RECONCILE_TOLERANCE = 0.01              # report when tract-summed population differs from the MSA file by more than this
+MIN_TRACT_COVERAGE = 0.95  # share of a metro's census tracts that must have a polygon
+MIN_POPULATION_COVERAGE = 0.98  # ... and the share of its population those tracts hold
+RECONCILE_TOLERANCE = 0.01  # report when tract-summed population differs from the MSA file by more than this
 
 # Must equal the codes in agents/answer_status.py (tests/test_census_metrics.py enforces it); the services layer does not
 # import from the agents layer.
@@ -49,9 +50,11 @@ DATA_UNAVAILABLE = "data_unavailable"
 PLACE_MISSING = "place_missing"
 LIMIT_EXCEEDED = "limit_exceeded"
 
-GEOMETRY_HELP = ("No census-tract boundary geometry is available. Load the NRI shapefile (it caches "
-                 "data/nri/nri_geometry_cache.parquet) or add TIGER/Line tract shapefiles to data/shapefiles/, "
-                 "then re-run setup_data.py.")
+GEOMETRY_HELP = (
+    "No census-tract boundary geometry is available. Load the NRI shapefile (it caches "
+    "data/nri/nri_geometry_cache.parquet) or add TIGER/Line tract shapefiles to data/shapefiles/, "
+    "then re-run setup_data.py."
+)
 
 _KM = re.compile(r"\b(?:sq\.?\s*km|square\s+kilomet(?:er|re)s?|sq\.?\s*kilomet(?:er|re)s?|km2|km\u00b2)", re.I)
 _MSA_SUFFIX = re.compile(r"\s+(?:metro|micro)(?:politan)?\s+(?:statistical\s+)?area\s*$", re.I)
@@ -104,7 +107,7 @@ def reset_caches() -> None:
 
 
 def _geometry_index() -> _GeometryIndex:
-    from services import geo_utils          # lazy: geopandas is heavy and most requests never need geometry
+    from services import geo_utils  # lazy: geopandas is heavy and most requests never need geometry
 
     gdf = geo_utils._load_tracts_gdf()
     if gdf is None or len(gdf) == 0 or "tract_fips" not in gdf.columns:
@@ -149,7 +152,9 @@ def _counties_by_code(codes: list[str]) -> dict[str, list[str]]:
         return {}
     df = _query(
         "SELECT cbsa_code, CAST(state_fips AS VARCHAR) || CAST(county_fips AS VARCHAR) AS county "
-        f"FROM cbsa_counties WHERE cbsa_code IN ({_placeholders(len(codes))})", codes)
+        f"FROM cbsa_counties WHERE cbsa_code IN ({_placeholders(len(codes))})",
+        codes,
+    )
     out: dict[str, list[str]] = {}
     for code, county in zip(df["cbsa_code"].astype(str), df["county"].astype(str)):
         out.setdefault(code, []).append(county)
@@ -165,9 +170,13 @@ def _counties_by_title(name: str) -> list[str]:
 
 
 def _load_metros(names: list[str]) -> list[_Metro]:
-    msa = _query(f"SELECT msa_code, name, population FROM census_msa WHERE name IN ({_placeholders(len(names))})", names)
+    msa = _query(
+        f"SELECT msa_code, name, population FROM census_msa WHERE name IN ({_placeholders(len(names))})", names
+    )
     rows = {str(r["name"]): r for r in msa.to_dict("records")}
-    real_codes = [str(r["msa_code"]) for r in rows.values() if r["msa_code"] and not str(r["msa_code"]).upper().startswith("X")]
+    real_codes = [
+        str(r["msa_code"]) for r in rows.values() if r["msa_code"] and not str(r["msa_code"]).upper().startswith("X")
+    ]
     by_code = _counties_by_code(real_codes)
     metros = []
     for name in names:
@@ -183,15 +192,21 @@ def _load_metros(names: list[str]) -> list[_Metro]:
                 DATA_UNAVAILABLE,
                 f"{name} has no member-county list in cbsa_counties (its CBSA code is unresolved), so its census tracts "
                 "cannot be determined. Run scripts/diagnose_msa.py to see why it did not match a CBSA, or reload the "
-                "CBSA delineation with setup_data.py.")
+                "CBSA delineation with setup_data.py.",
+            )
         population = row["population"]
-        metros.append(_Metro(name, None if pd.isna(population) else float(population), sorted(set(counties)), via_title))
+        metros.append(
+            _Metro(name, None if pd.isna(population) else float(population), sorted(set(counties)), via_title)
+        )
     return metros
 
 
 def _tract_populations(counties: list[str]) -> pd.DataFrame:
-    df = _query("SELECT tract_fips, population FROM census_tracts "
-                     f"WHERE left(tract_fips, 5) IN ({_placeholders(len(counties))})", counties)
+    df = _query(
+        "SELECT tract_fips, population FROM census_tracts "
+        f"WHERE left(tract_fips, 5) IN ({_placeholders(len(counties))})",
+        counties,
+    )
     df["tract_fips"] = df["tract_fips"].astype(str)
     df["county"] = df["tract_fips"].str[:5]
     df["population"] = pd.to_numeric(df["population"], errors="coerce")
@@ -205,17 +220,37 @@ class MetroGeometryProvider:
     id = "msa_geometry"
     entity_type = "MSA"
     entity_label = "metropolitan area"
-    evidence_label = "Derived tract-area aggregation"      # shown where the SQL normally appears (historical wording kept)
+    evidence_label = "Derived tract-area aggregation"  # shown where the SQL normally appears (historical wording kept)
     measures = {
-        "population": MeasureInfo("population", "population", "people",
-                                  "Total population of the census tracts in the metro area's member counties.",
-                                  phrases=("population", "people", "residents", "inhabitants")),
-        "land_area": MeasureInfo("land_area", "land area", "square miles / square kilometers",
-                                 "Summed census-tract polygon area of the metro area's member counties.",
-                                 phrases=("land area", "square miles", "square mile", "square kilometers", "square kilometres", "sq mi", "sq km")),
-        "density": MeasureInfo("density", "population density", "people per square mile / kilometer",
-                               "Total tract population divided by total tract polygon area.",
-                               phrases=("density", "densely populated", "how dense")),
+        "population": MeasureInfo(
+            "population",
+            "population",
+            "people",
+            "Total population of the census tracts in the metro area's member counties.",
+            phrases=("population", "people", "residents", "inhabitants"),
+        ),
+        "land_area": MeasureInfo(
+            "land_area",
+            "land area",
+            "square miles / square kilometers",
+            "Summed census-tract polygon area of the metro area's member counties.",
+            phrases=(
+                "land area",
+                "square miles",
+                "square mile",
+                "square kilometers",
+                "square kilometres",
+                "sq mi",
+                "sq km",
+            ),
+        ),
+        "density": MeasureInfo(
+            "density",
+            "population density",
+            "people per square mile / kilometer",
+            "Total tract population divided by total tract polygon area.",
+            phrases=("density", "densely populated", "how dense"),
+        ),
     }
 
     def compute(self, entities, measures, *, request: str = "") -> DerivedResult:
@@ -227,7 +262,8 @@ class MetroGeometryProvider:
                 LIMIT_EXCEEDED,
                 f"At most {MAX_METROS} metropolitan areas can be computed in one request and this one names {len(names)}. "
                 "Ask for fewer, or split the request. Ranking every metro area by land area or density is not supported; "
-                "name the metros to compare.")
+                "name the metros to compare.",
+            )
         wanted = [m for m in ("population", "land_area", "density") if m in set(measures)] or list(self.measures)
         km = wants_km(request)
 
@@ -243,40 +279,54 @@ class MetroGeometryProvider:
         if "population" in wanted:
             columns["population"] = [r["population"] for r in rows]
         if "land_area" in wanted:
-            columns["land_area_sq_km" if km else "land_area_sq_mi"] = [round(r["area_km2" if km else "area_mi2"], 2) for r in rows]
+            columns["land_area_sq_km" if km else "land_area_sq_mi"] = [
+                round(r["area_km2" if km else "area_mi2"], 2) for r in rows
+            ]
         if "density" in wanted:
             columns["population_density_per_sq_km" if km else "population_density"] = [
-                round(r["population"] / r["area_km2" if km else "area_mi2"], 2) for r in rows]
+                round(r["population"] / r["area_km2" if km else "area_mi2"], 2) for r in rows
+            ]
 
         unit = "square kilometers" if km else "square miles"
         method = []
         if "density" in wanted:
-            method.append(f"Density is total tract population divided by total tract polygon area in {unit}; "
-                          "it is not the average of tract densities.")
+            method.append(
+                f"Density is total tract population divided by total tract polygon area in {unit}; "
+                "it is not the average of tract densities."
+            )
         if "land_area" in wanted or "density" in wanted:
-            method.append("Land area is the sum of census-tract boundary polygon areas (equal-area projection) over every "
-                          "tract in the metro area's member counties; it is computed, not read from a stored column. If "
-                          "the tract polygons include water bodies it can exceed an official land-only figure.")
-        method.append("Each name is matched to the metropolitan/micropolitan statistical area that contains it, so figures "
-                      "describe the whole metro area (all member counties), not the city limits.")
+            method.append(
+                "Land area is the sum of census-tract boundary polygon areas (equal-area projection) over every "
+                "tract in the metro area's member counties; it is computed, not read from a stored column. If "
+                "the tract polygons include water bodies it can exceed an official land-only figure."
+            )
+        method.append(
+            "Each name is matched to the metropolitan/micropolitan statistical area that contains it, so figures "
+            "describe the whole metro area (all member counties), not the city limits."
+        )
         return DerivedResult(pd.DataFrame(columns), method, notes)
 
     @staticmethod
-    def _measure_one(metro: _Metro, pops: pd.DataFrame, index: _GeometryIndex, km: bool, wanted: list[str],
-                     notes: list[str]) -> dict:
+    def _measure_one(
+        metro: _Metro, pops: pd.DataFrame, index: _GeometryIndex, km: bool, wanted: list[str], notes: list[str]
+    ) -> dict:
         tracts = pops[pops["county"].isin(metro.counties) & pops["population"].notna()]
         if tracts.empty:
-            raise DerivedError(DATA_UNAVAILABLE,
-                               f"census_tracts has no population rows for the counties of {metro.name}. Load the census "
-                               "tract population data (setup_data.py) and ask again.")
+            raise DerivedError(
+                DATA_UNAVAILABLE,
+                f"census_tracts has no population rows for the counties of {metro.name}. Load the census "
+                "tract population data (setup_data.py) and ask again.",
+            )
         parts = [index.by_county[c] for c in metro.counties if c in index.by_county]
         geometry_fips = index.fips[np.concatenate(parts)] if parts else np.array([], dtype=object)
         covered = np.isin(tracts["tract_fips"].to_numpy(), geometry_fips)
         total_tracts, covered_tracts = len(tracts), int(covered.sum())
         if covered_tracts == 0:
-            raise DerivedError(DATA_UNAVAILABLE,
-                               f"No tract boundary geometry matches the census tracts of {metro.name}. The geometry and the "
-                               "census tracts are probably from different years; reload both from the same vintage.")
+            raise DerivedError(
+                DATA_UNAVAILABLE,
+                f"No tract boundary geometry matches the census tracts of {metro.name}. The geometry and the "
+                "census tracts are probably from different years; reload both from the same vintage.",
+            )
         total_pop = float(tracts["population"].sum())
         footprint = tracts[covered]
         footprint_pop = float(footprint["population"].sum())
@@ -287,25 +337,36 @@ class MetroGeometryProvider:
                 DATA_UNAVAILABLE,
                 f"Tract boundary geometry covers only {tract_cov:.0%} of the census tracts of {metro.name} ({pop_cov:.0%} "
                 "of its population), which is too incomplete for a trustworthy area or density. The geometry and census "
-                "tracts are probably from different years; reload both from the same vintage.")
+                "tracts are probably from different years; reload both from the same vintage.",
+            )
         area_mi2 = index.area_sq_mi(footprint["tract_fips"].to_numpy())
         if area_mi2 <= 0:
             raise DerivedError(DATA_UNAVAILABLE, f"The tract polygons of {metro.name} have no measurable area.")
 
         if covered_tracts < total_tracts:
-            notes.append(f"{metro.name}: {total_tracts - covered_tracts} of {total_tracts} census tracts had no boundary "
-                         f"geometry and are left out of every figure above (they hold {1 - pop_cov:.1%} of its tract population).")
+            notes.append(
+                f"{metro.name}: {total_tracts - covered_tracts} of {total_tracts} census tracts had no boundary "
+                f"geometry and are left out of every figure above (they hold {1 - pop_cov:.1%} of its tract population)."
+            )
         if metro.via_title:
-            notes.append(f"{metro.name}: its CBSA code is unresolved in census_msa, so its member counties were found by "
-                         "matching the title.")
+            notes.append(
+                f"{metro.name}: its CBSA code is unresolved in census_msa, so its member counties were found by "
+                "matching the title."
+            )
         official = metro.official_population
         if "population" in wanted and official and abs(footprint_pop - official) / official > RECONCILE_TOLERANCE:
-            notes.append(f"{metro.name}: the Census MSA file lists {int(official):,} people, "
-                         f"{(footprint_pop - official) / official:+.1%} versus the {int(round(footprint_pop)):,} summed over "
-                         "its member counties' tracts; the difference comes from county-membership vintages (CBSA "
-                         "delineation file versus Census MSA file).")
-        return {"name": metro.name, "population": int(round(footprint_pop)), "area_mi2": area_mi2,
-                "area_km2": area_mi2 * KM2_PER_MI2}
+            notes.append(
+                f"{metro.name}: the Census MSA file lists {int(official):,} people, "
+                f"{(footprint_pop - official) / official:+.1%} versus the {int(round(footprint_pop)):,} summed over "
+                "its member counties' tracts; the difference comes from county-membership vintages (CBSA "
+                "delineation file versus Census MSA file)."
+            )
+        return {
+            "name": metro.name,
+            "population": int(round(footprint_pop)),
+            "area_mi2": area_mi2,
+            "area_km2": area_mi2 * KM2_PER_MI2,
+        }
 
 
 PROVIDER = MetroGeometryProvider()

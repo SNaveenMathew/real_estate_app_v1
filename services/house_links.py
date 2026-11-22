@@ -3,6 +3,7 @@
 The join is derived from the unified catalog's relationship graph (``schema.house_link_plan``), so a
 dataset linked directly to houses, or only through nri_tracts / census_tracts, is handled the same way.
 """
+
 from __future__ import annotations
 
 import db.duckdb_store as store
@@ -19,7 +20,7 @@ def linked_records(house_id: str, dataset: str = "") -> str:
     dataset = (dataset or "").strip()
     chosen = [d for d in datasets if not dataset or d["name"] == dataset]
     if not chosen:
-        return ("Unknown dataset '%s'. Linked datasets: %s." % (dataset, ", ".join(d["name"] for d in datasets)))
+        return "Unknown dataset '%s'. Linked datasets: %s." % (dataset, ", ".join(d["name"] for d in datasets))
     blocks = []
     for d in chosen:
         plan = schema.house_link_plan(d["name"])

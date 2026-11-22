@@ -19,6 +19,7 @@ Now a turn runs on a worker thread:
 
 Data access from the worker is safe because ``db/duckdb_store.get_conn()`` is per-thread.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -42,7 +43,7 @@ class DeadlineExceeded(RuntimeError):
 
 _EXECUTOR: ThreadPoolExecutor | None = None
 _EXECUTOR_LOCK = threading.Lock()
-_SEMAPHORES: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()      # one per event loop (tests create several)
+_SEMAPHORES: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()  # one per event loop (tests create several)
 _state = {"running": 0, "waiting": 0}
 
 
@@ -50,9 +51,10 @@ def _executor() -> ThreadPoolExecutor:
     global _EXECUTOR
     if _EXECUTOR is None:
         with _EXECUTOR_LOCK:
-            if _EXECUTOR is None:                       # dedicated: a hung turn can never starve other to_thread users
-                _EXECUTOR = ThreadPoolExecutor(max_workers=max(4, int(settings.agent_max_concurrent_turns) * 2),
-                                               thread_name_prefix="agent-turn")
+            if _EXECUTOR is None:  # dedicated: a hung turn can never starve other to_thread users
+                _EXECUTOR = ThreadPoolExecutor(
+                    max_workers=max(4, int(settings.agent_max_concurrent_turns) * 2), thread_name_prefix="agent-turn"
+                )
     return _EXECUTOR
 
 
@@ -65,7 +67,11 @@ def _semaphore() -> asyncio.Semaphore:
 
 
 def status() -> dict:
-    return {"running": _state["running"], "waiting": _state["waiting"], "max_concurrent": int(settings.agent_max_concurrent_turns)}
+    return {
+        "running": _state["running"],
+        "waiting": _state["waiting"],
+        "max_concurrent": int(settings.agent_max_concurrent_turns),
+    }
 
 
 async def run_turn(fn, *args, **kwargs):
@@ -82,9 +88,10 @@ async def run_turn(fn, *args, **kwargs):
     deadline_s = float(settings.agent_turn_deadline_s)
     turn_id = kwargs.pop("turn_id", None)
     from agents.turn_progress import get_or_create_progress_tracker, set_current_tracker
+
     tracker = get_or_create_progress_tracker(turn_id) if turn_id else None
     handle = llm_resilience.Turn(deadline=time.monotonic() + deadline_s if deadline_s > 0 else None)
-    ctx = contextvars.copy_context()                    # scope / artifacts / tracing follow the work onto the thread
+    ctx = contextvars.copy_context()  # scope / artifacts / tracing follow the work onto the thread
 
     def work():
         if tracker:
@@ -92,6 +99,7 @@ async def run_turn(fn, *args, **kwargs):
         # Approved-function budget (agents/capabilities.py): the turn, not the individual call, is what has to be bounded,
         # or a few "cheap" network calls add up to a stuck request. The agent's calls read this on their worker thread.
         from agents import capabilities
+
         budget_token = capabilities.start_turn_budget(capabilities.settings_budget())
         with llm_resilience.use_turn(handle):
             try:
@@ -115,7 +123,7 @@ async def run_turn(fn, *args, **kwargs):
         sem.release()
         raise
 
-    def finished(_f):                                   # runs on the event loop when the THREAD ends
+    def finished(_f):  # runs on the event loop when the THREAD ends
         _state["running"] -= 1
         sem.release()
 
@@ -123,9 +131,9 @@ async def run_turn(fn, *args, **kwargs):
     try:
         return await asyncio.wait_for(asyncio.shield(future), timeout=deadline_s if deadline_s > 0 else None)
     except asyncio.TimeoutError:
-        handle.cancel.set()                             # the worker starts no further model call
+        handle.cancel.set()  # the worker starts no further model call
         raise DeadlineExceeded(f"The request took longer than {deadline_s:g} seconds and was stopped.") from None
-    except asyncio.CancelledError:                      # the client went away
+    except asyncio.CancelledError:  # the client went away
         handle.cancel.set()
         raise
 

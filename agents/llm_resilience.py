@@ -26,6 +26,7 @@ temperature-0 calls are eligible - an unchanged prompt then provably yields the 
 reused rather than regenerated.  A hit is served before the breaker gate on purpose: a cached answer is exactly what
 should still be available when the model server is down.
 """
+
 from __future__ import annotations
 
 import logging
@@ -80,9 +81,24 @@ class TurnCancelled(RuntimeError):
 # ---------------------------------------------------------------------------
 # Classification
 # ---------------------------------------------------------------------------
-_TRANSIENT_HINTS = ("connect", "timeout", "timed out", "unavailable", "overloaded", "ratelimit", "rate limit", "remoteprotocol",
-                    "readerror", "reset by peer", "broken pipe", "badgateway", "bad gateway", "gateway", "internalservererror",
-                    "server disconnected")
+_TRANSIENT_HINTS = (
+    "connect",
+    "timeout",
+    "timed out",
+    "unavailable",
+    "overloaded",
+    "ratelimit",
+    "rate limit",
+    "remoteprotocol",
+    "readerror",
+    "reset by peer",
+    "broken pipe",
+    "badgateway",
+    "bad gateway",
+    "gateway",
+    "internalservererror",
+    "server disconnected",
+)
 
 
 def is_transient(exc: BaseException) -> bool:
@@ -117,7 +133,7 @@ class CircuitBreaker:
                 if self._clock() - self._opened_at < self.cooldown_s:
                     raise ModelUnavailable(self._message())
                 self.state, self._probing = self.HALF_OPEN, False
-            if self._probing:                                    # one probe at a time; everyone else fails fast
+            if self._probing:  # one probe at a time; everyone else fails fast
                 raise ModelUnavailable(self._message())
             self._probing = True
 
@@ -185,7 +201,7 @@ def reset() -> None:
 # ---------------------------------------------------------------------------
 @dataclass
 class Turn:
-    deadline: float | None = None                       # time.monotonic() value
+    deadline: float | None = None  # time.monotonic() value
     cancel: threading.Event = field(default_factory=threading.Event)
 
 
@@ -225,8 +241,9 @@ def _cache_hooks(client, messages, role: str):
     """``(cache_key, services.cache)`` for this call, or ``(None, None)``.  Never raises."""
     try:
         from services import cache as result_cache
+
         return result_cache.prompt_key(role, client, messages), result_cache
-    except Exception as exc:                            # a cache problem must never break a model call
+    except Exception as exc:  # a cache problem must never break a model call
         logger.debug("prompt cache unavailable: %s", exc)
         return None, None
 
@@ -252,14 +269,17 @@ def invoke(client, messages, *, role: str = "model", breaker_name: str = "chat")
     except Exception as exc:
         if is_transient(exc):
             gate.record_failure()
-            raise ModelUnavailable(f"The language model service is not responding ({role}: {type(exc).__name__}).") from exc
-        gate.record_success()                           # the service answered (with an error about the request): it is up
+            raise ModelUnavailable(
+                f"The language model service is not responding ({role}: {type(exc).__name__})."
+            ) from exc
+        gate.record_success()  # the service answered (with an error about the request): it is up
         raise
     gate.record_success()
 
     if cache_key:
         text = _reply_text(result)
         if text.strip():
-            result_cache.store_prompt(cache_key, role, result_cache.prompt_label(messages), text, text,
-                                      meta={"kind": "prompt"})
+            result_cache.store_prompt(
+                cache_key, role, result_cache.prompt_label(messages), text, text, meta={"kind": "prompt"}
+            )
     return result

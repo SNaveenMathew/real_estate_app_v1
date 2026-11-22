@@ -1,9 +1,9 @@
-
 """Regression checks for BikePGH visualization semantics.
 
 Run from the app root after installing the usual requirements:
     python tests/test_bikepg_h_visualization.py
 """
+
 import sys
 from pathlib import Path
 import importlib.util
@@ -20,6 +20,7 @@ EXPECTED = {
     "trails": ("Trails", "pink"),
 }
 
+
 def load_data_loader():
     spec = importlib.util.spec_from_file_location(
         "data_loader", Path(__file__).parents[1] / "services" / "data_loader.py"
@@ -27,6 +28,7 @@ def load_data_loader():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
 
 def main():
     mod = load_data_loader()
@@ -37,6 +39,7 @@ def main():
     for folder, (key, label, color) in normalized.items():
         assert EXPECTED[key] == (label, color), (folder, key, label, color)
     print("PASS: BikePGH standard labels/colors match the ground-truth R specification.")
+
 
 if __name__ == "__main__":
     main()

@@ -1,4 +1,5 @@
 """Unit tests for TurnProgressTracker and progress API endpoints."""
+
 import asyncio
 import json
 import sys
@@ -174,7 +175,14 @@ def test_general_chat_plan_runs_in_declared_order():
 def test_house_chat_plan_has_only_house_steps():
     """House Chat announces house steps only - no general-chat retrieval step leaks in."""
     tracker = TurnProgressTracker("house_plan_turn", default_steps=HOUSE_STEPS)
-    assert _texts(tracker) == ["Starting", "Property Analysis", "Code Generation", "Code Execution", "Answer Synthesis", "result"]
+    assert _texts(tracker) == [
+        "Starting",
+        "Property Analysis",
+        "Code Generation",
+        "Code Execution",
+        "Answer Synthesis",
+        "result",
+    ]
     assert "Query Planning" not in _texts(tracker)
 
 
@@ -302,7 +310,7 @@ def test_progress_stream_waits_for_a_turn_registered_after_it_opens():
         async for chunk in response.body_iterator:
             text = chunk.decode() if isinstance(chunk, bytes) else chunk
             assert text.startswith("data: ")
-            event = json.loads(text[len("data: "):].strip())
+            event = json.loads(text[len("data: ") :].strip())
             assert event["formatted"][:2] == ["● Starting", "o step A"]
             break
         await response.body_iterator.aclose()
@@ -320,11 +328,12 @@ def test_progress_stream_unknown_turn_returns_404(monkeypatch):
 
 def test_general_chat_turn_registers_the_general_plan(monkeypatch):
     """POST /api/chat exposes its real plan to the panel, marks the turn complete, and reports 'result' last."""
-    monkeypatch.delitem(sys.modules, "main", raising=False)   # don't prefer a wrapper from the app entrypoint
+    monkeypatch.delitem(sys.modules, "main", raising=False)  # don't prefer a wrapper from the app entrypoint
     seen: dict = {}
 
     def fake_general_chat(message, history, include_metadata=False, session_id=None):
         from agents.turn_progress import get_current_tracker
+
         tracker = get_current_tracker()
         seen["formatted"] = tracker.format_steps() if tracker else None
         return "ok", [{"role": "assistant", "content": "ok"}], [], {}
@@ -367,6 +376,7 @@ def test_house_chat_turn_registers_the_house_plan(monkeypatch):
 
     def fake_house_chat(house_id, message, history):
         from agents.turn_progress import get_current_tracker
+
         tracker = get_current_tracker()
         seen["formatted"] = tracker.format_steps() if tracker else None
         return "ok", [{"role": "assistant", "content": "ok"}], []
@@ -400,6 +410,7 @@ def test_failed_turn_marks_the_running_step_failed(monkeypatch):
 
     def broken_general_chat(*args, **kwargs):
         from agents.turn_progress import get_current_tracker
+
         get_current_tracker().start_step("retrieval", "Data Model Retrieval")
         raise RuntimeError("model exploded")
 

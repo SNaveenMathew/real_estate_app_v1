@@ -4,6 +4,7 @@ Found in the field: the exporter was registered with batch=False, so every span 
 span.end() and, with the collector down, burned ~7 seconds of connection retries - minutes per chat turn, and a 5-minute
 test run.  Run in a fresh interpreter because OpenTelemetry's provider is process-global.
 """
+
 from __future__ import annotations
 
 import os
@@ -31,8 +32,13 @@ os._exit(0)
 
 
 def run_probe(**env):
-    full = dict(os.environ, APP_ROOT=str(ROOT), PHOENIX_ENABLED="true",
-                PHOENIX_COLLECTOR_ENDPOINT="http://127.0.0.1:1/v1/traces", **env)          # nothing listens on port 1
+    full = dict(
+        os.environ,
+        APP_ROOT=str(ROOT),
+        PHOENIX_ENABLED="true",
+        PHOENIX_COLLECTOR_ENDPOINT="http://127.0.0.1:1/v1/traces",
+        **env,
+    )  # nothing listens on port 1
     out = subprocess.run([sys.executable, "-c", PROBE], capture_output=True, text=True, env=full, timeout=120)
     line = next((ln for ln in out.stdout.splitlines() if ln.startswith("ELAPSED")), None)
     assert line, out.stdout + out.stderr[-500:]

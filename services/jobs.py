@@ -18,6 +18,7 @@ mutations serialize in the engine; letting two ingest jobs interleave their
 profiling and DDL would only produce confusing half-states, so a second request
 for a busy kind is answered with ``JobBusy`` (HTTP 409) instead.
 """
+
 from __future__ import annotations
 
 import threading
@@ -26,7 +27,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-_MAX_JOBS = 50          # snapshots kept for polling; older finished ones are dropped
+_MAX_JOBS = 50  # snapshots kept for polling; older finished ones are dropped
 
 
 class JobBusy(RuntimeError):
@@ -42,7 +43,7 @@ class Job:
     id: str
     kind: str
     label: str
-    state: str = "queued"                  # queued | running | done | error
+    state: str = "queued"  # queued | running | done | error
     message: str = ""
     done: int | None = None
     total: int | None = None
@@ -54,8 +55,7 @@ class Job:
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     # ── updates, called from the worker thread ──────────────────────────────
-    def progress(self, message: str | None = None, *, done: int | None = None,
-                 total: int | None = None) -> None:
+    def progress(self, message: str | None = None, *, done: int | None = None, total: int | None = None) -> None:
         with self._lock:
             if message is not None:
                 self.message = message
@@ -98,7 +98,7 @@ class Job:
 
 _JOBS: dict[str, Job] = {}
 _ORDER: list[str] = []
-_ACTIVE: dict[str, str] = {}         # kind -> job id currently running
+_ACTIVE: dict[str, str] = {}  # kind -> job id currently running
 _LOCK = threading.RLock()
 
 
@@ -132,7 +132,7 @@ def start(kind: str, label: str, fn: Callable[[Job], Any]) -> Job:
         job.state = "running"
         try:
             result = fn(job)
-        except Exception as exc:                       # noqa: BLE001 - reported to the caller
+        except Exception as exc:  # noqa: BLE001 - reported to the caller
             job.fail(_describe(exc))
         else:
             job.finish(result)
@@ -152,7 +152,7 @@ def get(job_id: str) -> Job | None:
 
 def recent(limit: int = 20) -> list[dict]:
     with _LOCK:
-        ids = list(reversed(_ORDER))[:max(1, limit)]
+        ids = list(reversed(_ORDER))[: max(1, limit)]
         return [_JOBS[i].snapshot() for i in ids if i in _JOBS]
 
 
@@ -171,6 +171,7 @@ def wait(job_id: str, timeout: float = 300.0, poll: float = 0.02) -> Job:
 
 def _describe(exc: BaseException) -> str:
     from fastapi import HTTPException
+
     if isinstance(exc, HTTPException):
         detail = exc.detail
         return detail if isinstance(detail, str) else str(detail)

@@ -31,6 +31,7 @@ ranked answer to minimize this, but it's a real tradeoff of text-based
 grading rather than a full NL parse — noted here rather than silently
 accepted.
 """
+
 from __future__ import annotations
 
 import re
@@ -42,20 +43,37 @@ from eval.golden_set import GoldenExample
 @dataclass
 class ScoreResult:
     example_id: str
-    verdict: str                 # "PASS" | "FAIL" | "ERROR" | "INCONCLUSIVE"
-    method: str                   # "assert_equal" | "llm_judge"
+    verdict: str  # "PASS" | "FAIL" | "ERROR" | "INCONCLUSIVE"
+    method: str  # "assert_equal" | "llm_judge"
     reason: str
     reply: str = ""
     extra: dict = field(default_factory=dict)
 
 
-_NUMBER_RE = re.compile(r'-?\$?\d[\d,]*\.?\d*%?')
+_NUMBER_RE = re.compile(r"-?\$?\d[\d,]*\.?\d*%?")
 
 _WORD_NUMBERS = {
-    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
-    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
-    "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
-    "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
 }
 
 
@@ -89,11 +107,16 @@ def _find_string(text: str, target: str) -> int | None:
     idx = text.lower().find(str(target).lower())
     return idx if idx >= 0 else None
 
+
 def _find_last(text: str, target, value_type: str, tolerance: float) -> int | None:
     if value_type == "string":
         idx = text.lower().rfind(str(target).lower())
         return idx if idx >= 0 else None
-    matches = [pos for value, pos in _extract_numbers(text) if abs(value - float(target)) <= (abs(float(target)) * tolerance if tolerance else 0)]
+    matches = [
+        pos
+        for value, pos in _extract_numbers(text)
+        if abs(value - float(target)) <= (abs(float(target)) * tolerance if tolerance else 0)
+    ]
     return matches[-1] if matches else None
 
 
@@ -115,26 +138,39 @@ def score_structured(example: GoldenExample, reply: str) -> ScoreResult:
     for d in example.distractors:
         pos = _find(reply, d, example.value_type, example.tolerance)
         if pos is not None:
-            return ScoreResult(example.id, "FAIL", "assert_equal",
-                                f"distractor value found in reply: {d!r}", reply,
-                                extra={"distractor": d})
+            return ScoreResult(
+                example.id,
+                "FAIL",
+                "assert_equal",
+                f"distractor value found in reply: {d!r}",
+                reply,
+                extra={"distractor": d},
+            )
 
     positions = []
     finder = _find_last if example.order_matters else _find
     for val in example.expected:
         pos = finder(reply, val, example.value_type, example.tolerance)
         if pos is None:
-            return ScoreResult(example.id, "FAIL", "assert_equal",
-                                f"expected value not found in reply: {val!r}", reply,
-                                extra={"missing": val})
+            return ScoreResult(
+                example.id,
+                "FAIL",
+                "assert_equal",
+                f"expected value not found in reply: {val!r}",
+                reply,
+                extra={"missing": val},
+            )
         positions.append(pos)
 
     if example.order_matters:
         if positions != sorted(positions):
             return ScoreResult(
-                example.id, "FAIL", "assert_equal",
+                example.id,
+                "FAIL",
+                "assert_equal",
                 f"values found out of order — expected sequence {example.expected}, "
-                f"found at character positions {positions}", reply,
+                f"found at character positions {positions}",
+                reply,
                 extra={"positions": positions},
             )
         reason = f"all {len(example.expected)} expected values found, in the required order"

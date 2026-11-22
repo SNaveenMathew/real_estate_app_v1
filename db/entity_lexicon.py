@@ -18,6 +18,7 @@ How a stored label becomes lookup keys (all keys are accent-folded, lower-cased 
 A request phrase that maps to several labels is *ambiguous* unless one candidate is strictly better by
 (tier, metro-before-micro).  Ambiguity is reported, never guessed: callers ask the user which place they meant.
 """
+
 from __future__ import annotations
 
 import re
@@ -28,16 +29,59 @@ from dataclasses import dataclass
 from db.text_match import normalize
 
 STATE_NAMES = {
-    "al": "alabama", "ak": "alaska", "az": "arizona", "ar": "arkansas", "ca": "california", "co": "colorado",
-    "ct": "connecticut", "de": "delaware", "dc": "district of columbia", "fl": "florida", "ga": "georgia",
-    "hi": "hawaii", "id": "idaho", "il": "illinois", "in": "indiana", "ia": "iowa", "ks": "kansas",
-    "ky": "kentucky", "la": "louisiana", "me": "maine", "md": "maryland", "ma": "massachusetts",
-    "mi": "michigan", "mn": "minnesota", "ms": "mississippi", "mo": "missouri", "mt": "montana",
-    "ne": "nebraska", "nv": "nevada", "nh": "new hampshire", "nj": "new jersey", "nm": "new mexico",
-    "ny": "new york", "nc": "north carolina", "nd": "north dakota", "oh": "ohio", "ok": "oklahoma",
-    "or": "oregon", "pa": "pennsylvania", "ri": "rhode island", "sc": "south carolina", "sd": "south dakota",
-    "tn": "tennessee", "tx": "texas", "ut": "utah", "vt": "vermont", "va": "virginia", "wa": "washington",
-    "wv": "west virginia", "wi": "wisconsin", "wy": "wyoming", "pr": "puerto rico", "gu": "guam",
+    "al": "alabama",
+    "ak": "alaska",
+    "az": "arizona",
+    "ar": "arkansas",
+    "ca": "california",
+    "co": "colorado",
+    "ct": "connecticut",
+    "de": "delaware",
+    "dc": "district of columbia",
+    "fl": "florida",
+    "ga": "georgia",
+    "hi": "hawaii",
+    "id": "idaho",
+    "il": "illinois",
+    "in": "indiana",
+    "ia": "iowa",
+    "ks": "kansas",
+    "ky": "kentucky",
+    "la": "louisiana",
+    "me": "maine",
+    "md": "maryland",
+    "ma": "massachusetts",
+    "mi": "michigan",
+    "mn": "minnesota",
+    "ms": "mississippi",
+    "mo": "missouri",
+    "mt": "montana",
+    "ne": "nebraska",
+    "nv": "nevada",
+    "nh": "new hampshire",
+    "nj": "new jersey",
+    "nm": "new mexico",
+    "ny": "new york",
+    "nc": "north carolina",
+    "nd": "north dakota",
+    "oh": "ohio",
+    "ok": "oklahoma",
+    "or": "oregon",
+    "pa": "pennsylvania",
+    "ri": "rhode island",
+    "sc": "south carolina",
+    "sd": "south dakota",
+    "tn": "tennessee",
+    "tx": "texas",
+    "ut": "utah",
+    "vt": "vermont",
+    "va": "virginia",
+    "wa": "washington",
+    "wv": "west virginia",
+    "wi": "wisconsin",
+    "wy": "wyoming",
+    "pr": "puerto rico",
+    "gu": "guam",
     "vi": "virgin islands",
 }
 # Spelling variants people use interchangeably; applied to BOTH the stored labels and the request.
@@ -67,13 +111,15 @@ def canon(text: str) -> str:
 class Parsed:
     label: str
     states: tuple[str, ...]
-    kind: int                      # 0 metro, 1 micro, 2 other
+    kind: int  # 0 metro, 1 micro, 2 other
     components: tuple[str, ...]
 
 
 def parse(value: str) -> Parsed:
     v = str(value).strip()
-    kind = 0 if re.search(r"\bmetro(?:politan)?\b", v, re.I) else 1 if re.search(r"\bmicro(?:politan)?\b", v, re.I) else 2
+    kind = (
+        0 if re.search(r"\bmetro(?:politan)?\b", v, re.I) else 1 if re.search(r"\bmicro(?:politan)?\b", v, re.I) else 2
+    )
     body = _SUFFIX.sub("", v).strip()
     label, tail = (body.rsplit(",", 1) + [""])[:2] if "," in body else (body, "")
     tail = tail.strip()
@@ -87,11 +133,11 @@ def parse(value: str) -> Parsed:
 
 @dataclass(frozen=True)
 class Match:
-    phrase: str                    # canonical key that matched ("ft worth")
-    display: str                   # the user's own words, normalized ("fort worth")
-    start: int                     # token offsets in the request
+    phrase: str  # canonical key that matched ("ft worth")
+    display: str  # the user's own words, normalized ("fort worth")
+    start: int  # token offsets in the request
     end: int
-    values: tuple[str, ...]        # best candidate labels (more than one => ambiguous)
+    values: tuple[str, ...]  # best candidate labels (more than one => ambiguous)
     tier: int
     ambiguous: bool
 
@@ -100,8 +146,8 @@ class Lexicon:
     __slots__ = ("keys", "strong", "max_words")
 
     def __init__(self):
-        self.keys: dict[str, dict[str, tuple[int, int]]] = {}      # key -> {label: (tier, kind)}
-        self.strong: set[str] = set()                              # multi-word or state-qualified keys
+        self.keys: dict[str, dict[str, tuple[int, int]]] = {}  # key -> {label: (tier, kind)}
+        self.strong: set[str] = set()  # multi-word or state-qualified keys
         self.max_words = 1
 
     def add(self, key: str, value: str, tier: int, kind: int, *, qualified: bool = False) -> None:
@@ -128,10 +174,10 @@ def build(values) -> Lexicon:
         for whole in (value, body, p.label):
             lex.add(canon(whole), value, 0, p.kind)
         for i, comp in enumerate(p.components):
-            tier = 1 if i == 0 else 2                       # principal (first-named) city vs the others
+            tier = 1 if i == 0 else 2  # principal (first-named) city vs the others
             spellings = [comp]
             head = comp.split("-")[0].strip()
-            if "-" in comp and len(head) >= 3:              # "Nashville-Davidson" is also just "Nashville"
+            if "-" in comp and len(head) >= 3:  # "Nashville-Davidson" is also just "Nashville"
                 spellings.append(head)
             for spelling in spellings:
                 key = canon(spelling)
@@ -151,9 +197,9 @@ def find(lex: Lexicon, request: str) -> list[Match]:
     out: list[Match] = []
     for n in range(min(lex.max_words, len(tokens)), 0, -1):
         for i in range(len(tokens) - n + 1):
-            if any(taken[i:i + n]):
+            if any(taken[i : i + n]):
                 continue
-            phrase = " ".join(tokens[i:i + n])
+            phrase = " ".join(tokens[i : i + n])
             owners = lex.keys.get(phrase)
             if not owners:
                 continue
@@ -163,7 +209,7 @@ def find(lex: Lexicon, request: str) -> list[Match]:
             winners = tuple(sorted(v for v, rank in owners.items() if rank == best))
             for j in range(i, i + n):
                 taken[j] = True
-            out.append(Match(phrase, " ".join(plain[i:i + n]), i, i + n, winners, best[0], len(winners) > 1))
+            out.append(Match(phrase, " ".join(plain[i : i + n]), i, i + n, winners, best[0], len(winners) > 1))
     out.sort(key=lambda m: m.start)
     return out
 

@@ -23,18 +23,15 @@ from agents import answer_status, tool_result
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _extract_numbers(text: str) -> set[str]:
-    cleaned = re.sub(r'(\d),(\d)', r'\1\2', text)
-    return set(re.findall(r'\b\d+\.?\d*\b', cleaned))
+    cleaned = re.sub(r"(\d),(\d)", r"\1\2", text)
+    return set(re.findall(r"\b\d+\.?\d*\b", cleaned))
 
 
 def _extract_tool_outputs(messages: list[BaseMessage]) -> list[tuple[str, str]]:
     """Return list of (tool_name, content) for every ToolMessage."""
-    return [
-        (m.name or "tool", str(m.content))
-        for m in messages
-        if isinstance(m, ToolMessage)
-    ]
+    return [(m.name or "tool", str(m.content)) for m in messages if isinstance(m, ToolMessage)]
 
 
 def _typed_results(tool_results) -> list[tuple[str, dict]]:
@@ -85,7 +82,7 @@ def _tool_returned_real_data(tool_outputs: list[tuple[str, str]], tool_results=N
       - Has at least 2 lines
       - Has digit-containing line(s) that look like data rows
     """
-    for name, facts in _typed_results(tool_results):       # authoritative: the tool said what it produced
+    for name, facts in _typed_results(tool_results):  # authoritative: the tool said what it produced
         if facts["ok"] and facts["kind"] not in tool_result.NON_EVIDENCE_KINDS:
             return True
 
@@ -96,13 +93,18 @@ def _tool_returned_real_data(tool_outputs: list[tuple[str, str]], tool_results=N
         if not c:
             continue
         if answer_status.is_not_answered(c):
-            continue            # a deliberate non-answer (agents/answer_status.py) is never data, whatever digits it holds
+            continue  # a deliberate non-answer (agents/answer_status.py) is never data, whatever digits it holds
         # Exclude known error/status outputs
         c_lower = c.lower()
-        if (c.startswith("ERROR:") or c.startswith("EMPTY TABLE")
-                or "SQL Error" in c or "BinderException" in c
-                or c_lower.startswith("error:") or c_lower.startswith("sql error")
-                or "binder error" in c_lower):
+        if (
+            c.startswith("ERROR:")
+            or c.startswith("EMPTY TABLE")
+            or "SQL Error" in c
+            or "BinderException" in c
+            or c_lower.startswith("error:")
+            or c_lower.startswith("sql error")
+            or "binder error" in c_lower
+        ):
             continue
 
         lines = [l for l in c.splitlines() if l.strip()]
@@ -115,13 +117,12 @@ def _tool_returned_real_data(tool_outputs: list[tuple[str, str]], tool_results=N
         # query_database's own non-data messages (0 rows, etc.), which also
         # tend to contain digits (a row count, a sample FIPS code in a hint)
         # without being a result.
-        if (name == "query_database" and re.search(r'\d', c)
-                and not c_lower.startswith(_NON_DATA_QUERY_PREFIXES)):
+        if name == "query_database" and re.search(r"\d", c) and not c_lower.startswith(_NON_DATA_QUERY_PREFIXES):
             return True
 
         # For other tools — must have digit-containing lines that look like
         # data rows (not just an incidental number in a status line)
-        digit_lines = [l for l in lines if re.search(r'\b\d{2,}\b', l)]
+        digit_lines = [l for l in lines if re.search(r"\b\d{2,}\b", l)]
         if len(digit_lines) >= 2:
             return True
 
@@ -259,9 +260,9 @@ def validate_response(
 
     # ── Determine failure type ─────────────────────────────────────────────
     no_tools_called = not tool_outputs
-    failure_type    = _classify_tool_failure(tool_outputs)
-    tools_failed    = failure_type is not None or _tool_output_signals_failure(tool_outputs)
-    reply_has_data  = _reply_claims_data(reply)
+    failure_type = _classify_tool_failure(tool_outputs)
+    tools_failed = failure_type is not None or _tool_output_signals_failure(tool_outputs)
+    reply_has_data = _reply_claims_data(reply)
     # A tool that explicitly said "NOT_ANSWERED" (and why) is the most specific evidence there is: a reply that then
     # presents a table or a pile of numbers invented them.
     not_answered = next((c for _, c in tool_outputs if answer_status.is_not_answered(c)), None)
@@ -284,15 +285,15 @@ def validate_response(
     elif tool_outputs and reply_has_data:
         # Number grounding check
         reply_numbers = _extract_numbers(reply)
-        tool_numbers  = _extract_numbers(tool_text_combined)
-        ungrounded    = reply_numbers - tool_numbers
-        if (len(reply_numbers) > 5
-                and len(ungrounded) > 0.6 * len(reply_numbers)):
+        tool_numbers = _extract_numbers(tool_text_combined)
+        ungrounded = reply_numbers - tool_numbers
+        if len(reply_numbers) > 5 and len(ungrounded) > 0.6 * len(reply_numbers):
             hallucinated = True
             failure_type = "missing_data"
 
     if not hallucinated:
         from services.guardrails import OutputGroundingGuardrail
+
         score_res = OutputGroundingGuardrail.validate_scores_in_text(reply)
         if not score_res.passed:
             # Append guardrail notification if invalid scores are detected
@@ -310,7 +311,7 @@ def validate_response(
         return HALLUCINATION_NOT_ANSWERED.format(detail=answer_status.status_message(not_answered))
 
     if failure_type and failure_type.startswith("sql_error:"):
-        error_detail = failure_type[len("sql_error:"):]
+        error_detail = failure_type[len("sql_error:") :]
         return HALLUCINATION_SQL_ERROR.format(error_detail=f"**SQL Error:** `{error_detail}`")
 
     # Missing data or unknown failure — show what the tools actually returned
@@ -318,9 +319,6 @@ def validate_response(
     for name, content in tool_outputs:
         snippet = content[:500].strip()
         if snippet:
-            tool_summary_parts.append(
-                f"- Tool `{name}` returned:\n  ```\n  {snippet}\n  ```"
-            )
-    tool_summary = ("\n".join(tool_summary_parts)
-                    if tool_summary_parts else "_(No tool output)_")
+            tool_summary_parts.append(f"- Tool `{name}` returned:\n  ```\n  {snippet}\n  ```")
+    tool_summary = "\n".join(tool_summary_parts) if tool_summary_parts else "_(No tool output)_"
     return HALLUCINATION_MISSING_DATA.format(tool_summary=tool_summary)

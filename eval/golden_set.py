@@ -9,6 +9,7 @@ capabilities the audit found with no coverage at all. `eval/CAPABILITY_MATRIX.md
 its fixture rows and example count, so what is still uncovered is visible rather
 than assumed.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -72,17 +73,17 @@ SOLD_PRICE_RANK_DESC = ["Miami", "Denver", "Austin", "Pittsburgh"]
 @dataclass
 class GoldenExample:
     id: str
-    agent: str                       # "general" | "house"
+    agent: str  # "general" | "house"
     question: str
     tags: tuple[str, ...] = ()
     house_id: str | None = None
-    history: list[dict] = field(default_factory=list)   # prior turns: [{"role", "content"}]
+    history: list[dict] = field(default_factory=list)  # prior turns: [{"role", "content"}]
     answer_type: str = "structured"  # "structured" | "free_text"
 
     # structured
     expected: list | None = None
     order_matters: bool = False
-    value_type: str = "string"        # "string" | "number" | "currency"
+    value_type: str = "string"  # "string" | "number" | "currency"
     tolerance: float = 0.01
     distractors: list = field(default_factory=list)
 
@@ -108,7 +109,7 @@ GOLDEN_SET: list[GoldenExample] = [
         tags=("redfin",),
         question="Which cities do I have houses in?",
         answer_type="structured",
-        expected=['Austin', 'Denver', 'Miami', 'Pittsburgh'],
+        expected=["Austin", "Denver", "Miami", "Pittsburgh"],
         value_type="string",
         distractors=["Seattle", "Boston"],
     ),
@@ -312,7 +313,6 @@ GOLDEN_SET: list[GoldenExample] = [
         value_type="number",
         tolerance=0,
     ),
-
     # ======================================================================
     # CENSUS / MSA
     # ======================================================================
@@ -320,10 +320,9 @@ GOLDEN_SET: list[GoldenExample] = [
         id="msa_population_rank",
         agent="general",
         tags=("census",),
-        question=("Rank the Pittsburgh, Denver, Miami, and Austin metro areas "
-                   "from highest to lowest population."),
+        question=("Rank the Pittsburgh, Denver, Miami, and Austin metro areas from highest to lowest population."),
         answer_type="structured",
-        expected=['Miami', 'Denver', 'Pittsburgh', 'Austin'],
+        expected=["Miami", "Denver", "Pittsburgh", "Austin"],
         order_matters=True,
         value_type="string",
     ),
@@ -369,14 +368,14 @@ GOLDEN_SET: list[GoldenExample] = [
         id="tract_population_rank",
         agent="general",
         tags=("census",),
-        question=("Rank the Pittsburgh, Denver, Miami, and Austin tracts by Census population, "
-                   "from highest to lowest."),
+        question=(
+            "Rank the Pittsburgh, Denver, Miami, and Austin tracts by Census population, from highest to lowest."
+        ),
         answer_type="structured",
         expected=TRACT_POPULATION_DESC,
         order_matters=True,
         value_type="string",
     ),
-
     # ======================================================================
     # NRI / FLOOD / HAZARDS
     # ======================================================================
@@ -384,10 +383,11 @@ GOLDEN_SET: list[GoldenExample] = [
         id="msa_flood_risk_rank",
         agent="general",
         tags=("nri", "census"),
-        question=("Rank the Pittsburgh, Denver, Miami, and Austin metro areas "
-                   "from highest to lowest riverine flood risk."),
+        question=(
+            "Rank the Pittsburgh, Denver, Miami, and Austin metro areas from highest to lowest riverine flood risk."
+        ),
         answer_type="structured",
-        expected=['Miami', 'Denver', 'Austin', 'Pittsburgh'],
+        expected=["Miami", "Denver", "Austin", "Pittsburgh"],
         order_matters=True,
         value_type="string",
     ),
@@ -395,8 +395,9 @@ GOLDEN_SET: list[GoldenExample] = [
         id="msa_overall_nri_rank",
         agent="general",
         tags=("nri", "census"),
-        question=("Rank the Pittsburgh, Denver, Miami, and Austin metro areas "
-                   "from highest to lowest overall NRI risk."),
+        question=(
+            "Rank the Pittsburgh, Denver, Miami, and Austin metro areas from highest to lowest overall NRI risk."
+        ),
         answer_type="structured",
         expected=NRI_RISK_DESC,
         order_matters=True,
@@ -406,8 +407,7 @@ GOLDEN_SET: list[GoldenExample] = [
         id="msa_hurricane_risk_rank",
         agent="general",
         tags=("nri", "census"),
-        question=("Rank Pittsburgh, Denver, Miami, and Austin by hurricane risk "
-                   "from highest to lowest."),
+        question=("Rank Pittsburgh, Denver, Miami, and Austin by hurricane risk from highest to lowest."),
         answer_type="structured",
         expected=HURRICANE_RISK_DESC,
         order_matters=True,
@@ -417,8 +417,7 @@ GOLDEN_SET: list[GoldenExample] = [
         id="msa_wildfire_risk_rank",
         agent="general",
         tags=("nri", "census"),
-        question=("Rank Pittsburgh, Denver, Miami, and Austin by wildfire risk "
-                   "from highest to lowest."),
+        question=("Rank Pittsburgh, Denver, Miami, and Austin by wildfire risk from highest to lowest."),
         answer_type="structured",
         expected=WILDFIRE_RISK_DESC,
         order_matters=True,
@@ -468,14 +467,15 @@ GOLDEN_SET: list[GoldenExample] = [
         id="tradeoff_pittsburgh_vs_miami",
         agent="general",
         tags=("nri", "census"),
-        question=("I'm deciding between buying in Pittsburgh or Miami. Considering "
-                   "flood risk and metro population, what should I weigh?"),
+        question=(
+            "I'm deciding between buying in Pittsburgh or Miami. Considering "
+            "flood risk and metro population, what should I weigh?"
+        ),
         answer_type="free_text",
         rubric=(
             "A good answer notes that Miami has much higher riverine flood risk (~68 vs ~12.5 for Pittsburgh) and a larger metro population (~6,091,747 vs ~2,370,930), and frames this as a genuine tradeoff rather than just repeating numbers with no takeaway. It should not claim Pittsburgh has higher flood risk than Miami, and should not invent figures not derivable from the two metros' data."
         ),
     ),
-
     # ======================================================================
     # SOLD HOMES
     # ======================================================================
@@ -483,8 +483,10 @@ GOLDEN_SET: list[GoldenExample] = [
         id="pittsburgh_arms_length_avg_sold_price",
         agent="general",
         tags=("sold_homes",),
-        question=("What was the average sold price of arm's-length sales in census "
-                   "tract 42003140300, only counting sales over $1,000?"),
+        question=(
+            "What was the average sold price of arm's-length sales in census "
+            "tract 42003140300, only counting sales over $1,000?"
+        ),
         answer_type="structured",
         expected=[340000],
         value_type="currency",
@@ -495,8 +497,10 @@ GOLDEN_SET: list[GoldenExample] = [
         id="global_arms_length_avg_sold_price",
         agent="general",
         tags=("sold_homes",),
-        question=("Using the documented arm's-length filter, excluding sales at or below $1,000, "
-                   "what is the average sold price across the loaded sold-home records?"),
+        question=(
+            "Using the documented arm's-length filter, excluding sales at or below $1,000, "
+            "what is the average sold price across the loaded sold-home records?"
+        ),
         answer_type="structured",
         expected=[421000.0],
         value_type="currency",
@@ -516,14 +520,15 @@ GOLDEN_SET: list[GoldenExample] = [
         id="sold_price_rank_by_city",
         agent="general",
         tags=("sold_homes",),
-        question=("Among Pittsburgh, Denver, Miami, and Austin, rank their loaded arm's-length "
-                   "sales over $1,000 from highest to lowest sold price."),
+        question=(
+            "Among Pittsburgh, Denver, Miami, and Austin, rank their loaded arm's-length "
+            "sales over $1,000 from highest to lowest sold price."
+        ),
         answer_type="structured",
         expected=SOLD_PRICE_RANK_DESC,
         order_matters=True,
         value_type="string",
     ),
-
     # ======================================================================
     # DATA-QUALITY / ABSENCE / JOIN
     # ======================================================================
@@ -554,14 +559,15 @@ GOLDEN_SET: list[GoldenExample] = [
         id="unmatched_msa_explanation",
         agent="general",
         tags=("census",),
-        question=(f"Is '{UNMATCHED_MSA_NAME}' officially part of a recognized Core Based "
-                   "Statistical Area (CBSA)? Explain your reasoning."),
+        question=(
+            f"Is '{UNMATCHED_MSA_NAME}' officially part of a recognized Core Based "
+            "Statistical Area (CBSA)? Explain your reasoning."
+        ),
         answer_type="free_text",
         rubric=(
             "'Sample Micro Area' has no matching row in cbsa_counties. A good answer says no CBSA match was found. It should not claim a specific CBSA/metro affiliation that is not present in the data."
         ),
     ),
-
     # ======================================================================
     # HOUSE-SPECIFIC AGENT
     # ======================================================================
@@ -682,7 +688,6 @@ GOLDEN_SET: list[GoldenExample] = [
             "as a normal market comp without clearly flagging its non-arm's-length status."
         ),
     ),
-
     # ======================================================================
     # ROBUSTNESS — the same questions a person actually types: misspelled,
     # paraphrased, or without the planner's vocabulary. Expected values are the
@@ -767,7 +772,7 @@ GOLDEN_SET: list[GoldenExample] = [
         tags=("redfin", "paraphrase"),
         question="Which metros do I own property in?",
         answer_type="structured",
-        expected=['Austin', 'Denver', 'Miami', 'Pittsburgh'],
+        expected=["Austin", "Denver", "Miami", "Pittsburgh"],
         value_type="string",
         distractors=["Seattle", "Boston"],
     ),
@@ -791,7 +796,6 @@ GOLDEN_SET: list[GoldenExample] = [
         order_matters=True,
         value_type="string",
     ),
-
     # ======================================================================
     # INJECTION — instructions embedded in a question. The rubric asks for
     # refusal or an honest limitation, never for the instruction to be followed.
@@ -855,7 +859,6 @@ GOLDEN_SET: list[GoldenExample] = [
             "exist (or that it cannot provide them) and must not invent names, numbers or emails."
         ),
     ),
-
     # ======================================================================
     # MULTI-TURN — the follow-up only makes sense with the prior turn, and the
     # expected value is still the fixture's own ground truth.
@@ -910,7 +913,10 @@ GOLDEN_SET: list[GoldenExample] = [
         tags=("sold_homes", "multi_turn"),
         history=[
             {"role": "user", "content": "Give me a data-based price estimate for this house."},
-            {"role": "assistant", "content": "Using the same-tract active listings and one qualifying sold comp, the estimate centres near $320,000."},
+            {
+                "role": "assistant",
+                "content": "Using the same-tract active listings and one qualifying sold comp, the estimate centres near $320,000.",
+            },
         ],
         question="Did that estimate rely on any non-arm's-length sale?",
         answer_type="free_text",
@@ -935,7 +941,6 @@ GOLDEN_SET: list[GoldenExample] = [
         value_type="number",
         tolerance=0,
     ),
-
     # ======================================================================
     # TOO-BROAD / LIMIT — questions that cannot be answered in full. The
     # required behaviour is an honest bound, not a fabricated complete dump.
@@ -980,7 +985,7 @@ GOLDEN_SET: list[GoldenExample] = [
         expected=[PITTSBURGH_CRIME_COUNT],
         value_type="number",
         tolerance=0,
-        distractors=[TOTAL_CRIME_COUNT],          # the whole table, not the city
+        distractors=[TOTAL_CRIME_COUNT],  # the whole table, not the city
     ),
     GoldenExample(
         id="crime_city_count",
@@ -1023,7 +1028,7 @@ GOLDEN_SET: list[GoldenExample] = [
         expected=[PITTSBURGH_BIKE_ROUTE_COUNT],
         value_type="number",
         tolerance=0,
-        distractors=[TOTAL_BIKE_ROUTE_COUNT],      # including Denver's, i.e. a missed city filter
+        distractors=[TOTAL_BIKE_ROUTE_COUNT],  # including Denver's, i.e. a missed city filter
     ),
     GoldenExample(
         id="bike_route_count_loaded",
@@ -1083,7 +1088,7 @@ GOLDEN_SET: list[GoldenExample] = [
         expected=[AVG_DRIVE_TIME_TO_WORK],
         value_type="number",
         tolerance=0.01,
-        distractors=[22.0, 40.0],                  # one house's drive, or the transit minutes
+        distractors=[22.0, 40.0],  # one house's drive, or the transit minutes
     ),
     GoldenExample(
         id="commute_shortest_bike_ride",
@@ -1094,7 +1099,7 @@ GOLDEN_SET: list[GoldenExample] = [
         expected=[SHORTEST_BIKE_COMMUTE],
         value_type="number",
         tolerance=0.01,
-        distractors=[35.0],                        # the other house's bike time
+        distractors=[35.0],  # the other house's bike time
     ),
     GoldenExample(
         id="limit_all_sold_homes_nationwide",

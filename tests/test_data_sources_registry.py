@@ -6,6 +6,7 @@ validation/backup pattern the rest of the registry follows — per the Copilot
 review's caveat that a new source "should follow the same validation/backup
 pattern," this makes that a test failure instead of a code-review hope.
 """
+
 import pytest
 
 from services import data_sources as ds
@@ -97,6 +98,5 @@ def test_direct_download_sources_have_no_leftover_navigation_language():
         lowered = source.instructions.lower()
         hit = next((p for p in banned_phrases if p in lowered), None)
         assert hit is None, (
-            f"{key!r} is direct_download=True but its instructions still say {hit!r}: "
-            f"{source.instructions!r}"
+            f"{key!r} is direct_download=True but its instructions still say {hit!r}: {source.instructions!r}"
         )

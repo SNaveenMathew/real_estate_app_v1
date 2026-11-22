@@ -3,6 +3,7 @@
 Behaviour is unchanged: the facade in services/data_loader.py re-exports every name here, so
 `from services.data_loader import ...` (and scripts that call it) keep working.
 """
+
 from __future__ import annotations
 
 """
@@ -17,11 +18,23 @@ from config import settings
 import db.duckdb_store as store
 
 
-
-
-__all__ = ['load_census_tracts', '_normalize_msa_name', '_first_city_state', '_build_cbsa_lookup', '_all_words', '_KNOWN_RENAMES', '_match_msa_to_cbsa', '_detect_msa_format', '_load_msa_wide', '_load_msa_long', 'load_census_msa', 'repair_msa_codes']
+__all__ = [
+    "load_census_tracts",
+    "_normalize_msa_name",
+    "_first_city_state",
+    "_build_cbsa_lookup",
+    "_all_words",
+    "_KNOWN_RENAMES",
+    "_match_msa_to_cbsa",
+    "_detect_msa_format",
+    "_load_msa_wide",
+    "_load_msa_long",
+    "load_census_msa",
+    "repair_msa_codes",
+]
 
 # ── Census (tract) ───────────────────────────────────────────────────────────
+
 
 def load_census_tracts() -> int:
     """
@@ -43,13 +56,12 @@ def load_census_tracts() -> int:
     """
     # Accept the configured path or any matching file in the census dir
     census_dir = settings.census_tract_csv.parent
-    candidates = (
-        [settings.census_tract_csv] if settings.census_tract_csv.exists() else []
-    ) + sorted(census_dir.glob("DECENNIALPL2020*.csv"))
+    candidates = ([settings.census_tract_csv] if settings.census_tract_csv.exists() else []) + sorted(
+        census_dir.glob("DECENNIALPL2020*.csv")
+    )
     # Exclude the MSA file (wide-format, no GEO_IDs starting with 1400000US)
     seen: set = set()
-    candidates = [p for p in candidates
-                  if not (str(p) in seen or seen.add(str(p)))]
+    candidates = [p for p in candidates if not (str(p) in seen or seen.add(str(p)))]
 
     path = None
     for c in candidates:
@@ -104,12 +116,14 @@ def load_census_tracts() -> int:
 
     name_col = next((c for c in data.columns if c.upper() == "NAME"), None)
 
-    out = pd.DataFrame({
-        "tract_fips": data[geo_col].str.replace("1400000US", "", regex=False).str.zfill(11),
-        "geo_id":     data[geo_col],
-        "name":       data[name_col] if name_col else None,
-        "population": pd.to_numeric(data[pop_col], errors="coerce").astype("Int64"),
-    })
+    out = pd.DataFrame(
+        {
+            "tract_fips": data[geo_col].str.replace("1400000US", "", regex=False).str.zfill(11),
+            "geo_id": data[geo_col],
+            "name": data[name_col] if name_col else None,
+            "population": pd.to_numeric(data[pop_col], errors="coerce").astype("Int64"),
+        }
+    )
     out = out.dropna(subset=["tract_fips"])
     out = out.drop_duplicates(subset=["tract_fips"])
 
@@ -137,17 +151,18 @@ def _normalize_msa_name(name: str) -> str:
     """
     import re as _re
     import unicodedata as _ud
+
     name = str(name).strip()
     # Strip trailing area type (wide-format files only)
-    name = _re.sub(r'\s+(Metro|Micro)\s+Area$', '', name, flags=_re.IGNORECASE)
+    name = _re.sub(r"\s+(Metro|Micro)\s+Area$", "", name, flags=_re.IGNORECASE)
     # Collapse multiple consecutive dashes
-    name = _re.sub(r'-{2,}', '-', name)
+    name = _re.sub(r"-{2,}", "-", name)
     # Normalize whitespace
-    name = _re.sub(r'\s+', ' ', name).strip()
+    name = _re.sub(r"\s+", " ", name).strip()
     # Decompose accented chars (NFD) and drop the combining marks (category Mn)
     # e.g. ñ → n + ̃ → n,  ü → u + ̈ → u,  é → e + ́ → e
-    decomposed = _ud.normalize('NFD', name)
-    return ''.join(c for c in decomposed if _ud.category(c) != 'Mn').lower()
+    decomposed = _ud.normalize("NFD", name)
+    return "".join(c for c in decomposed if _ud.category(c) != "Mn").lower()
 
 
 def _first_city_state(normalized_name: str):
@@ -162,14 +177,15 @@ def _first_city_state(normalized_name: str):
     (e.g. 2020 census names vs 2023 CBSA delineation names).
     """
     import re as _re
+
     # Split on last ", STATE" pattern
-    m = _re.match(r'^(.*),\s*([a-z]{2}(?:-[a-z]{2})*)$', normalized_name)
+    m = _re.match(r"^(.*),\s*([a-z]{2}(?:-[a-z]{2})*)$", normalized_name)
     if not m:
-        return normalized_name, ''
+        return normalized_name, ""
     cities_part = m.group(1)
     states_part = m.group(2)
-    first_city  = cities_part.split('-')[0].strip()
-    first_state = states_part.split('-')[0]
+    first_city = cities_part.split("-")[0].strip()
+    first_state = states_part.split("-")[0]
     return first_city, first_state
 
 
@@ -185,9 +201,9 @@ def _build_cbsa_lookup(cbsa_df) -> dict:
     lookup: dict = {}
     raw_titles: dict = {}
     for _, row in cbsa_df.iterrows():
-        code  = row["cbsa_code"]
+        code = row["cbsa_code"]
         title = row["cbsa_title"]
-        norm  = _normalize_msa_name(title)
+        norm = _normalize_msa_name(title)
         city, state = _first_city_state(norm)
 
         # Tier 1
@@ -213,7 +229,8 @@ def _build_cbsa_lookup(cbsa_df) -> dict:
 def _all_words(norm: str) -> set:
     """Significant words (>2 chars) for fuzzy scoring."""
     import re as _re
-    return {w for w in _re.split(r'[\s,\-]+', norm) if len(w) > 2}
+
+    return {w for w in _re.split(r"[\s,\-]+", norm) if len(w) > 2}
 
 
 # Known 2020→2023 OMB name changes where the first city also changed.
@@ -221,13 +238,13 @@ def _all_words(norm: str) -> set:
 # Format: {normalize(2020_census_name): normalize(2023_cbsa_title)}
 _KNOWN_RENAMES = {
     # Military base renamed from Fort Polk to Fort Johnson in 2023
-    "fort polk south, la":              "fort johnson, la",
+    "fort polk south, la": "fort johnson, la",
     # Poughkeepsie MSA expanded to include Port Jervis in 2023
     "poughkeepsie-newburgh-middletown, ny": "poughkeepsie-newburgh-middletown-port jervis, ny",
     # Dayton MSA renamed to include Kettering in 2023
-    "dayton, oh":                       "dayton-kettering, oh",
+    "dayton, oh": "dayton-kettering, oh",
     # Some California MSAs renamed
-    "napa, ca":                         "napa, ca",
+    "napa, ca": "napa, ca",
 }
 
 
@@ -251,33 +268,31 @@ def _match_msa_to_cbsa(name: str, lookup: dict) -> str | None:
     if (city, state) in lookup:
         return lookup[(city, state)]
     # Tier 3: city-state string (only when state is unambiguous single state)
-    if '-' not in state:
+    if "-" not in state:
         short_key = f"{city}-{state}"
         if short_key in lookup:
             return lookup[short_key]
-    
+
     # Tier 4: fuzzy — find best Jaccard match within same state
     # lookup contains both string keys and tuple keys; filter to tuples (city, state)
     # and then find the closest cbsa code by comparing against a raw-title lookup
     # stored under the special key prefix "_raw"
     raw_key = "_raw_titles"
     if raw_key not in lookup:
-        return None   # raw titles not available
+        return None  # raw titles not available
 
     norm_words = _all_words(norm)
-    best_code  = None
+    best_code = None
     best_score = 0.0
 
     for cbsa_norm, code in lookup[raw_key].items():
         c_city, c_state = _first_city_state(cbsa_norm)
-        if c_state != state:           # must be same state(s)
+        if c_state != state:  # must be same state(s)
             continue
-        score = len(norm_words & _all_words(cbsa_norm)) / max(
-            len(norm_words | _all_words(cbsa_norm)), 1
-        )
+        score = len(norm_words & _all_words(cbsa_norm)) / max(len(norm_words | _all_words(cbsa_norm)), 1)
         if score > best_score:
             best_score = score
-            best_code  = code
+            best_code = code
 
     if best_score >= 0.5:
         return best_code
@@ -290,7 +305,7 @@ def _match_msa_to_cbsa(name: str, lookup: dict) -> str | None:
         mapped_city, mapped_state = _first_city_state(mapped_norm)
         if (mapped_city, mapped_state) in lookup:
             return lookup[(mapped_city, mapped_state)]
-    
+
     return None
 
 
@@ -329,8 +344,8 @@ def _load_msa_wide(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("Could not find 'Total:' row in wide-format MSA file")
 
     total_row = df[total_mask].iloc[0]
-    msa_names = list(df.columns[1:])          # skip 'Label (Grouping)' column
-    pop_values = list(total_row.iloc[1:])     # skip the 'Total:' cell
+    msa_names = list(df.columns[1:])  # skip 'Label (Grouping)' column
+    pop_values = list(total_row.iloc[1:])  # skip the 'Total:' cell
 
     records = []
     for name, pop_str in zip(msa_names, pop_values):
@@ -349,15 +364,12 @@ def _load_msa_long(df: pd.DataFrame) -> pd.DataFrame:
     Each row is one MSA; columns include GEO_ID and a population column.
     """
     cols_upper = {c: c.upper() for c in df.columns}
-    geo_col  = next((c for c, u in cols_upper.items() if "GEO_ID" in u or "GEO ID" in u), None)
+    geo_col = next((c for c, u in cols_upper.items() if "GEO_ID" in u or "GEO ID" in u), None)
     name_col = next((c for c, u in cols_upper.items() if u == "NAME"), None)
-    pop_col  = next((c for c, u in cols_upper.items() if "P1_001" in u), None)
+    pop_col = next((c for c, u in cols_upper.items() if "P1_001" in u), None)
 
     if not geo_col or not pop_col:
-        raise ValueError(
-            f"Long-format MSA file missing GEO_ID or P1_001 column. "
-            f"Found: {list(df.columns)}"
-        )
+        raise ValueError(f"Long-format MSA file missing GEO_ID or P1_001 column. Found: {list(df.columns)}")
 
     def _extract_code(geo_id: str) -> str:
         parts = str(geo_id).split("US")
@@ -368,12 +380,14 @@ def _load_msa_long(df: pd.DataFrame) -> pd.DataFrame:
         geo_id = str(row[geo_col])
         if not (geo_id.startswith("31") or geo_id.startswith("33") or "US" in geo_id):
             continue
-        records.append({
-            "name":       str(row[name_col]).strip() if name_col else None,
-            "msa_code":   _extract_code(geo_id).zfill(5),
-            "geo_id":     geo_id,
-            "population": pd.to_numeric(str(row[pop_col]).replace(",", ""), errors="coerce"),
-        })
+        records.append(
+            {
+                "name": str(row[name_col]).strip() if name_col else None,
+                "msa_code": _extract_code(geo_id).zfill(5),
+                "geo_id": geo_id,
+                "population": pd.to_numeric(str(row[pop_col]).replace(",", ""), errors="coerce"),
+            }
+        )
     return pd.DataFrame(records)
 
 
@@ -403,9 +417,9 @@ def load_census_msa() -> int:
     """
     # ── Find the file ─────────────────────────────────────────────────────
     census_dir = settings.census_msa_csv.parent
-    candidates = (
-        [settings.census_msa_csv] if settings.census_msa_csv.exists() else []
-    ) + sorted(census_dir.glob("DECENNIALPL2020_P1*.csv"))
+    candidates = ([settings.census_msa_csv] if settings.census_msa_csv.exists() else []) + sorted(
+        census_dir.glob("DECENNIALPL2020_P1*.csv")
+    )
 
     seen = set()
     candidates = [p for p in candidates if not (str(p) in seen or seen.add(str(p)))]
@@ -447,9 +461,9 @@ def load_census_msa() -> int:
         if col not in parsed.columns:
             parsed[col] = None
 
-    parsed["population"] = pd.to_numeric(
-        parsed["population"].astype(str).str.replace(",", ""), errors="coerce"
-    ).astype("Int64")
+    parsed["population"] = pd.to_numeric(parsed["population"].astype(str).str.replace(",", ""), errors="coerce").astype(
+        "Int64"
+    )
 
     parsed = parsed.dropna(subset=["name"])
     parsed = parsed[parsed["name"].str.strip() != ""]
@@ -486,7 +500,7 @@ def load_census_msa() -> int:
                 codes.append(lookup[(city, state)])
                 match_tiers["city_state"] += 1
                 matched += 1
-            elif '-' not in state and f"{city}-{state}" in lookup:
+            elif "-" not in state and f"{city}-{state}" in lookup:
                 codes.append(lookup[f"{city}-{state}"])
                 match_tiers["city_only"] += 1
                 matched += 1
@@ -497,25 +511,25 @@ def load_census_msa() -> int:
         parsed["msa_code"] = codes
         print(f"  CBSA code matched: {matched}/{len(parsed)} MSAs")
 
-        print(f"    Exact: {match_tiers['exact']}  "
-              f"City+state fallback: {match_tiers['city_state']}  "
-              f"City-only fallback: {match_tiers['city_only']}  "
-              f"Unmatched: {match_tiers['none']}")
+        print(
+            f"    Exact: {match_tiers['exact']}  "
+            f"City+state fallback: {match_tiers['city_state']}  "
+            f"City-only fallback: {match_tiers['city_only']}  "
+            f"Unmatched: {match_tiers['none']}"
+        )
         if match_tiers["none"]:
             unmatched = parsed[parsed["msa_code"].isna()]["name"].tolist()
-            print(f"  ⚠ Still unmatched (likely not in CBSA delineation file): "
-                  f"{unmatched[:5]}")
+            print(f"  ⚠ Still unmatched (likely not in CBSA delineation file): {unmatched[:5]}")
     else:
         print("  ⚠ cbsa_counties not loaded yet — msa_code will be NULL")
-        print("    Load cbsa_counties first, then re-run: "
-              "python setup_data.py --only census")
+        print("    Load cbsa_counties first, then re-run: python setup_data.py --only census")
 
     # Rows without a msa_code can still be useful for name-based queries.
     # Use a hash of the name as a fallback key so the table has no NULL PKs.
     import hashlib as _hl
+
     parsed["msa_code"] = parsed["msa_code"].where(
-        parsed["msa_code"].notna(),
-        parsed["name"].apply(lambda n: "X" + _hl.md5(n.encode()).hexdigest()[:7])
+        parsed["msa_code"].notna(), parsed["name"].apply(lambda n: "X" + _hl.md5(n.encode()).hexdigest()[:7])
     )
     parsed["geo_id"] = parsed["geo_id"].fillna("")
     out = parsed[["msa_code", "geo_id", "name", "population"]]
@@ -538,9 +552,7 @@ def repair_msa_codes() -> int:
     Returns the number of rows repaired.
     """
     # Load current X-coded rows
-    x_rows = store.query(
-        "SELECT msa_code, name FROM census_msa WHERE msa_code LIKE 'X%'"
-    )
+    x_rows = store.query("SELECT msa_code, name FROM census_msa WHERE msa_code LIKE 'X%'")
     if x_rows.empty:
         print("  No X-coded msa_codes found — nothing to repair.")
         return 0
@@ -549,9 +561,7 @@ def repair_msa_codes() -> int:
 
     # Build CBSA lookup
     try:
-        cbsa_df = store.query(
-            "SELECT DISTINCT cbsa_code, cbsa_title FROM cbsa_counties WHERE cbsa_title IS NOT NULL"
-        )
+        cbsa_df = store.query("SELECT DISTINCT cbsa_code, cbsa_title FROM cbsa_counties WHERE cbsa_title IS NOT NULL")
     except Exception as e:
         print(f"  Error reading cbsa_counties: {e}")
         return 0
@@ -567,24 +577,21 @@ def repair_msa_codes() -> int:
     conn = store.get_conn()
     for _, row in x_rows.iterrows():
         old_code = row["msa_code"]
-        name     = row["name"]
+        name = row["name"]
         new_code = _match_msa_to_cbsa(name, lookup)
         if new_code:
-            conn.execute(
-                "UPDATE census_msa SET msa_code = ? WHERE msa_code = ?",
-                [new_code, old_code]
-            )
+            conn.execute("UPDATE census_msa SET msa_code = ? WHERE msa_code = ?", [new_code, old_code])
             repaired += 1
         else:
             still_unmatched.append(name)
 
-    still_x = int(store.query(
-        "SELECT COUNT(*) as n FROM census_msa WHERE msa_code LIKE 'X%'"
-    ).iloc[0]["n"])
+    still_x = int(store.query("SELECT COUNT(*) as n FROM census_msa WHERE msa_code LIKE 'X%'").iloc[0]["n"])
     print(f"  ✓ Repaired {repaired} rows. Remaining X-codes: {still_x}")
     if still_unmatched:
-        print(f"  These {len(still_unmatched)} MSAs have no matching CBSA code "
-              f"(likely genuinely absent from your delineation file vintage):")
+        print(
+            f"  These {len(still_unmatched)} MSAs have no matching CBSA code "
+            f"(likely genuinely absent from your delineation file vintage):"
+        )
         for name in still_unmatched[:10]:
             print(f"    • {name}")
         if len(still_unmatched) > 10:
@@ -592,5 +599,5 @@ def repair_msa_codes() -> int:
         print()
         print("  These MSAs cannot be joined to NRI data, but they don't affect")
         print("  the flood risk query (they're typically small Micro areas).")
-    
+
     return repaired
