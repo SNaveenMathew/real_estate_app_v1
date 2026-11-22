@@ -140,6 +140,8 @@ class Settings(BaseSettings):
     fta_ridership_file: Path = BASE_DIR / "data" / "fta" / "September 2026 Raw Monthly Ridership (no adjustments or estimates)_261102.xlsx"
     fta_routes_shp: Path = BASE_DIR / "data" / "fta" / "connections" / "National_Transit_Map_Routes.shp"
     uploads_dir: Path = BASE_DIR / "uploads"
+    photo_max_upload_mb: int = 10             # house photos, not datasets: a much smaller cap than
+                                              # onboarding_max_upload_mb, enforced while streaming
 
     # ── Data onboarding (uploaded datasets; see services/dataset_onboarding.py) ──
     onboarding_max_upload_mb: int = 250
