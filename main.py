@@ -2,6 +2,7 @@
 FastAPI backend for the Real Estate Analysis App.
 Run: uvicorn main:app --reload --port 8000
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -14,6 +15,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import make_asgi_app
@@ -61,6 +63,16 @@ async def lifespan(app: FastAPI):
     ensure_phoenix_server()
     initialize_observability()
     try:
+        # Retention is a startup job: per-session trimming already happens on every write, but
+        # nothing ever removed sessions that stopped being used (services/session_memory.purge).
+        from services import session_memory
+
+        purged = session_memory.purge()
+        if purged:
+            logger.info("session memory: removed %s turn(s) older than the retention window", purged)
+    except Exception:
+        logger.debug("session memory retention skipped", exc_info=True)
+    try:
         yield
     finally:
         store.close()
@@ -82,6 +94,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Most of the JSON this service returns is GeoJSON: /api/houses was 1.51 MB uncompressed for
+# 323 properties, and a map layer or choropleth is 50-245 KB. JSON repeats its keys on every
+# feature, so gzip is not a marginal win here - it is 5-8x on the payloads that matter.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # Ensure upload directory exists
 settings.uploads_dir.mkdir(parents=True, exist_ok=True)
@@ -114,7 +131,7 @@ if static_dir.exists() and static_dir.is_dir():
     def _static_version() -> str:
         """MD5 of assets — changes whenever any of them changes."""
         h = hashlib.md5()
-        for name in ("app.js", "commute.js", "layers.js", "style.css"):
+        for name in ("sanitize.js", "app.js", "commute.js", "layers.js", "style.css"):
             p = static_dir / name
             if p.exists():
                 h.update(p.read_bytes())
@@ -127,7 +144,7 @@ if static_dir.exists() and static_dir.is_dir():
         """The Data page: schema map, dataset upload, and review of proposed catalog changes."""
         html = (static_dir / "data.html").read_text(encoding="utf-8")
         ver = hashlib.sha1(b"".join((static_dir / n).read_bytes() for n in ("data.js", "data.css"))).hexdigest()[:10]
-        html = re.sub(r'(/static/[\w./-]+\.(?:js|css))(\?v=\w+)?', lambda m: f"{m.group(1)}?v={ver}", html)
+        html = re.sub(r"(/static/[\w./-]+\.(?:js|css))(\?v=\w+)?", lambda m: f"{m.group(1)}?v={ver}", html)
         return HTMLResponse(content=html, headers={"Cache-Control": "no-cache"})
 
     @app.get("/cache", response_class=HTMLResponse)
@@ -135,7 +152,7 @@ if static_dir.exists() and static_dir.is_dir():
         """The Cache page: what has been reused, and how it connects to the data model."""
         html = (static_dir / "cache.html").read_text(encoding="utf-8")
         ver = hashlib.sha1(b"".join((static_dir / n).read_bytes() for n in ("cache.js", "cache.css"))).hexdigest()[:10]
-        html = re.sub(r'(/static/[\w./-]+\.(?:js|css))(\?v=\w+)?', lambda m: f"{m.group(1)}?v={ver}", html)
+        html = re.sub(r"(/static/[\w./-]+\.(?:js|css))(\?v=\w+)?", lambda m: f"{m.group(1)}?v={ver}", html)
         return HTMLResponse(content=html, headers={"Cache-Control": "no-cache"})
 
     @app.get("/", response_class=HTMLResponse)
@@ -145,7 +162,7 @@ if static_dir.exists() and static_dir.is_dir():
         html = html.replace("</head>", f"<script>window.APP_CONFIG={client_config};</script>\n</head>", 1)
         html = re.sub(
             r'(/static/[^"\']+\.(?:js|css))(\?v=[^"\']*)?',
-            lambda m: f'{m.group(1)}?v={_STATIC_VER}',
+            lambda m: f"{m.group(1)}?v={_STATIC_VER}",
             html,
         )
         return HTMLResponse(content=html, headers={"Cache-Control": "no-store"})
@@ -153,4 +170,5 @@ if static_dir.exists() and static_dir.is_dir():
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("main:app", host=settings.app_host, port=settings.app_port, reload=True)
