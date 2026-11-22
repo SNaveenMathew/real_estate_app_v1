@@ -24,14 +24,17 @@ one row per message, ordered by ``seq`` and trimmed to the last
 No message content is invented here: what is stored is exactly what the user
 sent and the agent replied.
 """
+
 from __future__ import annotations
 
+import re
+from datetime import datetime, timedelta
 from typing import Iterable
 
 import db.duckdb_store as store
 from config import settings
 
-MAX_MESSAGES = 40          # 20 exchanges; keep last
+MAX_MESSAGES = 40  # 20 exchanges; keep last
 DEFAULT_AGENT = "general"
 
 
@@ -57,7 +60,7 @@ def agent_key(agent: str, house_id: str | None = None) -> str:
 
 def _limit() -> int:
     turns = int(getattr(settings, "session_memory_max_turns", 20) or 20)
-    return max(turns, 1) * 2                     # user + assistant per turn
+    return max(turns, 1) * 2  # user + assistant per turn
 
 
 def append_turn(
@@ -78,7 +81,7 @@ def append_turn(
         "SELECT COALESCE(MAX(seq), 0) FROM chat_session_turns WHERE session_id = ? AND agent_key = ?",
         [session_id, key],
     ).fetchone()
-    seq = int(row[0] or 0)
+    seq = int((row or (0,))[0] or 0)
     for offset, (role, content) in enumerate((("user", user_message), ("assistant", assistant_reply)), start=1):
         if not content:
             continue
@@ -106,11 +109,15 @@ def recent(
     if not session_id:
         return []
     key = agent_key(agent, house_id)
-    rows = store.get_conn().execute(
-        "SELECT role, content FROM chat_session_turns WHERE session_id = ? AND agent_key = ? "
-        "ORDER BY seq DESC LIMIT ?",
-        [session_id, key, int(limit or _limit())],
-    ).fetchall()
+    rows = (
+        store.get_conn()
+        .execute(
+            "SELECT role, content FROM chat_session_turns WHERE session_id = ? AND agent_key = ? "
+            "ORDER BY seq DESC LIMIT ?",
+            [session_id, key, int(limit or _limit())],
+        )
+        .fetchall()
+    )
     return [{"role": role, "content": content} for role, content in reversed(rows)]
 
 
@@ -132,23 +139,90 @@ def history_or(
     return recent(session_id, agent, house_id=house_id)
 
 
+def purge(days: int | None = None) -> int:
+    """Delete every turn belonging to a session older than the retention window; returns the rows removed.
+
+    The per-session cap in ``append_turn`` bounds one conversation; nothing bounded the number of
+    conversations, so an installation that had been used for a year still carried every session it
+    ever saw. Retention is whole-session (a half-deleted transcript is worse than none) and is
+    measured from the newest turn, so an active conversation is never cut off mid-thread.
+    """
+    window = int(days if days is not None else getattr(settings, "session_memory_retention_days", 30) or 0)
+    if window <= 0:
+        return 0
+    cutoff = datetime.now() - timedelta(days=window)
+    conn = store.get_conn()
+    rows = conn.execute(
+        "SELECT COUNT(*) FROM chat_session_turns WHERE session_id IN ("
+        "  SELECT session_id FROM chat_session_turns GROUP BY session_id HAVING MAX(created_at) < ?)",
+        [cutoff],
+    ).fetchone() or (0,)
+    conn.execute(
+        "DELETE FROM chat_session_turns WHERE session_id IN ("
+        "  SELECT session_id FROM chat_session_turns GROUP BY session_id HAVING MAX(created_at) < ?)",
+        [cutoff],
+    )
+    return int(rows[0] or 0)
+
+
+_ANAPHORA = re.compile(
+    r"^\s*(and\b|also\b|what about\b|how about\b|what else\b|plus\b|it\b|its\b|it's\b|"
+    r"that\b|this\b|those\b|these\b|they\b|them\b|their\b|there\b|same\b|the same\b)",
+    re.IGNORECASE,
+)
+
+
+def resolve_followup(question: str, history: Iterable[dict] | None, *, max_words: int = 12) -> str:
+    """Make a pronoun-led follow-up self-contained by naming the turn it refers to.
+
+    A browser that keeps the transcript sends the whole history and needs nothing from here. A
+    stateless API client sends one message, and "and how many bedrooms does it have?" then reaches
+    the planner with no referent at all — it cannot be planned, so it is answered with a
+    clarification instead of a number. When the question opens with an anaphor and a stored user
+    turn exists, the previous question is appended as context. Only short, pronoun-led questions
+    are rewritten; anything that already names its subject is passed through untouched.
+    """
+    text = (question or "").strip()
+    if not text or len(text.split()) > max_words or not _ANAPHORA.match(text):
+        return question or ""
+    previous = next(
+        (
+            str(m.get("content") or "").strip()
+            for m in reversed(list(history or []))
+            if m.get("role") == "user" and m.get("content")
+        ),
+        "",
+    )
+    if not previous:
+        return question
+    return f"{text} (following up on: {previous})"
+
+
 def count(session_id: str | None, agent: str = DEFAULT_AGENT, *, house_id: str | None = None) -> int:
     if not session_id:
         return 0
-    row = store.get_conn().execute(
-        "SELECT COUNT(*) FROM chat_session_turns WHERE session_id = ? AND agent_key = ?",
-        [session_id, agent_key(agent, house_id)],
-    ).fetchone()
-    return int(row[0] or 0)
+    row = (
+        store.get_conn()
+        .execute(
+            "SELECT COUNT(*) FROM chat_session_turns WHERE session_id = ? AND agent_key = ?",
+            [session_id, agent_key(agent, house_id)],
+        )
+        .fetchone()
+    )
+    return int((row or (0,))[0] or 0)
 
 
 def sessions(limit: int = 50) -> list[dict]:
     """Sessions with how many turns each holds (diagnostics; no message content)."""
-    rows = store.get_conn().execute(
-        "SELECT session_id, agent_key, COUNT(*) AS rows, MAX(created_at) AS last_at "
-        "FROM chat_session_turns GROUP BY session_id, agent_key ORDER BY last_at DESC LIMIT ?",
-        [int(limit)],
-    ).fetchall()
+    rows = (
+        store.get_conn()
+        .execute(
+            "SELECT session_id, agent_key, COUNT(*) AS rows, MAX(created_at) AS last_at "
+            "FROM chat_session_turns GROUP BY session_id, agent_key ORDER BY last_at DESC LIMIT ?",
+            [int(limit)],
+        )
+        .fetchall()
+    )
     return [
         {"session_id": sid, "agent_key": key, "messages": int(n), "last_at": str(last_at)}
         for sid, key, n, last_at in rows
@@ -159,14 +233,13 @@ def clear(session_id: str, agent: str | None = None, *, house_id: str | None = N
     """Delete a session's stored turns (all scopes when ``agent`` is None); returns rows removed."""
     conn = store.get_conn()
     if agent is None:
-        before = conn.execute(
-            "SELECT COUNT(*) FROM chat_session_turns WHERE session_id = ?", [session_id]
-        ).fetchone()[0]
+        before = (
+            conn.execute("SELECT COUNT(*) FROM chat_session_turns WHERE session_id = ?", [session_id]).fetchone()
+            or (0,)
+        )[0]
         conn.execute("DELETE FROM chat_session_turns WHERE session_id = ?", [session_id])
     else:
         key = agent_key(agent, house_id)
         before = count(session_id, agent=agent, house_id=house_id)
-        conn.execute(
-            "DELETE FROM chat_session_turns WHERE session_id = ? AND agent_key = ?", [session_id, key]
-        )
+        conn.execute("DELETE FROM chat_session_turns WHERE session_id = ? AND agent_key = ?", [session_id, key])
     return int(before or 0)

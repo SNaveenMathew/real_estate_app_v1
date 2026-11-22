@@ -1,4 +1,5 @@
 """HTTP API endpoints for General Chat and House Chat agents."""
+
 from __future__ import annotations
 
 import asyncio
@@ -42,11 +43,13 @@ def _queue_listener(queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
     ping re-entered the loop. Handing the put to the loop itself is the one-line fix, and it
     keeps the failure visible: a closed loop means the client is gone, which is not an error.
     """
+
     def listener(snapshot: dict) -> None:
         try:
             loop.call_soon_threadsafe(queue.put_nowait, snapshot)
-        except RuntimeError:          # loop already closed: the tab went away
+        except RuntimeError:  # loop already closed: the tab went away
             pass
+
     return listener
 
 
@@ -76,11 +79,14 @@ async def house_chat(house_id: str, req: ChatRequest):
     # The client's history wins when it sends one; otherwise the server's own transcript for this session/scope
     # continues the conversation (services/session_memory.py).
     history = session_memory.history_or(req.history, req.session_id, "house", house_id=house_id)
+    # A stateless caller's "what about its schools?" has no referent unless the previous turn is
+    # named in the question the planner sees (services/session_memory.resolve_followup).
+    question = session_memory.resolve_followup(req.message, history)
 
     _seed_progress(req.turn_id, HOUSE_PROGRESS_STEPS)
     try:
         reply, updated_history, artifacts = await turn_runner.run_turn(
-            run_house_chat, house_id, req.message, history, turn_id=req.turn_id
+            run_house_chat, house_id, question, history, turn_id=req.turn_id
         )
     except Exception as e:
         raise turn_failure(e)
@@ -90,10 +96,9 @@ async def house_chat(house_id: str, req: ChatRequest):
         reply = "Thank you for the property description — it has been saved. " + reply
 
     try:
-        session_memory.append_turn(req.session_id, "house", req.message, reply,
-                                   house_id=house_id, turn_id=req.turn_id)
+        session_memory.append_turn(req.session_id, "house", req.message, reply, house_id=house_id, turn_id=req.turn_id)
     except Exception:
-        pass                      # memory is a convenience; the answer already exists
+        pass  # memory is a convenience; the answer already exists
 
     trace_url = updated_history[-1].get("trace_url") if updated_history else None
     return {
@@ -110,6 +115,7 @@ async def house_chat(house_id: str, req: ChatRequest):
 async def general_chat(req: ChatRequest):
     """General chat — cross-house, MSA, national risk questions."""
     history = session_memory.history_or(req.history, req.session_id, "general")
+    question = session_memory.resolve_followup(req.message, history)
 
     _seed_progress(req.turn_id, GENERAL_PROGRESS_STEPS)
     try:
@@ -117,7 +123,7 @@ async def general_chat(req: ChatRequest):
         chat_fn = getattr(main_mod, "run_general_chat", run_general_chat) if main_mod else run_general_chat
         reply, updated_history, artifacts, observability = await turn_runner.run_turn(
             chat_fn,
-            req.message,
+            question,
             history,
             include_metadata=True,
             session_id=req.session_id,
@@ -129,7 +135,7 @@ async def general_chat(req: ChatRequest):
     try:
         session_memory.append_turn(req.session_id, "general", req.message, reply, turn_id=req.turn_id)
     except Exception:
-        pass                      # see house_chat
+        pass  # see house_chat
 
     return {
         "reply": reply,
@@ -155,7 +161,7 @@ async def stream_turn_progress(turn_id: str):
     """Stream real-time step progress updates using Server-Sent Events (SSE)."""
     tracker = turn_progress.get_progress_tracker(turn_id)
     waited = 0.0
-    while tracker is None and waited < _TRACKER_WAIT_S:   # the POST registers the turn a moment after the stream opens
+    while tracker is None and waited < _TRACKER_WAIT_S:  # the POST registers the turn a moment after the stream opens
         await asyncio.sleep(0.05)
         waited += 0.05
         tracker = turn_progress.get_progress_tracker(turn_id)

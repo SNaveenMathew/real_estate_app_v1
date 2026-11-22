@@ -1,4 +1,5 @@
 """Central configuration — edit .env or override here."""
+
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -11,7 +12,7 @@ class Settings(BaseSettings):
 
     # ── llama-server ──────────────────────────────────────────────────────────────
     llama_server_base_url: str = "http://127.0.0.1:8080/v1"
-    llama_server_model: str = "DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M"          # options: DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M, unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL, llama3.2, mistral, etc.
+    llama_server_model: str = "DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M"  # options: DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M, unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL, llama3.2, mistral, etc.
 
     # ── LLM generation limits ───────────────────────────────────────────────
     # Defensive bounds applied to every local LLM call (general agent, house
@@ -39,19 +40,23 @@ class Settings(BaseSettings):
     # actually finish. Paired with a tightened "SQL only" instruction in
     # agents/tools.py, which cuts down how much of that budget goes to
     # non-SQL text in the first place.
-    agent_max_tokens: int = 2048        # ReAct agent turn: reasoning + tool call + final answer
-    code_agent_max_tokens: int = 1500   # SQL Code Agent: raised from 700 — see "Round 2" above
+    agent_max_tokens: int = 2048  # ReAct agent turn: reasoning + tool call + final answer
+    code_agent_max_tokens: int = 1500  # SQL Code Agent: raised from 700 — see "Round 2" above
     llm_request_timeout: float = 120.0  # seconds, per HTTP request to llama-server
-    phoenix_batch_export: bool = True   # False = export each span synchronously: blocks every request while the collector is down
-    llm_max_retries: int = 1            # client-level retries; the library default (2) multiplies the worst-case wait to ~3x the timeout
+    phoenix_batch_export: bool = (
+        True  # False = export each span synchronously: blocks every request while the collector is down
+    )
+    llm_max_retries: int = (
+        1  # client-level retries; the library default (2) multiplies the worst-case wait to ~3x the timeout
+    )
 
     # ── Resilience (agents/llm_resilience.py, agents/turn_runner.py, agents/tools.py, db/duckdb_store.py) ────────
     # Model unavailable -> degrade (deterministic planning/compiling/evidence), don't hang and don't 500.
-    llm_breaker_threshold: int = 3        # consecutive transient failures before the model is treated as down
+    llm_breaker_threshold: int = 3  # consecutive transient failures before the model is treated as down
     llm_breaker_cooldown_s: float = 30.0  # then calls fail instantly until this passes; one probe call is let through
     # A chat turn runs on a worker thread so the server stays responsive; these bound it.
-    agent_max_concurrent_turns: int = 2   # local model servers cannot parallelize much; extra turns queue
-    agent_queue_timeout_s: float = 30.0   # waiting longer than this for a slot -> "busy" (HTTP 503)
+    agent_max_concurrent_turns: int = 2  # local model servers cannot parallelize much; extra turns queue
+    agent_queue_timeout_s: float = 30.0  # waiting longer than this for a slot -> "busy" (HTTP 503)
     agent_turn_deadline_s: float = 600.0  # a turn running longer than this is cancelled at its next step (HTTP 504)
     # The vocabulary an agent program may call is tagged and deadline-bounded (agents/capabilities.py). Each call has
     # its own limit; this is the cumulative budget for one turn, so five "cheap" calls cannot add up to a hang.
@@ -59,14 +64,17 @@ class Settings(BaseSettings):
     # LLM-written SQL is verified structurally against the plan (agents/plan_contract.py).
     #   enforce (default): reject any violation   warn: reject only safety violations   off: likewise (safety is never optional)
     sql_contract_mode: str = "enforce"
-    sql_timeout_s: float = 30.0           # a runaway statement is interrupted after this long
-    sql_max_rows: int = 50000             # rows materialized from one statement (more -> truncated, and said so)
+    sql_timeout_s: float = 30.0  # a runaway statement is interrupted after this long
+    sql_max_rows: int = 50000  # rows materialized from one statement (more -> truncated, and said so)
     # When no catalog alias matches, a short model call may PROPOSE concept keys (never SQL); see agents/semantic_fallback.py.
     semantic_fallback_enabled: bool = True
     semantic_fallback_timeout_s: float = 20.0
     # Server-side chat memory (services/session_memory.py): turns kept per session_id, so a reload or a second
     # tab continues the conversation. The client's own history, when it sends one, still takes precedence.
     session_memory_max_turns: int = 20
+    # Sessions whose newest turn is older than this are deleted at startup: per-session trimming
+    # bounds one conversation, not the number of conversations that ever existed. 0 disables it.
+    session_memory_retention_days: int = 30
     # Dataset onboarding: a model may suggest extra column pairs to TEST for joins (services/relationship_suggestions.py).
     # Off by default: it adds one model call to onboarding. Suggested pairs are still validated against the data and
     # still need the user's approval.
@@ -95,13 +103,13 @@ class Settings(BaseSettings):
     cache_prompt_enabled: bool = True
     cache_semantic_enabled: bool = True
     cache_sql_enabled: bool = True
-    cache_ttl_s: float = 86400.0            # entries older than this stop matching (24 h); 0 disables caching
-    cache_max_entries: int = 5000           # per table; the least recently used rows are dropped beyond it
+    cache_ttl_s: float = 86400.0  # entries older than this stop matching (24 h); 0 disables caching
+    cache_max_entries: int = 5000  # per table; the least recently used rows are dropped beyond it
     # How alike two questions must be to share a cached answer.  This is the SECOND gate: the planner
     # signature (concepts + tables + operation + scope) must already match exactly.
     cache_semantic_threshold: float = 0.85
-    cache_semantic_scan_limit: int = 400    # stored questions compared per lookup, newest first
-    cache_fingerprint_ttl_s: float = 3.0    # how long a computed data fingerprint is reused in-process
+    cache_semantic_scan_limit: int = 400  # stored questions compared per lookup, newest first
+    cache_fingerprint_ttl_s: float = 3.0  # how long a computed data fingerprint is reused in-process
 
     # ── Observability / Phoenix ─────────────────────────────────────────────
     # Local Phoenix is open source and runs entirely on the developer machine.
@@ -132,35 +140,37 @@ class Settings(BaseSettings):
     # https://www.census.gov/geographies/reference-files/time-series/demo/metro-micro/delineation-files.html
     # cbsa_csv: Path = BASE_DIR / "data" / "census" / "list1_2020.csv"
     cbsa_xlsx: Path = BASE_DIR / "data" / "census" / "list1_2023.xlsx"
-    redfin_dir: Path = BASE_DIR / "data" / "redfin"   # drop any number of Redfin CSVs here
+    redfin_dir: Path = BASE_DIR / "data" / "redfin"  # drop any number of Redfin CSVs here
     # Sold homes data
     # Allegheny County, PA: https://data.wprdc.org/dataset/real-estate-sales
     sold_dir: Path = BASE_DIR / "data" / "sold"
     # Zillow Research data — https://www.zillow.com/research/data/
     # Drop any number/geography-level of files into each folder (see services/zillow_sources.py)
-    zhvi_dir: Path = BASE_DIR / "data" / "zhvi"                        # ZHVI ("Home Values" -> ZHVI)
-    market_heat_dir: Path = BASE_DIR / "data" / "market_heat_index"    # Market Heat Index
+    zhvi_dir: Path = BASE_DIR / "data" / "zhvi"  # ZHVI ("Home Values" -> ZHVI)
+    market_heat_dir: Path = BASE_DIR / "data" / "market_heat_index"  # Market Heat Index
     shapefile_dir: Path = BASE_DIR / "data" / "shapefiles"
     fta_dir: Path = BASE_DIR / "data" / "fta"
     fta_safety_file: Path = BASE_DIR / "data" / "fta" / "S&S Time Series-July 2026_261102.xlsx"
-    fta_ridership_file: Path = BASE_DIR / "data" / "fta" / "September 2026 Raw Monthly Ridership (no adjustments or estimates)_261102.xlsx"
+    fta_ridership_file: Path = (
+        BASE_DIR / "data" / "fta" / "September 2026 Raw Monthly Ridership (no adjustments or estimates)_261102.xlsx"
+    )
     fta_routes_shp: Path = BASE_DIR / "data" / "fta" / "connections" / "National_Transit_Map_Routes.shp"
     uploads_dir: Path = BASE_DIR / "uploads"
-    photo_max_upload_mb: int = 10             # house photos, not datasets: a much smaller cap than
-                                              # onboarding_max_upload_mb, enforced while streaming
+    photo_max_upload_mb: int = 10  # house photos, not datasets: a much smaller cap than
+    # onboarding_max_upload_mb, enforced while streaming
 
     # ── Data onboarding (uploaded datasets; see services/dataset_onboarding.py) ──
     onboarding_max_upload_mb: int = 250
     onboarding_sample_rows: int = 8
-    onboarding_geocode_row_cap: int = 2000   # rows sent to the Census geocoder per run
-    onboarding_api_row_cap: int = 500        # rows allowed through the per-point Census API when no tract geometry is loaded
+    onboarding_geocode_row_cap: int = 2000  # rows sent to the Census geocoder per run
+    onboarding_api_row_cap: int = 500  # rows allowed through the per-point Census API when no tract geometry is loaded
 
     # ── Catalog LLM router (optional; drafts descriptions/synonyms only; see services/catalog_llm.py) ──
     # Tier "draft" -> CATALOG_DRAFT_*, tier "judge" -> CATALOG_JUDGE_*; empty values fall back to the chat
     # llama-server above. Nothing here is required: without a model the Data page uses rule-based defaults.
     catalog_llm_enabled: bool = True
     catalog_llm_judge_enabled: bool = False
-    catalog_draft_base_url: str = ""         # e.g. http://127.0.0.1:8081/v1 (a separate small llama-server)
+    catalog_draft_base_url: str = ""  # e.g. http://127.0.0.1:8081/v1 (a separate small llama-server)
     catalog_draft_model: str = ""
     catalog_judge_base_url: str = ""
     catalog_judge_model: str = ""
@@ -170,23 +180,23 @@ class Settings(BaseSettings):
     catalog_llm_disable_thinking: bool = True
 
     # ── Commute (free/open services only; see services/commute.py) ──────────
-    work_address: str = ""                      # optional default; the Commute tab saves the real value in the DB
-    commute_modes: str = "drive,bike,walk"      # 'transit' is added automatically when OTP_BASE_URL is set
+    work_address: str = ""  # optional default; the Commute tab saves the real value in the DB
+    commute_modes: str = "drive,bike,walk"  # 'transit' is added automatically when OTP_BASE_URL is set
     osrm_drive_url: str = "https://router.project-osrm.org"
     osrm_bike_url: str = "https://routing.openstreetmap.de/routed-bike"
     osrm_foot_url: str = "https://routing.openstreetmap.de/routed-foot"
-    osrm_min_interval_s: float = 1.0            # politeness delay between requests to a public server (0 for your own)
+    osrm_min_interval_s: float = 1.0  # politeness delay between requests to a public server (0 for your own)
     osrm_timeout_s: float = 25.0
-    osrm_table_max: int = 90                    # sources per /table request (the public demo allows 100 coordinates)
-    commute_drive_factor: float = 1.0           # multiply free-flow drive time (e.g. 1.3 for rush hour); 1.0 = free-flow
-    otp_base_url: str = ""                      # self-hosted OpenTripPlanner; empty = no transit
-    otp_api: str = "graphql"                    # graphql | rest
+    osrm_table_max: int = 90  # sources per /table request (the public demo allows 100 coordinates)
+    commute_drive_factor: float = 1.0  # multiply free-flow drive time (e.g. 1.3 for rush hour); 1.0 = free-flow
+    otp_base_url: str = ""  # self-hosted OpenTripPlanner; empty = no transit
+    otp_api: str = "graphql"  # graphql | rest
     commute_depart_time: str = "08:00"
     census_geocoder_url: str = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
     nominatim_base_url: str = "https://nominatim.openstreetmap.org"
     nominatim_user_agent: str = "RealEstateIntelligence/1.0 (local personal app)"
-    nominatim_email: str = ""                   # optional contact, per Nominatim's usage policy
-    nominatim_countrycodes: str = "us"          # empty = worldwide
+    nominatim_email: str = ""  # optional contact, per Nominatim's usage policy
+    nominatim_countrycodes: str = "us"  # empty = worldwide
 
     # ── DuckDB ───────────────────────────────────────────────────────────────
     duckdb_path: Path = BASE_DIR / "data" / "real_estate.duckdb"
