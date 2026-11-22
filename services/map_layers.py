@@ -46,6 +46,7 @@ sidebar selection, favoriting and chat handoff wired in. ``describe_layers()`` s
 ``special``, so the frontend panel has one place to read every toggle from; ``get_layer_data`` refuses to
 serve data for them (there is nothing generic to serve — the frontend already has the mechanism).
 """
+
 from __future__ import annotations
 
 import copy
@@ -65,28 +66,36 @@ from services.relationship_discovery import LAT_NAMES, LON_NAMES
 # Tunables
 # ---------------------------------------------------------------------------
 
-HEAT_ROW_THRESHOLD = 300      # a point table with more rows than this defaults to a heat layer, not markers
+HEAT_ROW_THRESHOLD = 300  # a point table with more rows than this defaults to a heat layer, not markers
 MAX_POINT_FEATURES = 2000
-DEFAULT_GRID_DEG = 0.003      # ~250-300m at US latitudes; halved/doubled per zoom level by the caller
+DEFAULT_GRID_DEG = 0.003  # ~250-300m at US latitudes; halved/doubled per zoom level by the caller
 MAX_GRID_CELLS = 6000
 MAX_LINE_FEATURES = 5000
 MAX_POLYGON_FEATURES = 1500
 MAX_TRACTS = 2500
-SIMPLIFY_TOLERANCE_DEG = 0.0004    # ~40m — trims polygon vertex count without visible distortion at map scale
+SIMPLIFY_TOLERANCE_DEG = 0.0004  # ~40m — trims polygon vertex count without visible distortion at map scale
 SQUARE_METER_PER_SQUARE_MILE = 2_589_988.110336
 
-TITLE_OVERRIDES = {   # cosmetic only; every one of these is also reachable through the generic prettifier
-    "houses": "Houses", "crime_incidents": "Crime", "sold_homes": "Sold Homes",
-    "bike_routes": "Bike Routes", "transit_routes": "Transit Routes",
-    "nri_tracts": "Risk (NRI)", "census_tracts": "Population",
+TITLE_OVERRIDES = {  # cosmetic only; every one of these is also reachable through the generic prettifier
+    "houses": "Houses",
+    "crime_incidents": "Crime",
+    "sold_homes": "Sold Homes",
+    "bike_routes": "Bike Routes",
+    "transit_routes": "Transit Routes",
+    "nri_tracts": "Risk (NRI)",
+    "census_tracts": "Population",
 }
 
 # Columns that are never offered as a "color by" measure or a heat weight: identifiers, join keys and
 # bounding-box/geometry bookkeeping columns look numeric but do not mean anything summed or averaged.
 _NOT_A_MEASURE = re.compile(
     r"(^id$|_id$|^lat$|^lon$|^min_lon$|^min_lat$|^max_lon$|^max_lat$|^year$|^month$|"
-    r"fips$|_code$|^zip$|zip5?$|geoid|^ord$)", re.I)
-_MEASURE_BOOST = re.compile(r"(score|risk|severity|weight|population|price|index|idx|rate|pct|percent|count|rank)", re.I)
+    r"fips$|_code$|^zip$|zip5?$|geoid|^ord$)",
+    re.I,
+)
+_MEASURE_BOOST = re.compile(
+    r"(score|risk|severity|weight|population|price|index|idx|rate|pct|percent|count|rank)", re.I
+)
 _WEIGHT_HINT = re.compile(r"(severity|weight|score|intensity|magnitude)", re.I)
 # A column note that calls itself out as the table's headline metric ranks above its siblings
 # (e.g. nri_tracts.risk_score's note says "Composite NRI risk score") - a pattern any curator or
@@ -123,7 +132,9 @@ def _family(sql_type: str) -> str:
     t = sql_type.upper()
     if t.startswith(("VARCHAR", "TEXT", "STRING", "CHAR")):
         return "text"
-    if t.startswith(("TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "INT")):
+    if t.startswith(
+        ("TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "INT")
+    ):
         return "int"
     if t.startswith(("DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC")):
         return "float"
@@ -140,10 +151,10 @@ def numeric_columns(table: str, hidden: set[str]) -> list[dict]:
         note = notes.get(name)
         boost = 1 if _MEASURE_BOOST.search(name) else 0
         if note and note.role == "measure":
-            boost += 1     # a role stored by the Data page onboarding flow is a stronger signal than a name guess
+            boost += 1  # a role stored by the Data page onboarding flow is a stronger signal than a name guess
         if note and note.note and _PRIMARY_HINT.search(note.note):
-            boost += 2      # this column's own description calls it the headline metric
-        label = (note.note if note and note.note else _prettify(name))
+            boost += 2  # this column's own description calls it the headline metric
+        label = note.note if note and note.note else _prettify(name)
         out.append({"column": name, "label": label, "unit": note.unit if note else "", "_rank": boost})
     out.sort(key=lambda c: (-c["_rank"], c["column"]))
     for c in out:
@@ -202,9 +213,14 @@ def _geometry_kinds(table: str, sample: int = 200) -> set[str]:
     if not _has_columns(table, "geometry_json"):
         return set()
     try:
-        rows = store.get_conn().execute(
-            f"SELECT DISTINCT json_extract_string(geometry_json, '$.type') FROM {_q(table)} "
-            f"WHERE geometry_json IS NOT NULL USING SAMPLE {int(sample)} ROWS").fetchall()
+        rows = (
+            store.get_conn()
+            .execute(
+                f"SELECT DISTINCT json_extract_string(geometry_json, '$.type') FROM {_q(table)} "
+                f"WHERE geometry_json IS NOT NULL USING SAMPLE {int(sample)} ROWS"
+            )
+            .fetchall()
+        )
         return {r[0] for r in rows if r[0]}
     except Exception:
         return set()
@@ -238,14 +254,17 @@ def _geometry_status() -> tuple[bool, str]:
     gdf = geo_utils._load_tracts_gdf()
     if gdf is not None and not gdf.empty:
         return True, geo_utils.geometry_source()
-    return False, ("No tract geometry is cached yet. Load the NRI shapefile (writes "
-                   "data/nri/nri_geometry_cache.parquet automatically), or add TIGER/Line shapefiles to "
-                   "data/shapefiles/, then re-run setup_data.py.")
+    return False, (
+        "No tract geometry is cached yet. Load the NRI shapefile (writes "
+        "data/nri/nri_geometry_cache.parquet automatically), or add TIGER/Line shapefiles to "
+        "data/shapefiles/, then re-run setup_data.py."
+    )
 
 
 # ---------------------------------------------------------------------------
 # Spec derivation
 # ---------------------------------------------------------------------------
+
 
 def _classify(table: str, meta) -> dict | None:
     hidden = set(meta.hidden_columns)
@@ -259,12 +278,21 @@ def _classify(table: str, meta) -> dict | None:
         is_poly = bool(kinds & {"Polygon", "MultiPolygon"})
         if is_poly:
             measures = numeric_columns(table, hidden)
-            return {"kind": "polygons", "group": "fill", "row_count": schema._row_count(table),
-                    "measures": measures, "default_measure": measures[0]["column"] if measures else None,
-                    "has_color_col": "color" in cols and "color" not in hidden}
+            return {
+                "kind": "polygons",
+                "group": "fill",
+                "row_count": schema._row_count(table),
+                "measures": measures,
+                "default_measure": measures[0]["column"] if measures else None,
+                "has_color_col": "color" in cols and "color" not in hidden,
+            }
         if is_line:
-            return {"kind": "lines", "group": "overlay", "row_count": schema._row_count(table),
-                    "has_color_col": "color" in cols and "color" not in hidden}
+            return {
+                "kind": "lines",
+                "group": "overlay",
+                "row_count": schema._row_count(table),
+                "has_color_col": "color" in cols and "color" not in hidden,
+            }
         return None
 
     latlon = _find_latlon_columns(table)
@@ -281,14 +309,18 @@ def _classify(table: str, meta) -> dict | None:
             # frontend can render a year-filter dropdown and an animate control.
             if _has_columns(table, "year", family="int"):
                 try:
-                    rows = store.get_conn().execute(
-                        f"SELECT DISTINCT year FROM {_q(table)} WHERE year IS NOT NULL ORDER BY year"
-                    ).fetchall()
+                    rows = (
+                        store.get_conn()
+                        .execute(f"SELECT DISTINCT year FROM {_q(table)} WHERE year IS NOT NULL ORDER BY year")
+                        .fetchall()
+                    )
                     spec["year_options"] = [r[0] for r in rows]
                 except Exception:
                     spec["year_options"] = []
         else:
-            label_col = next((c for c, t in _columns(table) if t.upper().startswith("VARCHAR") and c not in hidden), None)
+            label_col = next(
+                (c for c, t in _columns(table) if t.upper().startswith("VARCHAR") and c not in hidden), None
+            )
             spec["label_col"] = label_col
         return spec
 
@@ -297,15 +329,22 @@ def _classify(table: str, meta) -> dict | None:
         available, reason = _geometry_status()
         measures = numeric_columns(table, hidden)
         if not measures:
-            return None    # nothing to color a choropleth by
+            return None  # nothing to color a choropleth by
         if table == "census_tracts" and any(m["column"] == "population" for m in measures):
             measures = [
                 {"column": "population", "label": "Total", "unit": "people"},
                 {"column": "population_density", "label": "Density", "unit": "people/sq mi"},
             ]
-        return {"kind": "choropleth", "group": "fill", "row_count": schema._row_count(table),
-                "measures": measures, "default_measure": measures[0]["column"],
-                "anchor": join["anchor"], "available": available, "reason": None if available else reason}
+        return {
+            "kind": "choropleth",
+            "group": "fill",
+            "row_count": schema._row_count(table),
+            "measures": measures,
+            "default_measure": measures[0]["column"],
+            "anchor": join["anchor"],
+            "available": available,
+            "reason": None if available else reason,
+        }
     return None
 
 
@@ -318,16 +357,19 @@ _SPECIAL_TABLES = {"houses", "house_commute"}
 # ── Spec cache ───────────────────────────────────────────────────────────────
 # Building a spec means a COUNT(*) per visible table - 740,679 crime rows among them -
 # recomputed on every request to answer a question whose answer changes only when the
-# catalog (or the data behind it) does. Memoise on schema.catalog_version(); a data-only
-# reload keeps the catalog version, so refresh_source invalidates explicitly below.
+# catalog (or the data behind it) does. A data-only reload keeps the catalog version, so
+# the cache is cleared by the reload listener registered below (and by refresh_source).
 _SPEC_LOCK = threading.RLock()
 _SPEC_CACHE: dict[str, tuple[str, Any]] = {}
 
 
 def invalidate_caches() -> None:
-    """Forget derived specs and row counts. Call after a data-only reload."""
+    """Forget derived specs and row counts. Runs after every schema reload."""
     with _SPEC_LOCK:
         _SPEC_CACHE.clear()
+
+
+schema.on_reload(invalidate_caches)
 
 
 def derive_layer_specs() -> list[dict]:
@@ -351,12 +393,21 @@ def _build_layer_specs() -> list[dict]:
         spec = _classify(name, meta)
         if not spec:
             continue
-        spec.update({"name": name, "title": title_for(name), "domain": meta.domain or "other",
-                     "origin": meta.origin, "description": meta.description,
-                     "available": spec.get("available", True), "reason": spec.get("reason"),
-                     "special": None, "default_on": False})
+        spec.update(
+            {
+                "name": name,
+                "title": title_for(name),
+                "domain": meta.domain or "other",
+                "origin": meta.origin,
+                "description": meta.description,
+                "available": spec.get("available", True),
+                "reason": spec.get("reason"),
+                "special": None,
+                "default_on": False,
+            }
+        )
         if name == "bike_routes":
-            spec["renderer"] = "bike_routes"    # keeps the priority-resolved renderer; see get_bike_routes()
+            spec["renderer"] = "bike_routes"  # keeps the priority-resolved renderer; see get_bike_routes()
         out.append(spec)
     return out
 
@@ -376,16 +427,40 @@ def describe_layers() -> dict:
 
 def _build_describe_layers(version: str) -> dict:
     layers = derive_layer_specs()
-    layers.insert(0, {"name": "houses", "title": "Houses", "kind": "points", "group": "overlay",
-                      "row_count": schema._row_count("houses"), "domain": "housing", "origin": "builtin",
-                      "description": "Your saved houses.", "available": True, "reason": None,
-                      "special": "houses", "default_on": True})
+    layers.insert(
+        0,
+        {
+            "name": "houses",
+            "title": "Houses",
+            "kind": "points",
+            "group": "overlay",
+            "row_count": schema._row_count("houses"),
+            "domain": "housing",
+            "origin": "builtin",
+            "description": "Your saved houses.",
+            "available": True,
+            "reason": None,
+            "special": "houses",
+            "default_on": True,
+        },
+    )
     commute_available = "house_commute" in schema._tables()
-    layers.append({"name": "commute", "title": "Commute time to work", "kind": "decoration", "group": "overlay",
-                   "row_count": None, "domain": "housing", "origin": "builtin",
-                   "description": "Minutes to your saved work location, shown on each house.",
-                   "available": commute_available, "reason": None if commute_available else "Not set up.",
-                   "special": "commute", "default_on": False})
+    layers.append(
+        {
+            "name": "commute",
+            "title": "Commute time to work",
+            "kind": "decoration",
+            "group": "overlay",
+            "row_count": None,
+            "domain": "housing",
+            "origin": "builtin",
+            "description": "Minutes to your saved work location, shown on each house.",
+            "available": commute_available,
+            "reason": None if commute_available else "Not set up.",
+            "special": "commute",
+            "default_on": False,
+        }
+    )
     fill_group = [l["name"] for l in layers if l["group"] == "fill"]
     return {"layers": layers, "exclusive_groups": {"fill": fill_group}, "catalog_version": version}
 
@@ -394,20 +469,23 @@ def _spec_for(name: str) -> dict:
     for l in derive_layer_specs():
         if l["name"] == name:
             return l
-    raise LayerError(f"'{name}' is not a map layer. It may not exist, have no location data, or not be "
-                     "visible to the assistant.")
+    raise LayerError(
+        f"'{name}' is not a map layer. It may not exist, have no location data, or not be visible to the assistant."
+    )
 
 
 # ---------------------------------------------------------------------------
 # Generic data builders
 # ---------------------------------------------------------------------------
 
+
 def _bbox_params(lat_col: str, lon_col: str, west: float, south: float, east: float, north: float) -> tuple[str, list]:
     return f"{_q(lat_col)} BETWEEN ? AND ? AND {_q(lon_col)} BETWEEN ? AND ?", [south, north, west, east]
 
 
-def get_points(table: str, west: float, south: float, east: float, north: float,
-              limit: int = MAX_POINT_FEATURES) -> dict:
+def get_points(
+    table: str, west: float, south: float, east: float, north: float, limit: int = MAX_POINT_FEATURES
+) -> dict:
     spec = _spec_for(table)
     if spec["kind"] != "points":
         raise LayerError(f"'{table}' is a {spec['kind']} layer, not points.")
@@ -417,20 +495,32 @@ def get_points(table: str, west: float, south: float, east: float, north: float,
     where, params = _bbox_params(lat_col, lon_col, west, south, east, north)
     df = store.query(
         f"SELECT {_q(lat_col)} AS lat, {_q(lon_col)} AS lon, {', '.join(_q(c) for c in cols)} "
-        f"FROM {_q(table)} WHERE {where} LIMIT {int(limit) + 1}", params)
+        f"FROM {_q(table)} WHERE {where} LIMIT {int(limit) + 1}",
+        params,
+    )
     truncated = len(df) > limit
     df = df.head(limit)
     features = []
     for row in df.to_dict(orient="records"):
         lat, lon = row.pop("lat"), row.pop("lon")
         props = {k: (None if pd.isna(v) else v) for k, v in row.items()}
-        features.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [lon, lat]}, "properties": props})
+        features.append(
+            {"type": "Feature", "geometry": {"type": "Point", "coordinates": [lon, lat]}, "properties": props}
+        )
     return {"type": "FeatureCollection", "features": features, "feature_count": len(features), "truncated": truncated}
 
 
-def get_heat(table: str, west: float, south: float, east: float, north: float,
-            weight: str | None = None, grid_deg: float = DEFAULT_GRID_DEG, city: str | None = None,
-            year: int | None = None) -> dict:
+def get_heat(
+    table: str,
+    west: float,
+    south: float,
+    east: float,
+    north: float,
+    weight: str | None = None,
+    grid_deg: float = DEFAULT_GRID_DEG,
+    city: str | None = None,
+    year: int | None = None,
+) -> dict:
     spec = _spec_for(table)
     if spec["kind"] != "heat":
         raise LayerError(f"'{table}' is a {spec['kind']} layer, not heat.")
@@ -451,16 +541,19 @@ def get_heat(table: str, west: float, south: float, east: float, north: float,
     if year is not None:
         if not _has_columns(table, "year", family="int"):
             raise LayerError(f"'{table}' does not have an integer year column.")
-        year_clause = "AND \"year\" = ?"
+        year_clause = 'AND "year" = ?'
         params.append(int(year))
-    df = store.query(f"""
+    df = store.query(
+        f"""
         SELECT ROUND({_q(lat_col)} / ?) * ? AS glat, ROUND({_q(lon_col)} / ?) * ? AS glon,
                COUNT(*) AS incident_count, {weight_expr} AS weighted_score
         FROM {_q(table)}
         WHERE {where} {city_clause} {year_clause}
         GROUP BY glat, glon
         ORDER BY weighted_score DESC
-    """, params)
+    """,
+        params,
+    )
     truncated = len(df) > MAX_GRID_CELLS
     df = df.head(MAX_GRID_CELLS)
 
@@ -473,7 +566,10 @@ def get_heat(table: str, west: float, south: float, east: float, north: float,
             myw_city = f"AND {_q('city')} = ?"
             myw_params.append(city)
         try:
-            myw_row = store.get_conn().execute(f"""
+            myw_row = (
+                store.get_conn()
+                .execute(
+                    f"""
                 SELECT MAX(single_year_weight) FROM (
                     SELECT ROUND({_q(lat_col)} / ?) * ? AS glat, ROUND({_q(lon_col)} / ?) * ? AS glon,
                            "year", {weight_expr} AS single_year_weight
@@ -481,26 +577,47 @@ def get_heat(table: str, west: float, south: float, east: float, north: float,
                     WHERE {where} {myw_city} AND "year" IS NOT NULL
                     GROUP BY glat, glon, "year"
                 )
-            """, myw_params).fetchone()
+            """,
+                    myw_params,
+                )
+                .fetchone()
+            )
             if myw_row and myw_row[0] is not None:
                 max_year_weight = round(float(myw_row[0]), 3)
         except Exception:
             max_year_weight = None
 
     if df.empty:
-        return {"points": [], "max_weight": 0.0, "max_year_weight": max_year_weight,
-                "incident_count": 0, "cell_count": 0, "truncated": False,
-                "grid_deg": grid_deg, "weight": weight, "year": year}
+        return {
+            "points": [],
+            "max_weight": 0.0,
+            "max_year_weight": max_year_weight,
+            "incident_count": 0,
+            "cell_count": 0,
+            "truncated": False,
+            "grid_deg": grid_deg,
+            "weight": weight,
+            "year": year,
+        }
     max_weight = float(df["weighted_score"].max())
-    points = [[round(float(r.glat), 5), round(float(r.glon), 5), round(float(r.weighted_score), 3)]
-             for r in df.itertuples(index=False)]
-    return {"points": points, "max_weight": max_weight, "max_year_weight": max_year_weight,
-            "incident_count": int(df["incident_count"].sum()), "cell_count": len(df),
-            "truncated": truncated, "grid_deg": grid_deg, "weight": weight, "year": year}
+    points = [
+        [round(float(r.glat), 5), round(float(r.glon), 5), round(float(r.weighted_score), 3)]
+        for r in df.itertuples(index=False)
+    ]
+    return {
+        "points": points,
+        "max_weight": max_weight,
+        "max_year_weight": max_year_weight,
+        "incident_count": int(df["incident_count"].sum()),
+        "cell_count": len(df),
+        "truncated": truncated,
+        "grid_deg": grid_deg,
+        "weight": weight,
+        "year": year,
+    }
 
 
-def get_lines(table: str, west: float, south: float, east: float, north: float,
-             limit: int = MAX_LINE_FEATURES) -> dict:
+def get_lines(table: str, west: float, south: float, east: float, north: float, limit: int = MAX_LINE_FEATURES) -> dict:
     spec = _spec_for(table)
     if spec["kind"] != "lines":
         raise LayerError(f"'{table}' is a {spec['kind']} layer, not lines.")
@@ -509,8 +626,15 @@ def get_lines(table: str, west: float, south: float, east: float, north: float,
     return _get_vector_features(table, west, south, east, north, limit)
 
 
-def get_polygons(table: str, west: float, south: float, east: float, north: float,
-                 measure: str | None = None, limit: int = MAX_POLYGON_FEATURES) -> dict:
+def get_polygons(
+    table: str,
+    west: float,
+    south: float,
+    east: float,
+    north: float,
+    measure: str | None = None,
+    limit: int = MAX_POLYGON_FEATURES,
+) -> dict:
     spec = _spec_for(table)
     if spec["kind"] != "polygons":
         raise LayerError(f"'{table}' is a {spec['kind']} layer, not polygons.")
@@ -534,7 +658,9 @@ _LABEL_HINT = re.compile(r"(name|label|title|address|city|route|category)", re.I
 MAX_GENERIC_PROPS = 15
 
 
-def _default_props(table: str, hidden: set[str], exclude: set[str] = frozenset(), limit: int = MAX_GENERIC_PROPS) -> list[str]:
+def _default_props(
+    table: str, hidden: set[str], exclude: set[str] = frozenset(), limit: int = MAX_GENERIC_PROPS
+) -> list[str]:
     """Display-worthy columns of ``table``, ranked so a popup or tooltip leads with whatever is most
     likely to matter (a name/label/measure) rather than whatever DESCRIBE happens to list first — a real
     table’s early columns are often internal bookkeeping (source file, parcel id, deed page)."""
@@ -547,22 +673,28 @@ def _default_props(table: str, hidden: set[str], exclude: set[str] = frozenset()
         if _family(sql_type) in ("int", "float") and not _NOT_A_MEASURE.search(name):
             return 1
         return 2
+
     order = sorted(range(len(cols)), key=lambda i: (rank(cols[i]), i))
     return [cols[i][0] for i in order[:limit]]
 
 
-def _get_vector_features(table: str, west: float, south: float, east: float, north: float,
-                         limit: int, extra_cols: list[str] | None = None) -> dict:
+def _get_vector_features(
+    table: str, west: float, south: float, east: float, north: float, limit: int, extra_cols: list[str] | None = None
+) -> dict:
     hidden = set(schema._tables()[table].hidden_columns)
     have_bbox = _has_columns(table, "min_lon", "min_lat", "max_lon", "max_lat")
     requested = [c for c in (extra_cols or []) if c]
     cols = ["geometry_json"] + requested + _default_props(table, hidden, exclude=set(requested), limit=10)
     seen: set[str] = set()
     cols = [c for c in cols if not (c in seen or seen.add(c))]
-    where, params = ("min_lon <= ? AND max_lon >= ? AND min_lat <= ? AND max_lat >= ?",
-                     [east, west, north, south]) if have_bbox else ("1=1", [])
-    df = store.query(f"SELECT {', '.join(_q(c) for c in cols)} FROM {_q(table)} WHERE {where} "
-                     f"LIMIT {int(limit) + 1}", params)
+    where, params = (
+        ("min_lon <= ? AND max_lon >= ? AND min_lat <= ? AND max_lat >= ?", [east, west, north, south])
+        if have_bbox
+        else ("1=1", [])
+    )
+    df = store.query(
+        f"SELECT {', '.join(_q(c) for c in cols)} FROM {_q(table)} WHERE {where} LIMIT {int(limit) + 1}", params
+    )
     truncated = len(df) > limit
     df = df.head(limit)
     features = []
@@ -584,10 +716,7 @@ def get_msa_population_density(msa_names: list[str], request: str = "") -> pd.Da
     columns = ["msa_name", "population", "land_area_sq_mi", "population_density"]
     resolved_names = list(dict.fromkeys(name.strip() for name in msa_names if name and name.strip()))
     request_normalized = re.sub(r"[^a-z0-9]+", " ", request.lower()).strip()
-    resolved_normalized = {
-        re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
-        for name in resolved_names
-    }
+    resolved_normalized = {re.sub(r"[^a-z0-9]+", " ", name.lower()).strip() for name in resolved_names}
     titles = store.query(
         "SELECT DISTINCT cbsa_title FROM cbsa_counties WHERE cbsa_title IS NOT NULL ORDER BY cbsa_title"
     )
@@ -598,13 +727,23 @@ def get_msa_population_density(msa_names: list[str], request: str = "") -> pd.Da
         normalized_title = re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
         city = title.split(",", 1)[0].split("-", 1)[0].strip()
         normalized_city = re.sub(r"[^a-z0-9]+", " ", city.lower()).strip()
-        city_match = re.search(rf"(?<!\w){re.escape(normalized_city)}(?!\w)", request_normalized) if normalized_city else None
+        city_match = (
+            re.search(rf"(?<!\w){re.escape(normalized_city)}(?!\w)", request_normalized) if normalized_city else None
+        )
         if normalized_title in resolved_normalized:
             exact_cities.add(normalized_city)
-            position = city_match.start() if city_match else len(request_normalized) + resolved_names.index(next(
-                name for name in resolved_names
-                if re.sub(r"[^a-z0-9]+", " ", name.lower()).strip() == normalized_title
-            ))
+            position = (
+                city_match.start()
+                if city_match
+                else len(request_normalized)
+                + resolved_names.index(
+                    next(
+                        name
+                        for name in resolved_names
+                        if re.sub(r"[^a-z0-9]+", " ", name.lower()).strip() == normalized_title
+                    )
+                )
+            )
             matches.append((position, title))
         elif city_match:
             fallback_matches.setdefault(normalized_city, []).append((city_match.start(), title))
@@ -653,7 +792,9 @@ def get_msa_population_density(msa_names: list[str], request: str = "") -> pd.Da
             raise LayerError(f"No tract geometry found for {name}.")
 
         msa_population = msa.dropna(subset=["tract_fips"])[["tract_fips", "population"]].copy()
-        msa_population["tract_fips"] = msa_population["tract_fips"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(11)
+        msa_population["tract_fips"] = (
+            msa_population["tract_fips"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(11)
+        )
         msa_population = msa_population.drop_duplicates("tract_fips")
         missing_geometry = set(msa_population["tract_fips"]) - set(msa_geometries["tract_fips"])
         if missing_geometry:
@@ -667,18 +808,21 @@ def get_msa_population_density(msa_names: list[str], request: str = "") -> pd.Da
         population = pd.to_numeric(joined["population"], errors="coerce").sum()
         if not land_area_sq_mi or pd.isna(population):
             raise LayerError(f"Population density could not be calculated for {name}.")
-        rows.append({
-            "msa_name": name,
-            "population": int(population),
-            "land_area_sq_mi": land_area_sq_mi,
-            "population_density": population / land_area_sq_mi,
-        })
+        rows.append(
+            {
+                "msa_name": name,
+                "population": int(population),
+                "land_area_sq_mi": land_area_sq_mi,
+                "population_density": population / land_area_sq_mi,
+            }
+        )
 
     return pd.DataFrame(rows, columns=columns)
 
 
-def get_tract_choropleth(table: str, measure: str | None, west: float, south: float, east: float, north: float,
-                         max_tracts: int = MAX_TRACTS) -> dict:
+def get_tract_choropleth(
+    table: str, measure: str | None, west: float, south: float, east: float, north: float, max_tracts: int = MAX_TRACTS
+) -> dict:
     """Tract polygons intersecting the bbox, colored by ``measure`` from ``table``.
 
     Geometry always comes from ``services/geo_utils.py``'s cached tract polygons (the same source used to
@@ -718,14 +862,18 @@ def get_tract_choropleth(table: str, measure: str | None, west: float, south: fl
     fips_list = [str(f) for f in subset["tract_fips"].tolist()]
     placeholders = ",".join("?" for _ in fips_list)
     if table == join["anchor"]:
-        attrs = store.query(f'SELECT tract_fips, {_q(query_measure)} AS value FROM {_q(table)} '
-                            f"WHERE tract_fips IN ({placeholders})", fips_list)
+        attrs = store.query(
+            f"SELECT tract_fips, {_q(query_measure)} AS value FROM {_q(table)} WHERE tract_fips IN ({placeholders})",
+            fips_list,
+        )
     else:
         attrs = store.query(
-            f'SELECT {join["anchor"]}.tract_fips AS tract_fips, AVG({_q(table)}.{_q(query_measure)}) AS value '
-            f'FROM {_q(table)} {join["join_sql"]} '
-            f'WHERE {join["anchor"]}.tract_fips IN ({placeholders}) '
-            f'GROUP BY {join["anchor"]}.tract_fips', fips_list)
+            f"SELECT {join['anchor']}.tract_fips AS tract_fips, AVG({_q(table)}.{_q(query_measure)}) AS value "
+            f"FROM {_q(table)} {join['join_sql']} "
+            f"WHERE {join['anchor']}.tract_fips IN ({placeholders}) "
+            f"GROUP BY {join['anchor']}.tract_fips",
+            fips_list,
+        )
 
     merged = subset.merge(attrs, on="tract_fips", how="left")
     if density_measure:
@@ -754,21 +902,52 @@ def get_layer_data(name: str, **kwargs) -> dict:
     spec = _spec_for(name)
     kind = spec["kind"]
     if kind in ("points",):
-        return get_points(name, **{k: kwargs[k] for k in ("west", "south", "east", "north") if k in kwargs},
-                          limit=kwargs.get("limit", MAX_POINT_FEATURES))
+        return get_points(
+            name,
+            **{k: kwargs[k] for k in ("west", "south", "east", "north") if k in kwargs},
+            limit=kwargs.get("limit", MAX_POINT_FEATURES),
+        )
     if kind == "heat":
-        return get_heat(name, kwargs["west"], kwargs["south"], kwargs["east"], kwargs["north"],
-                        weight=kwargs.get("weight"), grid_deg=kwargs.get("grid_deg", DEFAULT_GRID_DEG),
-                        city=kwargs.get("city"), year=kwargs.get("year"))
+        return get_heat(
+            name,
+            kwargs["west"],
+            kwargs["south"],
+            kwargs["east"],
+            kwargs["north"],
+            weight=kwargs.get("weight"),
+            grid_deg=kwargs.get("grid_deg", DEFAULT_GRID_DEG),
+            city=kwargs.get("city"),
+            year=kwargs.get("year"),
+        )
     if kind == "lines":
-        return get_lines(name, kwargs["west"], kwargs["south"], kwargs["east"], kwargs["north"],
-                         limit=kwargs.get("limit", MAX_LINE_FEATURES))
+        return get_lines(
+            name,
+            kwargs["west"],
+            kwargs["south"],
+            kwargs["east"],
+            kwargs["north"],
+            limit=kwargs.get("limit", MAX_LINE_FEATURES),
+        )
     if kind == "polygons":
-        return get_polygons(name, kwargs["west"], kwargs["south"], kwargs["east"], kwargs["north"],
-                            measure=kwargs.get("measure"), limit=kwargs.get("limit", MAX_POLYGON_FEATURES))
+        return get_polygons(
+            name,
+            kwargs["west"],
+            kwargs["south"],
+            kwargs["east"],
+            kwargs["north"],
+            measure=kwargs.get("measure"),
+            limit=kwargs.get("limit", MAX_POLYGON_FEATURES),
+        )
     if kind == "choropleth":
-        return get_tract_choropleth(name, kwargs.get("measure"), kwargs["west"], kwargs["south"],
-                                    kwargs["east"], kwargs["north"], max_tracts=kwargs.get("limit", MAX_TRACTS))
+        return get_tract_choropleth(
+            name,
+            kwargs.get("measure"),
+            kwargs["west"],
+            kwargs["south"],
+            kwargs["east"],
+            kwargs["north"],
+            max_tracts=kwargs.get("limit", MAX_TRACTS),
+        )
     raise LayerError(f"'{name}' has no server-rendered data (it is drawn client-side).")
 
 
@@ -780,8 +959,13 @@ def get_layer_data(name: str, **kwargs) -> dict:
 # bike_routes data or routing graph. It only prevents the same physical line from being painted as
 # several categories in a visualization. More-specific facility types win over generic route designations.
 BIKE_DISPLAY_PRIORITY = {
-    "protected_bike_lanes": 100, "bike_lanes": 90, "trails": 80, "bikeable_sidewalks": 70,
-    "sharrows": 60, "cautionary_bike_route": 50, "on_street_bike_route": 40,
+    "protected_bike_lanes": 100,
+    "bike_lanes": 90,
+    "trails": 80,
+    "bikeable_sidewalks": 70,
+    "sharrows": 60,
+    "cautionary_bike_route": 50,
+    "on_street_bike_route": 40,
 }
 
 
@@ -814,7 +998,8 @@ def _canonicalize_bike_features(features: list[dict]) -> list[dict]:
     claimed = None
     output = []
     for priority, layer_type, geom, feature in sorted(
-            grouped, key=lambda x: (-x[0], x[1], str((x[3].get("properties") or {}).get("route_id", "")))):
+        grouped, key=lambda x: (-x[0], x[1], str((x[3].get("properties") or {}).get("route_id", "")))
+    ):
         display_geom = geom
         if claimed is not None and not claimed.is_empty:
             try:
@@ -835,20 +1020,31 @@ def _canonicalize_bike_features(features: list[dict]) -> list[dict]:
     return output
 
 
-def get_bike_routes(table: str, west: float, south: float, east: float, north: float,
-                    city: str | None = None, limit: int = MAX_LINE_FEATURES, exclusive: bool = True) -> dict:
+def get_bike_routes(
+    table: str,
+    west: float,
+    south: float,
+    east: float,
+    north: float,
+    city: str | None = None,
+    limit: int = MAX_LINE_FEATURES,
+    exclusive: bool = True,
+) -> dict:
     params = [east, west, north, south]
     city_clause = ""
     if city:
         city_clause = "AND city = ?"
         params.append(city.strip().lower())
-    df = store.query(f"""
+    df = store.query(
+        f"""
         SELECT route_id, city, layer_type, layer_label, color, source_file, geometry_json, properties_json
         FROM {_q(table)}
         WHERE min_lon <= ? AND max_lon >= ? AND min_lat <= ? AND max_lat >= ? {city_clause}
         ORDER BY city, layer_label, route_id
         LIMIT {int(limit)}
-    """, params)
+    """,
+        params,
+    )
     features = []
     for row in df.to_dict(orient="records"):
         # NaN-safety matters more here than in most generic paths: a bbox slice can legitimately return
@@ -866,10 +1062,23 @@ def get_bike_routes(table: str, west: float, south: float, east: float, north: f
             props = json.loads(clean["properties_json"]) if clean["properties_json"] else {}
         except (TypeError, ValueError):
             props = {}
-        props.update({"route_id": clean["route_id"], "city": clean["city"], "layer_type": clean["layer_type"],
-                     "layer_label": clean["layer_label"], "color": clean["color"], "source_file": clean["source_file"]})
+        props.update(
+            {
+                "route_id": clean["route_id"],
+                "city": clean["city"],
+                "layer_type": clean["layer_type"],
+                "layer_label": clean["layer_label"],
+                "color": clean["color"],
+                "source_file": clean["source_file"],
+            }
+        )
         features.append({"type": "Feature", "geometry": geometry, "properties": props})
     if exclusive:
         features = _canonicalize_bike_features(features)
-    return {"type": "FeatureCollection", "features": features, "feature_count": len(features),
-            "truncated": len(df) >= limit, "exclusive_display": exclusive}
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+        "feature_count": len(features),
+        "truncated": len(df) >= limit,
+        "exclusive_display": exclusive,
+    }

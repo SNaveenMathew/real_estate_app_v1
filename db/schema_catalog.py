@@ -21,6 +21,7 @@ store on first access, are refreshed **in place** by ``reload()`` (so anything t
 holds a reference keeps seeing current data), and reload automatically when the DuckDB
 connection changes (e.g. the evaluation harness pointing at a fixture database).
 """
+
 from __future__ import annotations
 
 import json
@@ -34,10 +35,22 @@ from typing import Any, Iterable, Iterator
 import db.duckdb_store as store
 from db import catalog_store
 from db.catalog_model import (
-    ColumnNote, TableMeta, Relationship, EntityDomain,
-    _concept, _op, COUNT, AVG, SUM, MEDIAN, MIN, MAX, RANK_DESC, RANK_ASC,
+    ColumnNote,
+    TableMeta,
+    Relationship,
+    EntityDomain,
+    _concept,
+    _op,
+    COUNT,
+    AVG,
+    SUM,
+    MEDIAN,
+    MIN,
+    MAX,
+    RANK_DESC,
+    RANK_ASC,
 )
-from db.catalog_seed import NRI_HAZARD_COLUMNS   # fixed hazard-code -> label map (not per-source metadata)
+from db.catalog_seed import NRI_HAZARD_COLUMNS  # fixed hazard-code -> label map (not per-source metadata)
 from db import entity_lexicon, text_match
 
 
@@ -61,6 +74,18 @@ DOMAIN_LABELS = {
 
 _LOCK = threading.RLock()
 _STATE: dict[str, Any] = {"loaded": False, "generation": -1, "version": 0, "tx_depth": 0}
+# Caches that memoise on catalog state subscribe here instead of being invalidated by hand at
+# every call site: ``reload()`` is the one place that knows the registry changed.
+_RELOAD_LISTENERS: list = []
+
+
+def on_reload(callback) -> None:
+    """Run ``callback`` after every successful ``reload()`` (idempotent by identity)."""
+    with _LOCK:
+        if callback not in _RELOAD_LISTENERS:
+            _RELOAD_LISTENERS.append(callback)
+
+
 _TABLES: dict[str, TableMeta] = {}
 _RELATIONSHIPS: list[Relationship] = []
 _GLOSSARY: dict[str, dict] = {}
@@ -70,30 +95,38 @@ _ENTITY_DOMAINS: list[EntityDomain] = []
 def __getattr__(name: str):
     """PEP 562: keep the historical module attributes, backed by the live registry."""
     if name == "TABLES":
-        _ensure(); return _TABLES
+        _ensure()
+        return _TABLES
     if name == "RELATIONSHIPS":
-        _ensure(); return _RELATIONSHIPS
+        _ensure()
+        return _RELATIONSHIPS
     if name == "SEMANTIC_GLOSSARY":
-        _ensure(); return _GLOSSARY
+        _ensure()
+        return _GLOSSARY
     if name == "ENTITY_DOMAINS":
-        _ensure(); return _ENTITY_DOMAINS
+        _ensure()
+        return _ENTITY_DOMAINS
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _tables() -> dict[str, TableMeta]:
-    _ensure(); return _TABLES
+    _ensure()
+    return _TABLES
 
 
 def _relationships() -> list[Relationship]:
-    _ensure(); return _RELATIONSHIPS
+    _ensure()
+    return _RELATIONSHIPS
 
 
 def _glossary() -> dict[str, dict]:
-    _ensure(); return _GLOSSARY
+    _ensure()
+    return _GLOSSARY
 
 
 def _entity_domains() -> list[EntityDomain]:
-    _ensure(); return _ENTITY_DOMAINS
+    _ensure()
+    return _ENTITY_DOMAINS
 
 
 def _ensure() -> None:
@@ -121,28 +154,51 @@ def reload() -> str:
 
         notes: dict[str, list[ColumnNote]] = {}
         for c in data["columns"]:
-            notes.setdefault(c["table_name"], []).append(ColumnNote(
-                column=c["column_name"], note=c.get("note") or "", role=c.get("role") or "",
-                unit=c.get("unit") or "", source_name=c.get("source_name") or ""))
+            notes.setdefault(c["table_name"], []).append(
+                ColumnNote(
+                    column=c["column_name"],
+                    note=c.get("note") or "",
+                    role=c.get("role") or "",
+                    unit=c.get("unit") or "",
+                    source_name=c.get("source_name") or "",
+                )
+            )
 
         tables: dict[str, TableMeta] = {}
         for r in data["tables"]:
             tables[r["name"]] = TableMeta(
-                name=r["name"], description=r.get("description") or "",
-                setup_hint=r.get("setup_hint") or "", filter_hint=r.get("filter_hint") or "",
+                name=r["name"],
+                description=r.get("description") or "",
+                setup_hint=r.get("setup_hint") or "",
+                filter_hint=r.get("filter_hint") or "",
                 column_notes=tuple(notes.get(r["name"], ())),
                 hidden_columns=tuple(_json(r.get("hidden_columns"), [])),
-                agent_visible=bool(r.get("agent_visible")), grain=r.get("grain") or "",
-                default_filter=r.get("default_filter") or "", domain=r.get("domain") or "other",
-                origin=r.get("origin") or "builtin", dataset_id=r.get("dataset_id") or "")
+                agent_visible=bool(r.get("agent_visible")),
+                grain=r.get("grain") or "",
+                default_filter=r.get("default_filter") or "",
+                domain=r.get("domain") or "other",
+                origin=r.get("origin") or "builtin",
+                dataset_id=r.get("dataset_id") or "",
+            )
 
-        rels = [Relationship(
-            left_table=r["left_table"], left_expr=r["left_expr"], right_table=r["right_table"],
-            right_expr=r["right_expr"], note=r.get("note") or "", cardinality=r.get("cardinality") or "",
-            confidence=r.get("confidence") or "high", bridge=bool(r.get("bridge")),
-            preferred=bool(r.get("preferred")), grain_effect=r.get("grain_effect") or "",
-            origin=r.get("origin") or "builtin", dataset_id=r.get("dataset_id") or "")
-            for r in data["relationships"] if r["left_table"] in tables and r["right_table"] in tables]
+        rels = [
+            Relationship(
+                left_table=r["left_table"],
+                left_expr=r["left_expr"],
+                right_table=r["right_table"],
+                right_expr=r["right_expr"],
+                note=r.get("note") or "",
+                cardinality=r.get("cardinality") or "",
+                confidence=r.get("confidence") or "high",
+                bridge=bool(r.get("bridge")),
+                preferred=bool(r.get("preferred")),
+                grain_effect=r.get("grain_effect") or "",
+                origin=r.get("origin") or "builtin",
+                dataset_id=r.get("dataset_id") or "",
+            )
+            for r in data["relationships"]
+            if r["left_table"] in tables and r["right_table"] in tables
+        ]
 
         glossary: dict[str, dict] = {}
         for r in data["concepts"]:
@@ -153,19 +209,35 @@ def reload() -> str:
             item.setdefault("dataset_id", r.get("dataset_id") or "")
             glossary[r["key"]] = item
 
-        domains = [EntityDomain(
-            name=r["name"], table=r["table_name"], column=r["column_name"], entity_type=r["entity_type"],
-            description=r.get("description") or "", display_column=r.get("display_column") or None,
-            match_mode=r.get("match_mode") or "exact_or_prefix",
-            preferred_for=tuple(_json(r.get("preferred_for"), [])),
-            origin=r.get("origin") or "builtin", dataset_id=r.get("dataset_id") or "")
-            for r in data["entity_domains"] if r["table_name"] in tables]
+        domains = [
+            EntityDomain(
+                name=r["name"],
+                table=r["table_name"],
+                column=r["column_name"],
+                entity_type=r["entity_type"],
+                description=r.get("description") or "",
+                display_column=r.get("display_column") or None,
+                match_mode=r.get("match_mode") or "exact_or_prefix",
+                preferred_for=tuple(_json(r.get("preferred_for"), [])),
+                origin=r.get("origin") or "builtin",
+                dataset_id=r.get("dataset_id") or "",
+            )
+            for r in data["entity_domains"]
+            if r["table_name"] in tables
+        ]
 
-        _TABLES.clear(); _TABLES.update(tables)
+        _TABLES.clear()
+        _TABLES.update(tables)
         _RELATIONSHIPS[:] = rels
-        _GLOSSARY.clear(); _GLOSSARY.update(glossary)
+        _GLOSSARY.clear()
+        _GLOSSARY.update(glossary)
         _ENTITY_DOMAINS[:] = domains
         _STATE.update(loaded=True, generation=store.connection_generation(), version=int(data["version"]))
+        for callback in list(_RELOAD_LISTENERS):
+            try:
+                callback()  # a stale cache must never make reload() fail
+            except Exception:
+                pass
         return f"{_STATE['generation']}:{_STATE['version']}"
 
 
@@ -178,6 +250,7 @@ def catalog_version() -> str:
 # ---------------------------------------------------------------------------
 # Unified mutation API (built-in and uploaded sources use the same calls)
 # ---------------------------------------------------------------------------
+
 
 @contextmanager
 def catalog_transaction() -> Iterator[None]:
@@ -215,18 +288,36 @@ def _write(fn) -> None:
         fn(store.get_conn())
 
 
-def register_table(meta: TableMeta, *, columns: Iterable[dict] = (), origin: str = "upload",
-                   dataset_id: str = "", domain: str | None = None, user_modified: bool = False) -> None:
+def register_table(
+    meta: TableMeta,
+    *,
+    columns: Iterable[dict] = (),
+    origin: str = "upload",
+    dataset_id: str = "",
+    domain: str | None = None,
+    user_modified: bool = False,
+) -> None:
     cols = [dict(c) for c in columns]
-    _write(lambda conn: catalog_store.upsert_table(
-        conn, meta, columns=cols, origin=origin, dataset_id=dataset_id,
-        domain=domain, user_modified=user_modified))
+    _write(
+        lambda conn: catalog_store.upsert_table(
+            conn, meta, columns=cols, origin=origin, dataset_id=dataset_id, domain=domain, user_modified=user_modified
+        )
+    )
 
 
-def register_relationship(rel: Relationship, *, origin: str = "upload", dataset_id: str = "",
-                          evidence: dict | None = None, status: str = "approved") -> None:
-    _write(lambda conn: catalog_store.upsert_relationship(
-        conn, rel, origin=origin, dataset_id=dataset_id, evidence=evidence or {}, status=status))
+def register_relationship(
+    rel: Relationship,
+    *,
+    origin: str = "upload",
+    dataset_id: str = "",
+    evidence: dict | None = None,
+    status: str = "approved",
+) -> None:
+    _write(
+        lambda conn: catalog_store.upsert_relationship(
+            conn, rel, origin=origin, dataset_id=dataset_id, evidence=evidence or {}, status=status
+        )
+    )
 
 
 def revoke_relationship(rel_key: str, reason: str = "") -> bool:
@@ -234,6 +325,7 @@ def revoke_relationship(rel_key: str, reason: str = "") -> bool:
 
     def _do(conn):
         result["ok"] = catalog_store.set_relationship_status(conn, rel_key, "revoked", reason)
+
     _write(_do)
     return bool(result.get("ok"))
 
@@ -251,6 +343,7 @@ def retire_dataset_objects(dataset_id: str) -> dict:
 
     def _do(conn):
         counts.update(catalog_store.retire_dataset(conn, dataset_id))
+
     _write(_do)
     return counts
 
@@ -264,6 +357,7 @@ def update_table_description(name: str, description: str) -> None:
 # Join-expression helper (shared by the SQL compiler and the House Chat link plan)
 # ---------------------------------------------------------------------------
 
+
 def qualify_join_expr(table: str, expr: str) -> str:
     """Table-qualify every bare column reference in a relationship-key expr.
 
@@ -275,9 +369,10 @@ def qualify_join_expr(table: str, expr: str) -> str:
     leaving SQL function names (identifier immediately followed by '(') and
     already-qualified references untouched.
     """
+
     def _replace(match: re.Match) -> str:
         token = match.group(0)
-        if expr[match.end():match.end() + 1] == "(":
+        if expr[match.end() : match.end() + 1] == "(":
             return token  # function name, e.g. LEFT( - not a column
         return f"{table}.{token}"
 
@@ -287,6 +382,7 @@ def qualify_join_expr(table: str, expr: str) -> str:
 # ---------------------------------------------------------------------------
 # Views for the chats and the Data page
 # ---------------------------------------------------------------------------
+
 
 def _direct_links(table: str, limit: int = 3) -> str:
     out = []
@@ -304,8 +400,10 @@ def added_datasets_briefing(limit: int = 12) -> str:
     lines = ["USER-ADDED DATASETS (approved on the Data page; query them like any other table):"]
     for m in sorted(rows, key=lambda x: x.name)[:limit]:
         links = _direct_links(m.name)
-        lines.append(f"- {m.name}: {m.description} grain={m.grain or 'unspecified'}; "
-                     + (f"joins: {links}" if links else "no approved joins yet"))
+        lines.append(
+            f"- {m.name}: {m.description} grain={m.grain or 'unspecified'}; "
+            + (f"joins: {links}" if links else "no approved joins yet")
+        )
     return "\n".join(lines)
 
 
@@ -335,8 +433,10 @@ def house_link_plan(table: str) -> dict | None:
                 new = rel.left_table
             else:
                 continue
-            on = (f"{qualify_join_expr(rel.left_table, rel.left_expr)} = "
-                  f"{qualify_join_expr(rel.right_table, rel.right_expr)}")
+            on = (
+                f"{qualify_join_expr(rel.left_table, rel.left_expr)} = "
+                f"{qualify_join_expr(rel.right_table, rel.right_expr)}"
+            )
             joins.append(f"JOIN {new} ON {on}")
             connected.add(new)
             remaining.remove(rel)
@@ -361,8 +461,15 @@ def house_linked_datasets() -> list[dict]:
         for item in _glossary().values():
             if m.name in item.get("tables", []) and item.get("aliases"):
                 aliases.append(item["aliases"][0])
-        out.append({"name": m.name, "description": m.description, "grain": m.grain,
-                    "join": plan["join_text"], "measures": aliases[:4]})
+        out.append(
+            {
+                "name": m.name,
+                "description": m.description,
+                "grain": m.grain,
+                "join": plan["join_text"],
+                "measures": aliases[:4],
+            }
+        )
     return out
 
 
@@ -374,6 +481,7 @@ def _data_sources_for(table: str) -> list[str]:
     schema_catalog import path."""
     try:
         from services import data_sources
+
         return data_sources.sources_for_table(table)
     except Exception:
         return []
@@ -389,9 +497,16 @@ def describe_catalog() -> dict:
     for key, item in _GLOSSARY.items():
         for t in item.get("tables", []):
             counts[t] = counts.get(t, 0) + 1
-        concepts.append({"key": key, "tables": item.get("tables", []), "aliases": item.get("aliases", []),
-                         "description": item.get("description", ""), "origin": item.get("origin", "builtin"),
-                         "columns": item.get("columns", [])})
+        concepts.append(
+            {
+                "key": key,
+                "tables": item.get("tables", []),
+                "aliases": item.get("aliases", []),
+                "description": item.get("description", ""),
+                "origin": item.get("origin", "builtin"),
+                "columns": item.get("columns", []),
+            }
+        )
     tables = []
     for name, m in _TABLES.items():
         notes = {n.column: n for n in m.column_notes}
@@ -400,29 +515,71 @@ def describe_catalog() -> dict:
             if cname in m.hidden_columns:
                 continue
             n = notes.get(cname)
-            cols.append({"name": cname, "type": ctype, "note": n.note if n else "",
-                         "role": n.role if n else "", "unit": n.unit if n else "",
-                         "source_name": n.source_name if n else ""})
-        tables.append({"name": name, "description": m.description, "grain": m.grain,
-                       "domain": m.domain or "other", "origin": m.origin, "dataset_id": m.dataset_id,
-                       "agent_visible": m.agent_visible, "rows": _row_count(name), "columns": cols,
-                       "concepts": counts.get(name, 0), "data_sources": _data_sources_for(name)})
+            cols.append(
+                {
+                    "name": cname,
+                    "type": ctype,
+                    "note": n.note if n else "",
+                    "role": n.role if n else "",
+                    "unit": n.unit if n else "",
+                    "source_name": n.source_name if n else "",
+                }
+            )
+        tables.append(
+            {
+                "name": name,
+                "description": m.description,
+                "grain": m.grain,
+                "domain": m.domain or "other",
+                "origin": m.origin,
+                "dataset_id": m.dataset_id,
+                "agent_visible": m.agent_visible,
+                "rows": _row_count(name),
+                "columns": cols,
+                "concepts": counts.get(name, 0),
+                "data_sources": _data_sources_for(name),
+            }
+        )
     rels = []
     for r in _RELATIONSHIPS:
         meta = rel_meta.get(r.key(), {})
-        rels.append({"key": r.key(), "left_table": r.left_table, "left_expr": r.left_expr,
-                     "right_table": r.right_table, "right_expr": r.right_expr,
-                     "cardinality": r.cardinality, "confidence": r.confidence, "bridge": r.bridge,
-                     "preferred": r.preferred, "note": r.note, "grain_effect": r.grain_effect,
-                     "origin": r.origin, "dataset_id": r.dataset_id,
-                     "approved_at": str(meta.get("approved_at") or ""),
-                     "evidence": _json(meta.get("evidence"), {})})
-    return {"version": catalog_version(),
-            "domains": [{"key": k, "label": v} for k, v in DOMAIN_LABELS.items()],
-            "tables": tables, "relationships": rels, "concepts": concepts,
-            "entity_domains": [{"name": d.name, "table": d.table, "column": d.column,
-                                "entity_type": d.entity_type, "description": d.description,
-                                "origin": d.origin} for d in _ENTITY_DOMAINS]}
+        rels.append(
+            {
+                "key": r.key(),
+                "left_table": r.left_table,
+                "left_expr": r.left_expr,
+                "right_table": r.right_table,
+                "right_expr": r.right_expr,
+                "cardinality": r.cardinality,
+                "confidence": r.confidence,
+                "bridge": r.bridge,
+                "preferred": r.preferred,
+                "note": r.note,
+                "grain_effect": r.grain_effect,
+                "origin": r.origin,
+                "dataset_id": r.dataset_id,
+                "approved_at": str(meta.get("approved_at") or ""),
+                "evidence": _json(meta.get("evidence"), {}),
+            }
+        )
+    return {
+        "version": catalog_version(),
+        "domains": [{"key": k, "label": v} for k, v in DOMAIN_LABELS.items()],
+        "tables": tables,
+        "relationships": rels,
+        "concepts": concepts,
+        "entity_domains": [
+            {
+                "name": d.name,
+                "table": d.table,
+                "column": d.column,
+                "entity_type": d.entity_type,
+                "description": d.description,
+                "origin": d.origin,
+            }
+            for d in _ENTITY_DOMAINS
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -431,8 +588,14 @@ def describe_catalog() -> dict:
 
 REQUEST_INTENTS = [
     {"name": "comparison", "aliases": ["compare", "comparison", "versus", "vs", "tradeoff"]},
-    {"name": "ranking", "aliases": ["rank", "ranking", "top", "highest", "lowest", "largest", "smallest", "best", "worst"]},
-    {"name": "aggregation", "aliases": ["how many", "count", "number of", "average", "avg", "mean", "median", "total", "sum"]},
+    {
+        "name": "ranking",
+        "aliases": ["rank", "ranking", "top", "highest", "lowest", "largest", "smallest", "best", "worst"],
+    },
+    {
+        "name": "aggregation",
+        "aliases": ["how many", "count", "number of", "average", "avg", "mean", "median", "total", "sum"],
+    },
 ]
 
 
@@ -468,7 +631,7 @@ def forcing_concepts(keys):
 def semantic_matches(query: str) -> list[dict]:
     text = _normalize(query)
     hits = []
-    entity_checks: dict[tuple, bool] = {}          # one lookup per distinct requirement per call
+    entity_checks: dict[tuple, bool] = {}  # one lookup per distinct requirement per call
     for key, item in _glossary().items():
         matches = []
         for alias in item.get("aliases", []):
@@ -505,17 +668,25 @@ def semantic_matches(query: str) -> list[dict]:
     for h in hits:
         for other in h[3].get("overrides", []):
             if other in spans_by_key and all(
-                    any(s2 <= s1 and e1 <= e2 and (e2 - s2) > (e1 - s1) for s2, e2 in h[4])
-                    for s1, e1 in spans_by_key[other]):
+                any(s2 <= s1 and e1 <= e2 and (e2 - s2) > (e1 - s1) for s2, e2 in h[4])
+                for s1, e1 in spans_by_key[other]
+            ):
                 overridden.add(other)
     hits = [h for h in hits if h[2] not in overridden]
     # Known-gap concepts (``"gap": True``) declare topics the data does NOT cover. They yield to any real concept
     # that matched overlapping words, so loading a dataset that covers the topic silences the gap on its own.
     real_spans = [span for h in hits if not h[3].get("gap") for span in h[4]]
-    hits = [h for h in hits if not h[3].get("gap")
-            or not any(s1 < e2 and s2 < e1 for s1, e1 in h[4] for s2, e2 in real_spans)]
+    hits = [
+        h
+        for h in hits
+        if not h[3].get("gap") or not any(s1 < e2 and s2 < e1 for s1, e1 in h[4] for s2, e2 in real_spans)
+    ]
     # Suppress generic inventory if a more-specific sale/history concept is matched.
-    specific_keys = {h[2] for h in hits if h[0] >= 2 or h[2] in {"sold_price", "arms_length_sale", "history", "nri_overall_risk", "nri_riverine_flood"}}
+    specific_keys = {
+        h[2]
+        for h in hits
+        if h[0] >= 2 or h[2] in {"sold_price", "arms_length_sale", "history", "nri_overall_risk", "nri_riverine_flood"}
+    }
     out = []
     for spec, count, key, item, _spans in hits:
         if key == "house_inventory" and any(k in specific_keys for k in {"sold_price", "arms_length_sale", "history"}):
@@ -525,7 +696,7 @@ def semantic_matches(query: str) -> list[dict]:
         row["match_score"] = spec * 10 + count
         out.append(row)
     forced = _FORCED_CONCEPTS.get()
-    if forced:                                       # proposed by the semantic fallback: valid keys only, once each
+    if forced:  # proposed by the semantic fallback: valid keys only, once each
         have = {r["key"] for r in out}
         glossary = _glossary()
         for key in forced:
@@ -582,7 +753,9 @@ def availability_report():
 
 def _fetch_values(table: str, column: str, limit: int = 5000):
     try:
-        df = store.query(f"SELECT DISTINCT {column} AS value FROM {table} WHERE {column} IS NOT NULL LIMIT {int(limit)}")
+        df = store.query(
+            f"SELECT DISTINCT {column} AS value FROM {table} WHERE {column} IS NOT NULL LIMIT {int(limit)}"
+        )
         return [str(v) for v in df["value"].tolist()]
     except Exception:
         return []
@@ -601,7 +774,16 @@ def _literal_tract_entities(domains, query: str) -> list[dict]:
             for fips in re.findall(r"\b\d{11}\b", query):
                 values = _fetch_values(d.table, d.column)
                 if fips in values:
-                    out.append({"entity_type": d.entity_type, "table": d.table, "column": d.column, "value": fips, "domain": d.name, "score": 100})
+                    out.append(
+                        {
+                            "entity_type": d.entity_type,
+                            "table": d.table,
+                            "column": d.column,
+                            "value": fips,
+                            "domain": d.name,
+                            "score": 100,
+                        }
+                    )
     return out
 
 
@@ -612,13 +794,31 @@ def _value_entities(d: EntityDomain, values, t: str, msa_context: bool) -> list[
         nv = _normalize(value)
         if d.match_mode == "exact_or_prefix":
             if _alias_matches(t, nv):
-                out.append({"entity_type": d.entity_type, "table": d.table, "column": d.column, "value": value, "domain": d.name, "score": 80})
+                out.append(
+                    {
+                        "entity_type": d.entity_type,
+                        "table": d.table,
+                        "column": d.column,
+                        "value": value,
+                        "domain": d.name,
+                        "score": 80,
+                    }
+                )
         else:
             # Stored display value may be 'Pittsburgh, PA Metro Area'; a query token 'Pittsburgh' matches the leading label.
             raw_prefix = value.split(",", 1)[0].strip()
             prefix = _normalize(raw_prefix)
             if prefix and (_alias_matches(t, prefix) or _alias_matches(t, nv)):
-                out.append({"entity_type": d.entity_type, "table": d.table, "column": d.column, "value": value, "domain": d.name, "score": 95 if msa_context else 55})
+                out.append(
+                    {
+                        "entity_type": d.entity_type,
+                        "table": d.table,
+                        "column": d.column,
+                        "value": value,
+                        "domain": d.name,
+                        "score": 95 if msa_context else 55,
+                    }
+                )
     return out
 
 
@@ -633,8 +833,14 @@ def _component_entities(d: EntityDomain, values, query: str, with_phrase: bool =
     out = []
     for m in entity_lexicon.find(entity_lexicon.get_lexicon(d.name, values), query):
         for value in m.values:
-            e = {"entity_type": d.entity_type, "table": d.table, "column": d.column, "value": value, "domain": d.name,
-                 "score": 95 if m.tier <= 1 else 90}
+            e = {
+                "entity_type": d.entity_type,
+                "table": d.table,
+                "column": d.column,
+                "value": value,
+                "domain": d.name,
+                "score": 95 if m.tier <= 1 else 90,
+            }
             if with_phrase or m.ambiguous:
                 e["phrase"] = m.display
             if m.ambiguous:
@@ -672,8 +878,11 @@ def recognized_entities(query: str, entity_types=None) -> list[dict]:
         if (wanted and d.entity_type not in wanted) or d.match_mode not in _VALUE_MATCH_MODES:
             continue
         values = _fetch_values(d.table, d.column)
-        hits = (_component_entities(d, values, query, with_phrase=True) if d.match_mode == "components"
-                else _value_entities(d, values, t, True))
+        hits = (
+            _component_entities(d, values, query, with_phrase=True)
+            if d.match_mode == "components"
+            else _value_entities(d, values, t, True)
+        )
         for e in hits:
             k = (e["entity_type"], e["value"])
             if k not in seen:
@@ -687,7 +896,9 @@ def resolve_request_entities(query: str, candidate_tables: set[str] | None = Non
     domains = [d for d in _entity_domains() if not candidate_tables or d.table in candidate_tables]
     results = _literal_tract_entities(domains, query)
     # Prefer MSA domain when the request contains MSA/metro language or an MSA concept matched.
-    msa_context = any(_alias_matches(t, a) for a in ["msa", "msas", "metro", "metro area", "metropolitan area", "metro areas"])
+    msa_context = any(
+        _alias_matches(t, a) for a in ["msa", "msas", "metro", "metro area", "metropolitan area", "metro areas"]
+    )
     matched_concepts = semantic_matches(query)
     if any("MSA" in c.get("entity_types", []) for c in matched_concepts):
         msa_context = True
@@ -736,6 +947,7 @@ def relationship_path(required_tables: set[str]) -> list[Relationship]:
 
     def shortest_to_connected(source, connected):
         import heapq
+
         heap = [(0, source, [])]
         seen = {source: 0}
         while heap:
@@ -782,7 +994,8 @@ def expand_required_tables(tables: set[str]) -> list[str]:
     path = relationship_path(tables)
     out = set(tables)
     for rel in path:
-        out.add(rel.left_table); out.add(rel.right_table)
+        out.add(rel.left_table)
+        out.add(rel.right_table)
     return sorted(out)
 
 
@@ -835,7 +1048,9 @@ def build_query_context(request: str, requirements: str = "", plan: str = "", fo
     if concepts:
         parts.append("SEMANTIC CONCEPTS")
         for c in concepts:
-            parts.append(f"- {c['key']}: {c['description']}; columns={c['columns']}; operations={c['operations']}; filters={c['filters']}; grain={c['grain']}; entity_types={c['entity_types']}; rollup={c['rollup']}; rollup_spec={c.get('rollup_spec', {})}")
+            parts.append(
+                f"- {c['key']}: {c['description']}; columns={c['columns']}; operations={c['operations']}; filters={c['filters']}; grain={c['grain']}; entity_types={c['entity_types']}; rollup={c['rollup']}; rollup_spec={c.get('rollup_spec', {})}"
+            )
     if resolved:
         parts.append("RESOLVED LIVE ENTITY VALUES")
         for e in resolved[:20]:
