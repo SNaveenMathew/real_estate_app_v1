@@ -24,6 +24,7 @@ class ChatRequest(BaseModel):
     message: str
     history: list[dict] = []   # [{"role": "user"|"assistant", "content": "..."}]
     session_id: Optional[str] = None
+    turn_id: Optional[str] = None
 
 
 class DocumentRequest(BaseModel):
@@ -35,4 +36,11 @@ class BikeRouteRequest(BaseModel):
     start: str
     end: str
     city: str = "Pittsburgh, PA"
+
+
+class TransitRouteRequest(BaseModel):
+    start: str
+    end: str
+    city: str = "Pittsburgh, PA"
+
 

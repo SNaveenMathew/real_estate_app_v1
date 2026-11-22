@@ -23,242 +23,24 @@ from shapely.geometry import LineString, Point, box, shape
 
 import db.duckdb_store as store
 
-NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
-USER_AGENT = "RealEstateIntelligence/1.0 (bike routing)"
-NOMINATIM_MIN_INTERVAL_SECONDS = 1.0
-HTTP_TIMEOUT_SECONDS = 30.0
+from services.routing_common import (
+    distance_miles as _distance_miles,
+    dijkstra as _common_dijkstra,
+    bearing as _bearing,
+    turn_name as _turn_name,
+    make_path_instructions,
+    geocode_place,
+    in_pittsburgh_bounds as _in_pittsburgh_bounds,
+    _get_json,
+    PITTSBURGH_BOUNDS,
+    PITTSBURGH_PLACE_ALIASES,
+    PITTSBURGH_ADDRESS_FALLBACKS,
+    NOMINATIM_URL,
+    USER_AGENT,
+    NOMINATIM_MIN_INTERVAL_SECONDS,
+    HTTP_TIMEOUT_SECONDS,
+)
 
-# Pittsburgh city-region guard used to make neighborhood/landmark geocoding
-# deterministic. Nominatim can return another place with the same name (for
-# example "Mount Washington") unless the query is spatially constrained.
-PITTSBURGH_BOUNDS = {
-    "south": 40.33,
-    "west": -80.10,
-    "north": 40.55,
-    "east": -79.75,
-}
-
-# Common Pittsburgh neighborhood centroids used as a deterministic fallback
-# when Nominatim is unavailable/rate-limited. These are only endpoint hints;
-# the actual route is still snapped to the locally loaded BikePGH graph.
-# Shadyside is centered around 40.45152, -79.93655 per OSM-derived sources.
-PITTSBURGH_PLACE_ALIASES = {
-    "highland park": {"lat": 40.4781, "lon": -79.9110, "display_name": "Highland Park, Pittsburgh, PA"},
-    "highland park, pittsburgh": {"lat": 40.4781, "lon": -79.9110, "display_name": "Highland Park, Pittsburgh, PA"},
-    "shadyside": {"lat": 40.45152, "lon": -79.93655, "display_name": "Shadyside, Pittsburgh, PA"},
-    "shadyside, pittsburgh": {"lat": 40.45152, "lon": -79.93655, "display_name": "Shadyside, Pittsburgh, PA"},
-}
-
-# Address-level fallbacks for the two common Pittsburgh endpoint patterns used
-# by the app's route tests.  These are intentionally neighborhood endpoint
-# anchors, not claims of exact rooftop accuracy; the routing graph snaps them
-# to the nearest BikePGH edge.  They allow routing to continue when Nominatim
-# is unavailable/rate-limited.
-PITTSBURGH_ADDRESS_FALLBACKS = {
-    "5624 bryant st, pittsburgh, pa 15206": {
-        "lat": 40.4781, "lon": -79.9110,
-        "display_name": "5624 Bryant St, Highland Park, Pittsburgh, PA (fallback endpoint)",
-        "source": "local_pittsburgh_endpoint_fallback",
-    },
-    "5624 bryant street, pittsburgh, pa 15206": {
-        "lat": 40.4781, "lon": -79.9110,
-        "display_name": "5624 Bryant St, Highland Park, Pittsburgh, PA (fallback endpoint)",
-        "source": "local_pittsburgh_endpoint_fallback",
-    },
-    "5903 5th ave, shadyside, pa 15232": {
-        "lat": 40.45152, "lon": -79.93655,
-        "display_name": "5903 5th Ave, Shadyside, Pittsburgh, PA (fallback endpoint)",
-        "source": "local_pittsburgh_endpoint_fallback",
-    },
-    "5903 fifth ave, shadyside, pa 15232": {
-        "lat": 40.45152, "lon": -79.93655,
-        "display_name": "5903 Fifth Ave, Shadyside, Pittsburgh, PA (fallback endpoint)",
-        "source": "local_pittsburgh_endpoint_fallback",
-    },
-    "5903 5th ave, pittsburgh, pa 15232": {
-        "lat": 40.45152, "lon": -79.93655,
-        "display_name": "5903 5th Ave, Shadyside, Pittsburgh, PA (fallback endpoint)",
-        "source": "local_pittsburgh_endpoint_fallback",
-    },
-    "5903 fifth ave, pittsburgh, pa 15232": {
-        "lat": 40.45152, "lon": -79.93655,
-        "display_name": "5903 Fifth Ave, Shadyside, Pittsburgh, PA (fallback endpoint)",
-        "source": "local_pittsburgh_endpoint_fallback",
-    },
-}
-
-def _in_pittsburgh_bounds(lat: float, lon: float) -> bool:
-    return (
-        PITTSBURGH_BOUNDS["south"] <= lat <= PITTSBURGH_BOUNDS["north"]
-        and PITTSBURGH_BOUNDS["west"] <= lon <= PITTSBURGH_BOUNDS["east"]
-    )
-
-def _distance_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Great-circle distance in miles for endpoint sanity checks."""
-    r = 3958.7613
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dp = math.radians(lat2 - lat1)
-    dl = math.radians(lon2 - lon1)
-    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-    return 2 * r * math.asin(min(1.0, math.sqrt(a)))
-
-
-async def _get_json(url: str | tuple[str, ...], *, params=None, json_body=None) -> dict:
-    urls = (url,) if isinstance(url, str) else tuple(url)
-    last_error = None
-    async with httpx.AsyncClient(
-        timeout=HTTP_TIMEOUT_SECONDS,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "application/json",
-        },
-        follow_redirects=True,
-    ) as client:
-        for candidate in urls:
-            try:
-                if json_body is not None:
-                    response = await client.post(candidate, json=json_body)
-                else:
-                    response = await client.get(candidate, params=params)
-                response.raise_for_status()
-                return response.json()
-            except (httpx.HTTPError, ValueError) as exc:
-                last_error = f"{candidate}: {exc}"
-    raise RuntimeError(f"Public routing service unavailable. Last error: {last_error}")
-
-
-async def geocode_place(query: str, city_context: Optional[str] = "Pittsburgh, PA") -> dict:
-    """Geocode a place/address with a Pittsburgh spatial constraint and cache validation."""
-    q = query.strip()
-    if not q:
-        raise ValueError("A start or destination is required.")
-
-    normalized = " ".join(q.lower().split())
-
-    if city_context is None or "pittsburgh" in str(city_context).lower():
-        # Exact/known endpoint fallbacks first.
-        address_fallback = PITTSBURGH_ADDRESS_FALLBACKS.get(normalized)
-        if address_fallback:
-            return {**address_fallback, "cached": True}
-
-        # Address patterns that unambiguously identify the intended Pittsburgh
-        # neighborhood. These are approximate endpoint anchors and are snapped
-        # to the loaded BikePGH graph before Dijkstra.
-        if "5624 bryant st" in normalized and "15206" in normalized:
-            return {**PITTSBURGH_PLACE_ALIASES["highland park"], "cached": True, "source": "local_pittsburgh_address_fallback"}
-        if "5903 5th ave" in normalized and "15232" in normalized:
-            return {**PITTSBURGH_PLACE_ALIASES["shadyside"], "cached": True, "source": "local_pittsburgh_address_fallback"}
-        if "5903 fifth ave" in normalized and "15232" in normalized:
-            return {**PITTSBURGH_PLACE_ALIASES["shadyside"], "cached": True, "source": "local_pittsburgh_address_fallback"}
-
-        # Prefer deterministic local centroids for common Pittsburgh neighborhoods.
-        # This prevents a transient public-geocoder failure from masquerading as a
-        # failure of the bike-routing graph itself.
-        local_alias = PITTSBURGH_PLACE_ALIASES.get(normalized)
-        if local_alias:
-            return {**local_alias, "cached": True, "source": "local_pittsburgh_alias"}
-
-    search_q = q
-    if city_context and city_context.lower() not in normalized:
-        search_q = f"{q}, {city_context}"
-
-    address_key = hashlib.md5(search_q.lower().strip().encode("utf-8")).hexdigest()
-
-    # Cached results can pre-date this routing implementation and may point at
-    # the wrong "Mount Washington". Only accept them if they still satisfy the
-    # city-region constraint.
-    cached = store.query(
-        "SELECT lat, lon, full_address FROM geocode_cache WHERE address_key = ? LIMIT 1",
-        [address_key],
-    )
-    if not cached.empty:
-        r = cached.iloc[0]
-        try:
-            lat, lon = float(r["lat"]), float(r["lon"])
-            if math.isfinite(lat) and math.isfinite(lon) and (
-                city_context is None or _in_pittsburgh_bounds(lat, lon)
-            ):
-                return {
-                    "lat": lat,
-                    "lon": lon,
-                    "display_name": r["full_address"] or q,
-                    "cached": True,
-                }
-        except (TypeError, ValueError):
-            pass
-
-    # Pittsburgh viewbox plus bounded=1 prevents same-name places elsewhere
-    # from being selected. Request several candidates and choose the first
-    # candidate inside the region instead of blindly trusting limit=1.
-    viewbox = (
-        f'{PITTSBURGH_BOUNDS["west"]},{PITTSBURGH_BOUNDS["north"]},'
-        f'{PITTSBURGH_BOUNDS["east"]},{PITTSBURGH_BOUNDS["south"]}'
-    )
-    data = await _get_json(
-        NOMINATIM_URL,
-        params={
-            "q": search_q,
-            "format": "jsonv2",
-            "limit": 8,
-            "countrycodes": "us",
-            "addressdetails": 1,
-            "viewbox": viewbox,
-            "bounded": 1,
-        },
-    )
-    if not data:
-        raise ValueError(f"Could not find “{q}” in Pittsburgh, PA. Try a street address or more specific landmark.")
-
-    candidates = []
-    for hit in data:
-        try:
-            lat, lon = float(hit["lat"]), float(hit["lon"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if not (math.isfinite(lat) and math.isfinite(lon)):
-            continue
-        if city_context and not _in_pittsburgh_bounds(lat, lon):
-            continue
-        candidates.append((hit, lat, lon))
-
-    if not candidates:
-        raise ValueError(
-            f"Could not find a Pittsburgh location for “{q}”. "
-            "Use a more specific neighborhood, landmark, or street address."
-        )
-
-    # Prefer a result whose display/address explicitly mentions Pittsburgh.
-    def rank(item):
-        hit, lat, lon = item
-        text = (hit.get("display_name") or "").lower()
-        address = hit.get("address") or {}
-        pittsburgh_match = 0 if "pittsburgh" in text or str(address.get("city", "")).lower() == "pittsburgh" else 1
-        importance = -(float(hit.get("importance", 0) or 0))
-        return (pittsburgh_match, importance)
-
-    hit, lat, lon = sorted(candidates, key=rank)[0]
-    result = {
-        "lat": lat,
-        "lon": lon,
-        "display_name": hit.get("display_name", q),
-        "cached": False,
-    }
-
-    store.get_conn().execute(
-        """INSERT OR REPLACE INTO geocode_cache
-           (address_key, full_address, lat, lon, geocode_source, geocode_accuracy)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        [
-            address_key,
-            result["display_name"],
-            result["lat"],
-            result["lon"],
-            "nominatim",
-            "pittsburgh_bounded_place",
-        ],
-    )
-    store.get_conn().commit()
-    return result
 
 
 
@@ -1042,40 +824,16 @@ def _apply_crime_avoidance_filter(graph: dict, hotspot_cells: list[dict],
     return graph
 
 def _dijkstra(graph, start_node, end_node):
-    import heapq
-
-    adjacency = graph["adjacency"]
-    dist = {start_node: 0.0}
-    prev = {}
-    heap = [(0.0, start_node)]
-
-    while heap:
-        current_dist, node = heapq.heappop(heap)
-        if current_dist != dist.get(node):
-            continue
-        if node == end_node:
-            break
-
-        for neighbor, weight in adjacency.get(node, {}).items():
-            candidate = current_dist + weight
-            if candidate < dist.get(neighbor, float("inf")):
-                dist[neighbor] = candidate
-                prev[neighbor] = node
-                heapq.heappush(heap, (candidate, neighbor))
-
-    if end_node not in dist:
-        raise ValueError(
+    return _common_dijkstra(
+        graph["adjacency"],
+        start_node,
+        end_node,
+        no_path_msg=(
             "No continuous path exists between the two endpoints using only "
             "the locally ingested BikePGH infrastructure."
-        )
+        ),
+    )
 
-    path = [end_node]
-    cursor = end_node
-    while cursor != start_node:
-        cursor = prev[cursor]
-        path.append(cursor)
-    path.reverse()
-    return path, dist[end_node]
 
 
 
@@ -1224,63 +982,7 @@ def _turn_name(delta):
 
 
 def _make_path_instructions(path):
-    """
-    Generate route instructions from graph geometry only.
-
-    Because BikePGH linework generally has facility names/types rather than
-    street names, instructions intentionally refer to the mapped BikePGH
-    infrastructure instead of inventing street names from an external router.
-    """
-    if len(path) < 2:
-        return []
-
-    instructions = []
-    cumulative = 0.0
-    previous_bearing = None
-    for i in range(len(path) - 1):
-        a, b = path[i], path[i + 1]
-        segment_miles = _distance_miles(a[1], a[0], b[1], b[0])
-        if segment_miles <= 0:
-            continue
-
-        bearing = _bearing(a, b)
-        if previous_bearing is None:
-            text = f"Start on BikePGH mapped infrastructure for {segment_miles:.2f} miles."
-        else:
-            turn = _turn_name(bearing - previous_bearing)
-            text = f"{turn} and continue on BikePGH mapped infrastructure for {segment_miles:.2f} miles."
-
-        instructions.append({
-            "instruction": text,
-            "distance_miles": round(segment_miles, 2),
-        })
-        cumulative += segment_miles
-        previous_bearing = bearing
-
-    # Collapse the potentially large number of tiny noded segments into a
-    # compact representation while preserving direction changes.
-    if len(instructions) <= 12:
-        return instructions
-
-    collapsed = []
-    current = None
-    for step in instructions:
-        prefix = step["instruction"].split(" and ", 1)[0]
-        if current is None or prefix not in {"Continue", "Start"}:
-            if current:
-                collapsed.append(current)
-            current = {
-                "instruction": step["instruction"],
-                "distance_miles": step["distance_miles"],
-            }
-        else:
-            current["distance_miles"] += step["distance_miles"]
-            current["instruction"] = current["instruction"].split(" for ", 1)[0] + (
-                f" for {current['distance_miles']:.2f} miles."
-            )
-    if current:
-        collapsed.append(current)
-    return collapsed[:20]
+    return make_path_instructions(path, network_name="BikePGH mapped infrastructure")
 
 
 async def route_bike(

@@ -108,7 +108,7 @@ const MapLayers = (() => {
       checked: isFill ? S.fill === spec.name : checked, disabled,
       onchange: () => toggle(spec.name, isFill),
     });
-    const swatchColor = spec.kind === 'heat' ? '#ef4444' : spec.kind === 'lines' ? (spec.name === 'bike_routes' ? '#16a34a' : hashColor(spec.name))
+    const swatchColor = spec.kind === 'heat' ? '#ef4444' : spec.kind === 'lines' ? (spec.name === 'bike_routes' ? '#16a34a' : spec.name === 'transit_routes' ? '#2563eb' : hashColor(spec.name))
       : (spec.kind === 'choropleth' || spec.kind === 'polygons') ? '#f97316' : '#4f8ef7';
     const kids = [input, el('span', { class: 'ml-swatch', style: `background:${swatchColor}` }),
       el('span', {}, spec.title), spec.row_count != null ? el('span', { class: 'ml-count' }, fmtCount(spec.row_count)) : null];
@@ -426,14 +426,24 @@ const MapLayers = (() => {
 
   function mountLines(name, data) {
     const isBike = name === 'bike_routes';
+    const isTransit = name === 'transit_routes';
     return L.geoJSON(data, {
       style: (f) => ({
-        color: (f.properties && f.properties.color) || (isBike && BIKE_COLORS[f.properties.layer_type]) || '#4f8ef7',
-        weight: isBike ? 5 : 3, opacity: isBike ? 0.85 : 0.75,
+        color: (f.properties && (f.properties.route_color || f.properties.color)) || (isBike && BIKE_COLORS[f.properties.layer_type]) || (isTransit ? '#2563eb' : '#4f8ef7'),
+        weight: isBike ? 5 : isTransit ? 4 : 3, opacity: isBike ? 0.85 : isTransit ? 0.8 : 0.75,
       }),
       onEachFeature: (f, layer) => {
-        const label = isBike ? `${BIKE_LABELS[f.properties.layer_type] || f.properties.layer_type || ''} \u2014 ${f.properties.city || ''}`
-          : (f.properties && (f.properties.name || f.properties.route_id)) || '';
+        let label = '';
+        if (isBike) {
+          label = `${BIKE_LABELS[f.properties.layer_type] || f.properties.layer_type || ''} \u2014 ${f.properties.city || ''}`;
+        } else if (isTransit) {
+          const num = f.properties.route_short_name || f.properties.route_id || '';
+          const routeName = f.properties.route_long_name || '';
+          const mode = f.properties.route_type_name || '';
+          label = [mode, num, routeName].filter(Boolean).join(' \u2014 ');
+        } else {
+          label = (f.properties && (f.properties.name || f.properties.route_id)) || '';
+        }
         if (label) layer.bindTooltip(String(label), { sticky: true });
       },
     });

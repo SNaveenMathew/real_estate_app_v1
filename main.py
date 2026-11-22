@@ -32,6 +32,7 @@ from api import (
     houses_router,
     chat_router,
     bike_router,
+    transit_router,
     system_router,
     commute_router,
     data_sources_router,
@@ -47,6 +48,8 @@ from api.common import (
     BikeRouteRequest,
 )
 from api.chat import turn_failure as _turn_failure
+from agents.general_agent import run_general_chat
+from agents.house_agent import run_house_chat
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +89,7 @@ settings.uploads_dir.mkdir(parents=True, exist_ok=True)
 app.include_router(houses_router)
 app.include_router(chat_router)
 app.include_router(bike_router)
+app.include_router(transit_router)
 app.include_router(system_router)
 app.include_router(commute_router)
 app.include_router(data_sources_router)

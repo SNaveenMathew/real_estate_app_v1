@@ -329,6 +329,112 @@ def _ensure_schema(conn: duckdb.DuckDBPyConnection):
         )
     """)
 
+    # FTA National Transit Database (NTD) & National Transit Map tables.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS transit_agencies (
+            ntd_id                  VARCHAR,
+            legacy_ntd_id           VARCHAR,
+            agency                  VARCHAR,
+            mode                    VARCHAR,
+            tos                     VARCHAR,
+            three_mode              VARCHAR,
+            mode_status             VARCHAR,
+            reporter_type           VARCHAR,
+            organization_type       VARCHAR,
+            hq_city                 VARCHAR,
+            hq_state                VARCHAR,
+            uace_cd                 VARCHAR,
+            uza_name                VARCHAR,
+            uza_sq_miles            DOUBLE,
+            uza_population          DOUBLE,
+            service_area_population DOUBLE,
+            service_area_sq_miles   DOUBLE,
+            operating_expenses      DOUBLE,
+            fare_revenues           DOUBLE,
+            avg_cost_per_trip       DOUBLE,
+            avg_fares_per_trip      DOUBLE,
+            msa_code                VARCHAR,
+            PRIMARY KEY (ntd_id, mode, tos)
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS transit_ridership (
+            ntd_id      VARCHAR,
+            agency      VARCHAR,
+            mode        VARCHAR,
+            tos         VARCHAR,
+            msa_code    VARCHAR,
+            date        DATE,
+            year        INTEGER,
+            month       INTEGER,
+            upt         DOUBLE,
+            PRIMARY KEY (ntd_id, mode, tos, date)
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS transit_safety (
+            year                            INTEGER,
+            ntd_id                          VARCHAR,
+            agency                          VARCHAR,
+            mode                            VARCHAR,
+            tos                             VARCHAR,
+            city                            VARCHAR,
+            state                           VARCHAR,
+            uace_cd                         VARCHAR,
+            uza_name                        VARCHAR,
+            reporter_type                   VARCHAR,
+            msa_code                        VARCHAR,
+            event_total                     INTEGER,
+            collision_total                 INTEGER,
+            derailment_total                INTEGER,
+            fire_total                      INTEGER,
+            security_total                  INTEGER,
+            transit_worker_assault_events   INTEGER,
+            total_fatalities                INTEGER,
+            fatality_passenger              INTEGER,
+            fatality_employee               INTEGER,
+            fatality_other                  INTEGER,
+            total_injuries                  INTEGER,
+            injury_passenger                INTEGER,
+            injury_employee                 INTEGER,
+            injury_other                    INTEGER,
+            serious_injuries                INTEGER,
+            upt                             DOUBLE,
+            vrm                             DOUBLE,
+            vrh                             DOUBLE,
+            voms                            DOUBLE,
+            PRIMARY KEY (year, ntd_id, mode, tos)
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS transit_routes (
+            route_uid       VARCHAR PRIMARY KEY,
+            route_id        VARCHAR,
+            ntd_id          VARCHAR,
+            feed_id         VARCHAR,
+            shape_id        VARCHAR,
+            agency_id       VARCHAR,
+            route_short_name VARCHAR,
+            route_long_name VARCHAR,
+            route_desc      VARCHAR,
+            route_type      VARCHAR,
+            route_type_name VARCHAR,
+            route_url       VARCHAR,
+            route_color     VARCHAR,
+            route_text_color VARCHAR,
+            download_date   VARCHAR,
+            min_lon         DOUBLE,
+            min_lat         DOUBLE,
+            max_lon         DOUBLE,
+            max_lat         DOUBLE,
+            geometry_json   VARCHAR,
+            properties_json VARCHAR
+        )
+    """)
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS census_tracts (
             tract_fips  VARCHAR PRIMARY KEY,

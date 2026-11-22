@@ -135,6 +135,10 @@ class Settings(BaseSettings):
     zhvi_dir: Path = BASE_DIR / "data" / "zhvi"                        # ZHVI ("Home Values" -> ZHVI)
     market_heat_dir: Path = BASE_DIR / "data" / "market_heat_index"    # Market Heat Index
     shapefile_dir: Path = BASE_DIR / "data" / "shapefiles"
+    fta_dir: Path = BASE_DIR / "data" / "fta"
+    fta_safety_file: Path = BASE_DIR / "data" / "fta" / "S&S Time Series-July 2026_261102.xlsx"
+    fta_ridership_file: Path = BASE_DIR / "data" / "fta" / "September 2026 Raw Monthly Ridership (no adjustments or estimates)_261102.xlsx"
+    fta_routes_shp: Path = BASE_DIR / "data" / "fta" / "connections" / "National_Transit_Map_Routes.shp"
     uploads_dir: Path = BASE_DIR / "uploads"
 
     # ── Data onboarding (uploaded datasets; see services/dataset_onboarding.py) ──

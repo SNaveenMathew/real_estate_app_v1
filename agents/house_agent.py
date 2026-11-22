@@ -38,6 +38,14 @@ HOUSE_CODE_AGENT_MAX_STEPS = 3
 HOUSE_CODE_AGENT_MAX_CHARS = 12000
 HOUSE_FINAL_RESPONSE_MAX_CHARS = 16000
 
+# Steps this agent reports to the thinking-process panel (agents/turn_progress.py); see general_agent.PROGRESS_STEPS.
+PROGRESS_STEPS: list[tuple[str, str]] = [
+    ("property_analysis", "Property Analysis"),
+    ("code_generation", "Code Generation"),
+    ("code_execution", "Code Execution"),
+    ("response_synthesis", "Answer Synthesis"),
+]
+
 
 # -- Approved house functions (house_id bound via closure) --------------------
 
@@ -778,6 +786,11 @@ def run_house_chat(
         )
         return blocked_reply, updated_history, []
 
+    from agents.turn_progress import get_current_tracker
+    tracker = get_current_tracker()
+    if tracker:
+        tracker.start_step("property_analysis", "Property Analysis")
+
     # 2. Build approved function set bound to this house_id
     approved_functions = make_house_approved_functions(house_id)
     approved_names = set(approved_functions.keys())
@@ -792,6 +805,9 @@ def run_house_chat(
         evidence = ""
 
         for step in range(HOUSE_CODE_AGENT_MAX_STEPS):
+            if tracker:
+                step_title = "Code Generation" if step == 0 else f"Code Generation (Attempt {step + 1})"
+                tracker.start_step(f"house_code_gen_{step + 1}", step_title)
             with trace_span(
                 f"house_chat.code_agent.step_{step + 1}",
                 attributes={
@@ -819,6 +835,9 @@ def run_house_chat(
                     mark_span_error(code_span, exc)
                     raise
 
+            if tracker:
+                exec_title = "Code Execution" if step == 0 else f"Code Execution (Attempt {step + 1})"
+                tracker.start_step(f"house_code_exec_{step + 1}", exec_title)
             with trace_span(
                 f"house_chat.code_execution.step_{step + 1}",
                 attributes={
@@ -859,6 +878,8 @@ def run_house_chat(
 
         # 3. Final answer synthesis
         evidence = _render_evidence(all_calls)
+        if tracker:
+            tracker.start_step("response_synthesis", "Answer Synthesis")
         with trace_span(
             "house_chat.response",
             attributes={"openinference.span.kind": "LLM"},
@@ -868,6 +889,9 @@ def run_house_chat(
             }, mime_type="application/json")
             raw_reply = _write_house_final_answer(message, history, evidence)
             set_span_output(response_span, {"reply": raw_reply}, mime_type="application/json")
+
+        if tracker:
+            tracker.set_result_running()
 
         # 4. Response validation (evidence-grounding)
         all_lc_messages: list = [

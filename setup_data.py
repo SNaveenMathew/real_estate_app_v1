@@ -231,6 +231,11 @@ def run_all(only: str = None, resolve_tracts: bool = False,
             if n:
                 print(f"  ✓ {n:,} Market Heat Index rows loaded")
 
+    # ── Federal Transit Administration (FTA) ──────────────────────────────
+    if only in (None, "fta", "transit"):
+        banner("Federal Transit Administration (FTA) Data")
+        data_loader.load_fta_data()
+
     # ── Redfin ────────────────────────────────────────────────────────────
     if only in (None, "redfin"):
         banner("Redfin Favorites / Saved Homes")
@@ -362,7 +367,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--only",
         choices=["nri", "census", "redfin", "sold", "crime", "zhvi", "market_heat_index",
-                 "geocode", "repair", "match", "bike", "bike_lanes", "commute"],
+                 "geocode", "repair", "match", "bike", "bike_lanes", "commute", "fta", "transit"],
         help=(
             "Load only a specific dataset, or run a maintenance task:\n"
             "  nri               — FEMA National Risk Index\n"
@@ -373,6 +378,7 @@ if __name__ == "__main__":
             "  zhvi              — Zillow Home Value Index (data/zhvi/)\n"
             "  market_heat_index — Zillow Market Heat Index (data/market_heat_index/)\n"
             "  bike              — Bike Lanes (BikePGH active transportation network)\n"
+            "  fta / transit     — Federal Transit Administration (NTD agencies, ridership, safety, routes)\n"
             "  geocode           — Retry pending geocodes for sold homes\n"
             "  commute           — Commute times to your saved work location (see the Commute tab)\n"
             "  repair            — Fix X-coded msa_codes in census_msa (no data reload needed)"
