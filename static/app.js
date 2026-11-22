@@ -917,12 +917,14 @@ function renderBikeCrimeAnalysisInChat(messageEl, analysis) {
 
 function renderBikeFinalRouteInChat(messageEl, vis) {
   injectBikeChatStyles();
+  const isTransit = vis.map_kind === 'transit_route';
   const wrapper = document.createElement('div');
   wrapper.className = 'bike-route-result';
+  const transfersText = isTransit && vis.transfers != null ? ` · ${vis.transfers} transfer${vis.transfers === 1 ? '' : 's'}` : '';
   wrapper.innerHTML = `
     <div class="bike-route-result-header">
-      <strong>Final bike route</strong>
-      <span>${Number(vis.distance_miles || 0).toFixed(1)} mi · ${Number(vis.duration_minutes || 0).toFixed(0)} min estimate</span>
+      <strong>${isTransit ? 'Final transit route' : 'Final bike route'}</strong>
+      <span>${Number(vis.distance_miles || 0).toFixed(1)} mi · ${Number(vis.duration_minutes || 0).toFixed(0)} min estimate${transfersText}</span>
     </div>
     <div class="bike-route-chat-map"></div>
     <div class="bike-route-legend"></div>
@@ -986,9 +988,20 @@ function renderBikeFinalRouteInChat(messageEl, vis) {
     const label = pr.label || pr.layer_type;
     if (label) usedLabels.set(label, pr.color || '#666');
   }
-  wrapper.querySelector('.bike-route-legend').innerHTML =
-    '<div class="bike-route-legend-title">Final route</div>' +
-    [...usedLabels.entries()].map(([label,color]) => `<span><i style="background:${escapeHtml(color)}"></i>${escapeHtml(label)}</span>`).join('');
+  if (isTransit && Array.isArray(vis.transit_lines_used) && vis.transit_lines_used.length > 0) {
+    const transitBadges = vis.transit_lines_used.map(l => {
+      const color = l.route_color ? (l.route_color.startsWith('#') ? l.route_color : '#' + l.route_color) : '#2563eb';
+      const name = l.route_short_name || l.route_long_name || 'Transit';
+      const type = l.route_type_name || 'Transit';
+      return `<span><i style="background:${escapeHtml(color)}"></i>${escapeHtml(type)} ${escapeHtml(name)}</span>`;
+    }).join('');
+    wrapper.querySelector('.bike-route-legend').innerHTML =
+      '<div class="bike-route-legend-title">Transit Lines Used</div>' + transitBadges;
+  } else {
+    wrapper.querySelector('.bike-route-legend').innerHTML =
+      '<div class="bike-route-legend-title">Final route</div>' +
+      [...usedLabels.entries()].map(([label,color]) => `<span><i style="background:${escapeHtml(color)}"></i>${escapeHtml(label)}</span>`).join('');
+  }
   setTimeout(() => routeMap.invalidateSize(), 100);
 }
 
@@ -1011,7 +1024,7 @@ function renderArtifactsInChat(messageEl, artifacts) {
       if (artifact.type === 'map') {
         if (artifact.map_kind === 'bike_crime_analysis') {
           renderBikeCrimeAnalysisInChat(messageEl, artifact.analysis);
-        } else if (artifact.map_kind === 'bike_route') {
+        } else if (artifact.map_kind === 'bike_route' || artifact.map_kind === 'transit_route') {
           renderBikeFinalRouteInChat(messageEl, artifact);
         } else if (artifact.map_kind === 'points') {
           renderPointsMapArtifactInChat(messageEl, artifact);
