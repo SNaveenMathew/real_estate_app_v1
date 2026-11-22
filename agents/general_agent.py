@@ -30,6 +30,7 @@ from agents.tools import (
     query_database,
     retrieve_data_model_context,
     find_bike_route,
+    find_transit_route,
     search_all_house_descriptions,
 )
 from agents.response_validator import validate_response
@@ -48,6 +49,7 @@ APPROVED_FUNCTIONS = {
     "query_database": query_database,
     "retrieve_data_model_context": retrieve_data_model_context,
     "find_bike_route": find_bike_route,
+    "find_transit_route": find_transit_route,
     "search_all_house_descriptions": search_all_house_descriptions,
 }
 
@@ -267,7 +269,8 @@ APPROVED FUNCTIONS
 4. find_bike_route(start: str, end: str, city: str = "Pittsburgh, PA",
                    avoid_crime_dense_areas: bool = False,
                    crime_density_percentile: float = 90.0) -> str
-5. search_all_house_descriptions(query: str) -> str
+5. find_transit_route(start: str, end: str, city: str = "Pittsburgh, PA") -> str
+6. search_all_house_descriptions(query: str) -> str
 
 RULES
 =====
@@ -279,7 +282,8 @@ RULES
 6. For bike-route requests, call find_bike_route.
 7. For crime-avoidance bike requests, set avoid_crime_dense_areas=True.
 8. For ordinary shortest bike-route requests, set avoid_crime_dense_areas=False.
-9. Do not substitute another routing service.
+9. For transit/bus/train/public transit route requests, call find_transit_route.
+10. Do not substitute another routing service.
 10. Keep queries focused and results reasonably small.
 11. The structured query plan and retrieved metadata are authoritative for scope.
     Do not invent filters, tables, relationships, or geography grains that are not
@@ -302,6 +306,11 @@ final_result = find_bike_route(start="A", end="B", city="Pittsburgh, PA", avoid_
 User: Find a bike route from A to B that avoids crime-prone areas
 Code:
 final_result = find_bike_route(start="A", end="B", city="Pittsburgh, PA", avoid_crime_dense_areas=True, crime_density_percentile=90.0)
+
+User: Find a transit route from A to B
+Code:
+final_result = find_transit_route(start="A", end="B", city="Pittsburgh, PA")
+
 
 User: Which houses in my list have the highest walk scores?
 Code:
@@ -341,6 +350,11 @@ For bike routes:
 - If it says no_route, clearly say it is not possible using the applicable
   BikePGH network; never invent an alternative.
 - For crime-aware routing, never describe an unfiltered route as crime-aware.
+- The application renders maps separately from your prose.
+
+For transit routes:
+- If the executed find_transit_route result says a route exists, summarize the transit lines used, transfers, distance, and duration.
+- If it says no_route, clearly say no transit route could be found using the National Transit Map data.
 - The application renders maps separately from your prose.
 
 For analytical questions:
@@ -761,7 +775,7 @@ def run_general_chat(
                      or answer_status.is_retryable(result))     # NOT_ANSWERED a reworded request could fix
                     for _, result in calls
                 )
-                if not any(name in {"query_database", "find_bike_route", "search_all_house_descriptions"} for name in names) or step_failed:
+                if not any(name in {"query_database", "find_bike_route", "find_transit_route", "search_all_house_descriptions"} for name in names) or step_failed:
                     continue
             break
 

@@ -75,7 +75,8 @@ SQUARE_METER_PER_SQUARE_MILE = 2_589_988.110336
 
 TITLE_OVERRIDES = {   # cosmetic only; every one of these is also reachable through the generic prettifier
     "houses": "Houses", "crime_incidents": "Crime", "sold_homes": "Sold Homes",
-    "bike_routes": "Bike Routes", "nri_tracts": "Risk (NRI)", "census_tracts": "Population",
+    "bike_routes": "Bike Routes", "transit_routes": "Transit Routes",
+    "nri_tracts": "Risk (NRI)", "census_tracts": "Population",
 }
 
 # Columns that are never offered as a "color by" measure or a heat weight: identifiers, join keys and
