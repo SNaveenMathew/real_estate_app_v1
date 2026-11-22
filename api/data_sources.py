@@ -31,6 +31,7 @@ import db.duckdb_store as store
 from api.uploads import sanitize_filename, save_stream
 from config import settings
 from services import data_sources as ds
+from services import jobs
 
 router = APIRouter(prefix="/api/data-sources", tags=["data-sources"])
 
@@ -57,8 +58,26 @@ def _save_refresh_upload(file: UploadFile, folder: Path) -> tuple[Path, str]:
     return dest, name
 
 
-@router.post("/{key}/refresh")
+def _refresh_in_background(job, key: str, dest: Path, name: str, folder: Path):
+    """Reload one source on the job thread; the staged folder always goes away."""
+    try:
+        job.progress(f"Reloading {key} from {name}...")
+        result = ds.refresh_source(key, dest, name)
+        if not result.get("ok"):
+            raise HTTPException(status_code=422, detail=result.get("error", "Refresh failed."))
+        return result
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+@router.post("/{key}/refresh", status_code=202)
 async def refresh_data_source(key: str, file: UploadFile = File(...)):
+    """Stage the upload, reload the source in a background job (202 + /api/jobs/{id}).
+
+    The streamed save is capped and sanitized; the loader - which parses a county export or
+    a zipped shapefile and rewrites a table - is what used to hold a request open for
+    minutes.
+    """
     store.get_conn()
     source = ds.get_source(key)
     if source is None:
@@ -68,10 +87,17 @@ async def refresh_data_source(key: str, file: UploadFile = File(...)):
     folder.mkdir(parents=True, exist_ok=True)
     try:
         dest, name = await asyncio.to_thread(_save_refresh_upload, file, folder)
-        result = await asyncio.to_thread(ds.refresh_source, key, dest, name)
-    finally:
+        allowed = {e.strip() for e in source.accept.split(",")}
+        ext = Path(name).suffix.lower()
+        if ext not in allowed:              # cheap, client-input validation: answer it now, not from the job
+            raise HTTPException(status_code=422,
+                                detail=f"Expected one of {sorted(allowed)} for this source, got '{ext}'.")
+        try:
+            job = jobs.start("refresh", f"Reloading {key}",
+                             lambda j: _refresh_in_background(j, key, dest, name, folder))
+        except jobs.JobBusy as busy:
+            raise HTTPException(status_code=409, detail=str(busy), headers={"Retry-After": "5"})
+    except BaseException:
         shutil.rmtree(folder, ignore_errors=True)
-
-    if not result.get("ok"):
-        raise HTTPException(status_code=422, detail=result.get("error", "Refresh failed."))
-    return result
+        raise
+    return job.snapshot()

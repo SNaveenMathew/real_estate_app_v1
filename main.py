@@ -39,6 +39,7 @@ from api import (
     map_layers_router,
     onboarding_router,
     cache_router,
+    jobs_router,
 )
 from api.common import (
     safe_value as _safe,
@@ -96,6 +97,7 @@ app.include_router(data_sources_router)
 app.include_router(map_layers_router)
 app.include_router(onboarding_router)
 app.include_router(cache_router)
+app.include_router(jobs_router)
 
 # Prometheus metrics endpoint
 app.mount("/metrics", make_asgi_app(), name="metrics")

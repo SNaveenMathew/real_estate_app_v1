@@ -75,6 +75,24 @@ async function apiDS(path, opts = {}) {
   return res.json();
 }
 
+/* Background jobs (services/jobs.py): the heavy POSTs answer 202 with a job_id and the
+   page polls /api/jobs/{id}. The busy label follows the job's own progress message. */
+async function jobStatus(jobId) {
+  const res = await fetch('/api/jobs/' + encodeURIComponent(jobId));
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+async function waitJob(jobId, label) {
+  for (;;) {
+    const j = await jobStatus(jobId);
+    S.busy = j.message ? `${label} ${j.message}` : label;
+    renderPanel();
+    if (j.state === 'error') throw new Error(j.error || 'The job failed.');
+    if (j.state === 'done') return j.result;
+    await new Promise(r => setTimeout(r, 600));
+  }
+}
+
 /* ---------------------------------------------------------------- state */
 const LANES = ['housing', 'geography', 'risk', 'sales', 'safety', 'mobility', 'environment', 'demographics', 'other', 'system'];
 const DOMAIN_COLOR = { housing: '#3d7be8', geography: '#0f9d8a', risk: '#e0742f', sales: '#b08a1e', safety: '#c2415c',
@@ -577,7 +595,8 @@ async function uploadSourceFile(key, file) {
     const fd = new FormData();
     fd.append('file', file);
     try {
-      const result = await apiDS(`/${key}/refresh`, { method: 'POST', body: fd });
+      const started = await apiDS(`/${key}/refresh`, { method: 'POST', body: fd });
+      const result = await waitJob(started.job_id, `Uploading ${file.name}…`);
       S.sourceResult = result;
       await Promise.all([loadDataSources(), loadCatalog()]);
       toast(result.message || 'Refreshed.', result.warnings && result.warnings.length ? 'warn' : 'ok');
@@ -791,7 +810,8 @@ async function uploadFile(file) {
     fd.append('file', file);
     if (S.upload.sheet) fd.append('sheet', S.upload.sheet);
     if (S.upload.skiprows !== '') fd.append('skiprows', S.upload.skiprows);
-    const res = await api('/datasets', { method: 'POST', body: fd });
+    const started = await api('/datasets', { method: 'POST', body: fd });
+    const res = await waitJob(started.job_id, `Reading and profiling ${file.name}…`);
     if (res.matched_source) {
       // Columns matched an existing built-in source — it was refreshed in place
       // (see services/data_sources.py), not staged as a new dataset draft.
@@ -948,7 +968,8 @@ async function draftFlow() {
 async function enrichFlow(kind) {
   await withBusy('Running the enrichment…', async () => {
     await saveForm();
-    const out = await post(`/datasets/${S.ds.dataset_id}/enrich`, { kind });
+    const started = await post(`/datasets/${S.ds.dataset_id}/enrich`, { kind });
+    const out = await waitJob(started.job_id, 'Running the enrichment…');
     S.ds = out; syncForm(out); S.lastEnrich = out.enrichment_result;
     await loadCatalog();
     toast(out.enrichment_result.message, 'ok');
@@ -957,7 +978,8 @@ async function enrichFlow(kind) {
 async function analyzeFlow() {
   await withBusy('Testing the columns against the existing data…', async () => {
     await saveForm();
-    const out = await post(`/datasets/${S.ds.dataset_id}/analyze`);
+    const started = await post(`/datasets/${S.ds.dataset_id}/analyze`);
+    const out = await waitJob(started.job_id, 'Testing the columns against the existing data…');
     S.ds = out; S.tab = 'review'; await loadCatalog();
     const n = out.proposals.filter(p => p.kind === 'relationship').length;
     toast(n ? `${plural(n, 'link')} proposed. Check the examples before approving.` : 'No links found. You can still add the table on its own.', 'ok');

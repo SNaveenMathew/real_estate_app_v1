@@ -44,6 +44,7 @@ from api.uploads import sanitize_filename, save_stream
 from config import settings
 from services import catalog_llm
 from services import dataset_onboarding as ob
+from services import jobs
 from services import dataset_readers as readers
 from services import data_sources
 
@@ -70,6 +71,20 @@ def _warm_index() -> None:
 
 def _max_upload_bytes() -> int:
     return int(getattr(settings, "onboarding_max_upload_mb", 250)) * 1024 * 1024
+
+
+def _start_job(kind: str, label: str, fn):
+    """Claim a job slot, or answer 409 with the job that already holds it."""
+    try:
+        job = jobs.start(kind, label, fn)
+    except jobs.JobBusy as busy:
+        raise HTTPException(status_code=409, detail=str(busy), headers={"Retry-After": "5"})
+    return job.snapshot()
+
+
+def _job_call(job, message: str, fn, *args, **kwargs):
+    job.progress(message)
+    return _call(fn, *args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -127,15 +142,33 @@ def _ingest_upload(dest: Path, name: str, sheet: str | None, skiprows: int | Non
     return _call(ob.create_dataset, dest, name, sheet=sheet or None, skiprows=skiprows)
 
 
-@router.post("/datasets")
+def _ingest_in_background(job, dest: Path, name: str, sheet, skiprows):
+    """The minutes-long half of an upload, on the job thread."""
+    job.progress(f"Reading and profiling {name}...")
+    try:
+        return _ingest_upload(dest, name, sheet, skiprows)
+    except BaseException:
+        shutil.rmtree(dest.parent, ignore_errors=True)
+        raise
+
+
+@router.post("/datasets", status_code=202)
 async def upload_dataset(file: UploadFile = File(...), sheet: str | None = Form(None),
                          skiprows: int | None = Form(None)):
+    """Stage the upload, then ingest it in a background job.
+
+    The bytes are streamed to disk here - capped and sanitized (api/uploads.py) - because
+    the request body dies with the response. Everything that takes minutes (profiling,
+    relationship discovery, the DDL, the catalog reload) runs in the job, so the page polls
+    /api/jobs/{id} instead of holding one request open and hoping the tab stays on it.
+    """
     store.get_conn()
     dest, name = await asyncio.to_thread(_save_upload, file)
     try:
-        return await asyncio.to_thread(_ingest_upload, dest, name, sheet, skiprows)
-    except HTTPException:
-        shutil.rmtree(dest.parent, ignore_errors=True)
+        return _start_job("ingest", f"Ingesting {name}",
+                          lambda job: _ingest_in_background(job, dest, name, sheet, skiprows))
+    except BaseException:
+        shutil.rmtree(dest.parent, ignore_errors=True)     # nothing staged survives a refused upload
         raise
 
 
@@ -159,18 +192,23 @@ async def draft_description(dataset_id: str):
     return _call(ob.apply_draft, dataset_id, result)
 
 
-@router.post("/datasets/{dataset_id}/enrich")
-async def enrich_dataset(dataset_id: str, payload: dict = Body(...)):
+@router.post("/datasets/{dataset_id}/enrich", status_code=202)
+def enrich_dataset(dataset_id: str, payload: dict = Body(...)):
+    """Enrichment geocodes and joins thousands of rows: 202, then poll /api/jobs/{id}."""
     store.get_conn()
-    return await asyncio.to_thread(
-        _call, ob.enrich, dataset_id, str(payload.get("kind", "")),
-    )
+    kind = str(payload.get("kind", ""))
+    return _start_job("enrich", f"Enriching {dataset_id}",
+                      lambda job: _job_call(job, f"Enriching by {kind or 'rules'}...",
+                                            ob.enrich, dataset_id, kind))
 
 
-@router.post("/datasets/{dataset_id}/analyze")
-async def analyze_dataset(dataset_id: str):
+@router.post("/datasets/{dataset_id}/analyze", status_code=202)
+def analyze_dataset(dataset_id: str):
+    """Key-overlap probes across every catalog table: 202, then poll /api/jobs/{id}."""
     store.get_conn()
-    return await asyncio.to_thread(_call, ob.analyze, dataset_id)
+    return _start_job("analyze", f"Testing {dataset_id}",
+                      lambda job: _job_call(job, "Testing columns against the catalog...",
+                                            ob.analyze, dataset_id))
 
 
 @router.post("/proposals/{proposal_id}/decision")

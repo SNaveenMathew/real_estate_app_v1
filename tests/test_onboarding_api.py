@@ -1,8 +1,45 @@
-"""The Data page over HTTP, through the real application object."""
+"""The Data page over HTTP, through the real application object.
+
+Ingest, enrichment, analysis and source reloads are background jobs now: the POST answers
+202 with a ``job_id`` and the page polls ``/api/jobs/{id}`` (services/jobs.py). These tests
+use the same two steps a browser does.
+"""
 import re
+import time
 
 import pytest
 from fastapi.testclient import TestClient
+
+
+def _wait_job(client, job_id, timeout=180.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        r = client.get(f"/api/jobs/{job_id}")
+        assert r.status_code == 200, r.text
+        snap = r.json()
+        if snap["state"] in ("done", "error"):
+            return snap
+        time.sleep(0.02)
+    raise AssertionError(f"job {job_id} did not finish within {timeout}s")
+
+
+def _post_job(client, path, **kwargs):
+    """POST something that answers 202, then poll it to a terminal state."""
+    r = client.post(path, **kwargs)
+    assert r.status_code == 202, r.text
+    return _wait_job(client, r.json()["job_id"])
+
+
+def _job_result(client, path, **kwargs):
+    snap = _post_job(client, path, **kwargs)
+    assert snap["state"] == "done", snap["error"]
+    return snap["result"]
+
+
+def _job_error(client, path, **kwargs) -> str:
+    snap = _post_job(client, path, **kwargs)
+    assert snap["state"] == "error", f"expected a failed job, got {snap['state']}: {snap.get('result')}"
+    return snap["error"]
 
 
 @pytest.fixture()
@@ -16,9 +53,8 @@ def client(reference_data, tmp_path, monkeypatch):
 
 
 def _upload(client, path, name=None):
-    r = client.post("/api/onboarding/datasets", files={"file": (name or path.name, path.read_bytes(), "text/csv")})
-    assert r.status_code == 200, r.text
-    return r.json()
+    return _job_result(client, "/api/onboarding/datasets",
+                       files={"file": (name or path.name, path.read_bytes(), "text/csv")})
 
 
 def test_data_page_and_assets_are_served_with_cache_busting(client):
@@ -59,12 +95,10 @@ def test_redfin_source_refresh_loads_uploaded_export(client, tmp_path, monkeypat
         "10 Test Street,Pittsburgh,PA,15213,40.44,-80.00,275000,Active\n"
     ).encode()
 
-    response = client.post(
-        "/api/data-sources/redfin/refresh",
+    result = _job_result(
+        client, "/api/data-sources/redfin/refresh",
         files={"file": ("redfin-test.csv", csv, "text/csv")},
     )
-    assert response.status_code == 200, response.text
-    result = response.json()
     assert result["ok"] is True
     assert result["rows_after"] == result["rows_before"] + 1
     assert client.get("/api/data-sources").json()["sources"]
@@ -92,17 +126,16 @@ def test_census_tracts_source_refresh_rejects_bad_replacement_without_losing_dat
         "GEO_ID,NAME,P1_001N\n"
         "1400000US42003140100,\"Census Tract 1401, Allegheny County, Pennsylvania\",3456\n"
     ).encode()
-    good = client.post("/api/data-sources/census_tracts/refresh",
-                        files={"file": ("DECENNIALPL2020.P1-Data.csv", good_csv, "text/csv")})
-    assert good.status_code == 200, good.text
-    assert good.json()["ok"] is True
+    good = _job_result(client, "/api/data-sources/census_tracts/refresh",
+                       files={"file": ("DECENNIALPL2020.P1-Data.csv", good_csv, "text/csv")})
+    assert good["ok"] is True
     rows_after_good = _source_row_count(client, "census_tracts")
     assert rows_after_good >= 1
 
-    bad = client.post("/api/data-sources/census_tracts/refresh",
-                       files={"file": ("DECENNIALPL2020.P1-Data.csv",
-                                       b"\x00\x01\x02\xffnot,a,valid\ncsv\x00file", "text/csv")})
-    assert bad.status_code == 422
+    bad = _job_error(client, "/api/data-sources/census_tracts/refresh",
+                     files={"file": ("DECENNIALPL2020.P1-Data.csv",
+                                      b"\x00\x01\x02\xffnot,a,valid\ncsv\x00file", "text/csv")})
+    assert bad
     assert _source_row_count(client, "census_tracts") == rows_after_good   # nothing lost
 
 
@@ -134,11 +167,10 @@ def test_uploading_existing_census_file_does_not_rename_the_open_source(client, 
         return original_rename(path, target)
 
     monkeypatch.setattr(Path, "rename", fail_if_source_is_renamed)
-    response = client.post("/api/onboarding/datasets",
-                           files={"file": (canonical.name, csv_bytes, "text/csv")})
+    result = _job_result(client, "/api/onboarding/datasets",
+                         files={"file": (canonical.name, csv_bytes, "text/csv")})
 
-    assert response.status_code == 200, response.text
-    assert response.json()["matched_source"] == "census_tracts"
+    assert result["matched_source"] == "census_tracts"
     assert canonical.read_bytes() == csv_bytes
     assert _source_row_count(client, "census_tracts") >= 1
 
@@ -170,10 +202,9 @@ def test_nri_source_refresh_rejects_corrupt_shapefile_without_losing_data(client
         for f in shp_dir.iterdir():
             zf.write(f, f.name)
 
-    good = client.post("/api/data-sources/nri/refresh",
-                        files={"file": ("nri_good.zip", good_zip.read_bytes(), "application/zip")})
-    assert good.status_code == 200, good.text
-    assert good.json()["ok"] is True
+    good = _job_result(client, "/api/data-sources/nri/refresh",
+                       files={"file": ("nri_good.zip", good_zip.read_bytes(), "application/zip")})
+    assert good["ok"] is True
     rows_after_good = _source_row_count(client, "nri")
     assert rows_after_good >= 1
 
@@ -181,9 +212,9 @@ def test_nri_source_refresh_rejects_corrupt_shapefile_without_losing_data(client
     with zipfile.ZipFile(bad_zip, "w") as zf:
         zf.writestr("x.shp", b"this is not a real shapefile")
 
-    bad = client.post("/api/data-sources/nri/refresh",
-                       files={"file": ("nri_bad.zip", bad_zip.read_bytes(), "application/zip")})
-    assert bad.status_code == 422
+    bad = _job_error(client, "/api/data-sources/nri/refresh",
+                     files={"file": ("nri_bad.zip", bad_zip.read_bytes(), "application/zip")})
+    assert bad
     assert _source_row_count(client, "nri") == rows_after_good   # nothing lost
 
 
@@ -206,16 +237,15 @@ def test_sold_source_refresh_rejects_unreadable_replacement_without_losing_data(
         "0001A00100000000,Pittsburgh,Pittsburgh SD,0,VALID SALE,DE,1/1/2024,200000,100 Main St,"
         "100,,,Main,St,,,Pittsburgh,PA,15213,101,1/2/2024\n"
     ).encode()
-    good = client.post("/api/data-sources/sold/refresh",
-                        files={"file": ("sales.csv", good_csv, "text/csv")})
-    assert good.status_code == 200, good.text
-    assert good.json()["ok"] is True
+    good = _job_result(client, "/api/data-sources/sold/refresh",
+                       files={"file": ("sales.csv", good_csv, "text/csv")})
+    assert good["ok"] is True
     rows_after_good = _source_row_count(client, "sold")
     assert rows_after_good >= 1
 
-    bad = client.post("/api/data-sources/sold/refresh",
-                       files={"file": ("sales.csv", b"\x00\x01\x02\xffnot,a,valid\ncsv\x00file", "text/csv")})
-    assert bad.status_code == 422
+    bad = _job_error(client, "/api/data-sources/sold/refresh",
+                     files={"file": ("sales.csv", b"\x00\x01\x02\xffnot,a,valid\ncsv\x00file", "text/csv")})
+    assert bad
     assert _source_row_count(client, "sold") == rows_after_good   # nothing lost
 
 
@@ -237,17 +267,15 @@ def test_crime_source_refresh_rejects_replacement_missing_required_columns(clien
         "2024-01-01 10:00:00,-79.95,40.44,Robbery,Robbery,100 Main St,PK1\n"
         "2024-01-02 11:00:00,-79.96,40.45,Assault,Assault,200 Main St,PK2\n"
     ).encode()
-    good = client.post("/api/data-sources/crime_pittsburgh/refresh",
-                        files={"file": ("blotter.csv", good_csv, "text/csv")})
-    assert good.status_code == 200, good.text
-    assert good.json()["ok"] is True
+    good = _job_result(client, "/api/data-sources/crime_pittsburgh/refresh",
+                       files={"file": ("blotter.csv", good_csv, "text/csv")})
+    assert good["ok"] is True
     rows_after_good = _source_row_count(client, "crime_pittsburgh")
     assert rows_after_good == 2
 
-    bad = client.post("/api/data-sources/crime_pittsburgh/refresh",
-                       files={"file": ("blotter.csv", b"foo,bar\n1,2\n", "text/csv")})
-    assert bad.status_code == 422
-    assert "missing" in bad.json()["detail"].lower() or bad.json().get("warnings")
+    bad = _job_error(client, "/api/data-sources/crime_pittsburgh/refresh",
+                     files={"file": ("blotter.csv", b"foo,bar\n1,2\n", "text/csv")})
+    assert "missing" in bad.lower() or "column" in bad.lower()
     assert _source_row_count(client, "crime_pittsburgh") == rows_after_good   # both incidents survive
 
 
@@ -276,10 +304,9 @@ def test_bike_source_refresh_rejects_zip_without_shapefile_without_losing_data(c
         for f in shp_dir.iterdir():
             zf.write(f, f.name)
 
-    good = client.post("/api/data-sources/bike/refresh",
-                        files={"file": ("Bike Lanes.zip", good_zip.read_bytes(), "application/zip")})
-    assert good.status_code == 200, good.text
-    assert good.json()["ok"] is True
+    good = _job_result(client, "/api/data-sources/bike/refresh",
+                       files={"file": ("Bike Lanes.zip", good_zip.read_bytes(), "application/zip")})
+    assert good["ok"] is True
     rows_after_good = _source_row_count(client, "bike")
     assert rows_after_good >= 1
 
@@ -287,9 +314,9 @@ def test_bike_source_refresh_rejects_zip_without_shapefile_without_losing_data(c
     with zipfile.ZipFile(bad_zip, "w") as zf:
         zf.writestr("readme.txt", b"no shapefile in here")
 
-    bad = client.post("/api/data-sources/bike/refresh",
-                       files={"file": ("bike_bad.zip", bad_zip.read_bytes(), "application/zip")})
-    assert bad.status_code == 422
+    bad = _job_error(client, "/api/data-sources/bike/refresh",
+                     files={"file": ("bike_bad.zip", bad_zip.read_bytes(), "application/zip")})
+    assert bad
     assert _source_row_count(client, "bike") == rows_after_good   # nothing lost
 
 
@@ -300,7 +327,7 @@ def test_full_flow_over_http(client, blockgroup_csv):
     r = client.put(f"/api/onboarding/datasets/{did}", json={"description": "EPA walkability", "domain": "mobility", "grain": "one row per block group",
                    "columns": [{"name": "natwalkind", "synonyms": "walkability index", "unit": "index"}]})
     assert r.status_code == 200
-    props = client.post(f"/api/onboarding/datasets/{did}/analyze").json()["proposals"]
+    props = _job_result(client, f"/api/onboarding/datasets/{did}/analyze")["proposals"]
     cat = client.get(f"/api/onboarding/catalog?dataset_id={did}").json()
     assert cat["draft"]["status"] == "draft" and any(x["status"] == "pending" for x in cat["draft"]["relationships"])
     assert "smart_location_database" not in [t["name"] for t in cat["tables"]]         # not in the catalog until approved

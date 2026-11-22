@@ -5,6 +5,7 @@ Covers api/uploads.py directly and the two endpoints that accept files through t
 application object (the Data page's dataset upload and a house photo).
 """
 import io
+import time
 from pathlib import Path
 
 import pytest
@@ -139,13 +140,24 @@ def test_photo_upload_for_an_unknown_house_creates_nothing(client, tmp_path):
 
 # ── dataset upload endpoint ──────────────────────────────────────────────────
 
+def _wait_job(client, job_id, timeout=120.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        snap = client.get(f"/api/jobs/{job_id}").json()
+        if snap["state"] in ("done", "error"):
+            return snap
+        time.sleep(0.02)
+    raise AssertionError("job did not finish")
+
+
 def test_dataset_upload_sanitizes_the_client_filename(client, tmp_path):
     csv = b"Address,City,State,Zip\n10 Test Street,Pittsburgh,PA,15213\n"
     response = client.post(
         "/api/onboarding/datasets",
         files={"file": ("../../evil.csv", csv, "text/csv")},
     )
-    assert response.status_code == 200, response.text
+    assert response.status_code == 202, response.text
+    assert _wait_job(client, response.json()["job_id"])["state"] == "done"
     assert not (tmp_path / "evil.csv").exists()
     uploads = (tmp_path / "uploads").resolve()
     for stored in (tmp_path / "uploads").rglob("*"):

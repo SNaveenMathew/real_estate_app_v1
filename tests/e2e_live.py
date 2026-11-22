@@ -35,6 +35,17 @@ FAIL = f"{_RED}FAIL{_RESET}"
 _results: list[tuple[str, bool, str]] = []
 
 
+def wait_job(job_id: str, timeout: float = 300.0) -> dict:
+    """Poll a background job to completion (services/jobs.py; the heavy POSTs answer 202)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        snap = requests.get(f"{BASE}/api/jobs/{job_id}").json()
+        if snap.get("state") in ("done", "error"):
+            return snap
+        time.sleep(0.5)
+    return {"state": "timeout", "error": f"job {job_id} did not finish in {timeout}s"}
+
+
 def check(name: str, ok: bool, detail: str = "") -> bool:
     tag = PASS if ok else FAIL
     suffix = f"  ({detail})" if detail else ""
@@ -132,9 +143,11 @@ r = requests.post(
     f"{BASE}/api/onboarding/datasets",
     files={"file": ("walkability.csv", io.BytesIO(_csv_bytes()), "text/csv")},
 )
-check("POST /datasets (upload CSV) returns 200", r.status_code == 200,
-      r.text[:120] if r.status_code != 200 else "")
-ds = r.json()
+check("POST /datasets (upload CSV) returns 202", r.status_code == 202,
+      r.text[:120] if r.status_code != 202 else "")
+snap = wait_job(r.json()["job_id"]) if r.status_code == 202 else {}
+check("upload job finished", snap.get("state") == "done", str(snap.get("error") or ""))
+ds = snap.get("result") or {}
 dataset_id = ds.get("dataset_id", "")
 check("response has dataset_id", bool(dataset_id))
 # Upload runs type-inference immediately so status is 'draft', not 'staged'
@@ -191,9 +204,11 @@ check("draft response has dataset_id", draft.get("dataset_id") == dataset_id)
 section("7. Analyze — propose table and relationships")
 
 r = requests.post(f"{BASE}/api/onboarding/datasets/{dataset_id}/analyze")
-check("POST /datasets/{id}/analyze returns 200", r.status_code == 200,
-      r.text[:120] if r.status_code != 200 else "")
-ds3 = r.json()
+check("POST /datasets/{id}/analyze returns 202", r.status_code == 202,
+      r.text[:120] if r.status_code != 202 else "")
+snap = wait_job(r.json()["job_id"]) if r.status_code == 202 else {}
+check("analyze job finished", snap.get("state") == "done", str(snap.get("error") or ""))
+ds3 = snap.get("result") or {}
 proposals = ds3.get("proposals") or []
 check("at least one proposal produced", len(proposals) > 0)
 table_proposals = [p for p in proposals if p.get("kind") == "table"]
@@ -343,8 +358,8 @@ check("unsupported extension upload rejected (4xx)", 400 <= r.status_code < 500,
 evil_csv = b'=CMD("calc"),value\n1,2\n3,4\n'
 r = requests.post(f"{BASE}/api/onboarding/datasets",
                   files={"file": ("evil.csv", io.BytesIO(evil_csv), "text/csv")})
-if r.status_code == 200:
-    evil_ds = r.json()
+if r.status_code == 202:
+    evil_ds = wait_job(r.json()["job_id"]).get("result") or {}
     cols = [c["name"] for c in (evil_ds.get("columns") or [])]
     check("formula-injection header sanitised (no '=' in col name)",
           not any("=" in c for c in cols), f"cols: {cols}")
