@@ -80,12 +80,25 @@ async def run_turn(fn, *args, **kwargs):
         _state["waiting"] -= 1
 
     deadline_s = float(settings.agent_turn_deadline_s)
+    turn_id = kwargs.pop("turn_id", None)
+    from agents.turn_progress import get_or_create_progress_tracker, set_current_tracker
+    tracker = get_or_create_progress_tracker(turn_id) if turn_id else None
     handle = llm_resilience.Turn(deadline=time.monotonic() + deadline_s if deadline_s > 0 else None)
     ctx = contextvars.copy_context()                    # scope / artifacts / tracing follow the work onto the thread
 
     def work():
+        if tracker:
+            set_current_tracker(tracker)
         with llm_resilience.use_turn(handle):
-            return fn(*args, **kwargs)
+            try:
+                result = fn(*args, **kwargs)
+                if tracker:
+                    tracker.complete_all()
+                return result
+            except BaseException as exc:
+                if tracker:
+                    tracker.fail_current(str(exc))
+                raise
 
     loop = asyncio.get_running_loop()
     _state["running"] += 1
