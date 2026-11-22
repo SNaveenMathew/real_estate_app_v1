@@ -829,6 +829,74 @@ SELECT ts, action, object_key FROM catalog_audit ORDER BY id DESC LIMIT 20;
 
 ---
 
+## Caching and the Cache page
+
+Most of the data this app holds changes rarely, and the same work keeps recurring: the same question
+asked twice, a rephrased question the planner routes to the same concepts, and the same SQL statement
+(including its CTEs) reached from General Chat and House Chat alike. `services/cache.py` stores that
+work in the same DuckDB file as the data, so a repeat costs one indexed lookup instead of a
+local-model round trip.
+
+| Cache | Keyed by | Wired into | What it reuses |
+|---|---|---|---|
+| **Prompt / context** | hash of role + model + temperature + prompt-template version + the entire message list | `agents/llm_resilience.invoke()` — the one place every model call goes through | an unchanged prompt's completion, for both chats, the SQL Code Agent, the semantic fallback and the relationship suggester |
+| **Semantic** | the *planner signature* (sorted concept keys, planned tables, operation, resolved entities and filters, mandatory query scope) **plus** a token-similarity check | `agents/tools.py::query_database`, which House Chat delegates to | an equivalent earlier question's SQL and result evidence |
+| **SQL / CTE** | hash of the normalized statement text | `db/duckdb_store.query_limited_cached()` | the rows an identical statement already produced, including shared CTE work |
+
+Two properties make this safe rather than merely fast:
+
+- **Only deterministic model calls are cacheable.** Every prompt-cached client runs at
+  `temperature=0.0`, so an unchanged prompt provably yields the same completion. A sampling client is
+  never cached.
+- **Every entry carries a data fingerprint** — the catalog version, an explicit epoch, and the exact
+  row count of every non-cache table. A hit is served only while that fingerprint is unchanged, so
+  reloading a dataset can never be answered from stale rows. Entries also expire on `CACHE_TTL_S`
+  (24 h by default), and **Clear cache** on the Cache page moves the epoch forward immediately.
+
+"Semantic" is decided by the deterministic semantic layer, not by an embedding guess: two questions
+share an answer only when `build_query_plan` already routed them to the same concepts, the same
+tables, the same operation, the same resolved entities and filters, and the same scope — and their
+wording is at least `CACHE_SEMANTIC_THRESHOLD` similar. So "how many houses are there" never reuses the
+answer to "how many houses are there in Pittsburgh", and House Chat's per-house scope is part of the
+signature, so one house's answer is never served for another. It also costs nothing on the hot path:
+no embedding service has to be reachable for a hit.
+
+**Storage and retrieval** use the application's own DuckDB: `INSERT OR REPLACE` upserts on a
+`PRIMARY KEY` (DuckDB's ART index) for O(1) key lookups, plus secondary indexes on the columns the page
+filters by. No second database, no new dependency.
+
+### The Cache page
+
+`http://localhost:8000/cache` (or **⚡ Cache** in the top bar) is built like the Data page. The graph
+reads left to right:
+
+- **Abstractions** — the live catalog's semantic concepts: walkability, transit connectivity, risk,
+  price, and anything else the catalog (or a dataset you upload) declares. A concept with no cached
+  questions is still drawn — it is something the assistant can reason about, it just has not been asked
+  twice yet.
+- **Questions** — the cached answers the planner attributed to that concept, with their reuse count.
+- **Tables / CTEs** — what each cached statement reads.
+
+Click any node for its details; a question or a cached model call also shows the stored SQL and
+answer. **Model calls** switches the graph to the prompt cache (role → cached call). Zoom with the
+toolbar, and search to isolate one concept, question or table.
+
+All settings are optional: `CACHE_ENABLED`, `CACHE_PROMPT_ENABLED`, `CACHE_SEMANTIC_ENABLED`,
+`CACHE_SQL_ENABLED`, `CACHE_TTL_S`, `CACHE_MAX_ENTRIES`, `CACHE_SEMANTIC_THRESHOLD`.
+
+### Limits
+
+- Counts, not checksums. A table whose row count is unchanged but whose rows were edited in place is
+  not caught by the fingerprint; the TTL and **Clear cache** are the answer to that, and reloading a
+  dataset through the app (which changes the count) is caught immediately.
+- The fingerprint is a set of metadata-only `COUNT(*)` calls, memoized for
+  `CACHE_FINGERPRINT_TTL_S` (3 s), so a reload can take up to that long to be noticed.
+- A statement with bound parameters is not cached, since its result depends on more than its text.
+- Cache rows are local-only, like everything else here: `SELECT * FROM cache_entries` and
+  `SELECT * FROM cache_sql_results`.
+
+---
+
 ## Catalog model (optional)
 
 The Data page can ask a local model to **draft wording** for an upload: titles, column descriptions,
@@ -892,6 +960,7 @@ api/
   commute.py          Commute tab HTTP API (/api/commute/*)
   map_layers.py       Map layer panel HTTP API (/api/layers/*)
   data_sources.py     Built-in dataset registry and refresh API (/api/data-sources/*)
+  cache.py            Cache page HTTP API (/api/cache/*)
 
 agents/
   tools.py            LangChain tools (SQL, vector search, price estimation, bike routing)
@@ -926,6 +995,7 @@ services/
   house_links.py      Rows of user-added datasets linked to one house (House Chat)
   commute.py          Commute times: work-address lookup, OSRM/OpenTripPlanner clients, refresh job
   map_layers.py       Generic, catalog-driven map layer classification and data builders
+  cache.py            Shared prompt / semantic / SQL result cache + the Cache page's graph model
 
 eval/
   fixtures.py         Builds a small deterministic DB with hand-verifiable answers
@@ -941,6 +1011,7 @@ static/
   style.css            App styles, BikePGH route visuals, route planner UI, chat table/chart/map artifacts
   app.js              Frontend logic, layer toggles, bike route rendering, chat artifact rendering (table/chart/map)
   data.html/.css/.js  The Data page: catalog map + dataset workbench
+  cache.html/.css/.js The Cache page: abstractions → cached questions → tables
   commute.js          The Commute tab and the commute-minutes map layer
   layers.js           The Map Layers panel: builds the toggle list from /api/layers and renders every kind
 
@@ -1022,6 +1093,19 @@ The browser uses these main endpoints:
 | POST | `/api/onboarding/relationships/revoke` | `{"rel_key": "..."}` |
 | POST | `/api/onboarding/datasets/{id}/retire` | Retire a published dataset / discard a draft |
 | GET / POST | `/api/onboarding/llm/status`, `/llm/selftest` | The catalog model router |
+
+---
+
+### Cache endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/cache` | The Cache page |
+| GET | `/api/cache` | Counters: prompt / semantic / SQL entries, reuses, current data fingerprint |
+| GET | `/api/cache/graph[?include_empty=]` | The page's node/edge model (abstractions → questions → tables) |
+| GET | `/api/cache/entries[?kind=&q=&limit=]` | Stored rows for the inspector |
+| GET | `/api/cache/entry/{cache_key}` | One stored entry in full (its SQL and answer) |
+| POST | `/api/cache/clear` | `{"kind": "prompt" \| "semantic" \| "sql"}` or `{}` for everything |
 
 ---
 

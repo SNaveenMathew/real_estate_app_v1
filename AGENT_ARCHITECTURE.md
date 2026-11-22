@@ -42,6 +42,7 @@ computed, decides whether it's shown as a table, a chart, or a map.
 10. [Presentation layer: tables, charts, and maps](#10-presentation-layer-tables-charts-and-maps)
 11. [Answer routing, derived measures, and non-answers](#11-answer-routing-derived-measures-and-non-answers)
 12. [Resilience: verified SQL, scoped queries, and bounded turns](#12-resilience-verified-sql-scoped-queries-and-bounded-turns)
+13. [Caching: prompt, semantic, and shared SQL results](#13-caching-prompt-semantic-and-shared-sql-results)
 
 ---
 
@@ -1372,3 +1373,86 @@ were while tracing was off).
   right one. Opt-in.
 * **"top N"** understands a fixed set of phrasings; others leave `result_limit` unset (nothing is invented).
 * **Tracing-on paths** are covered with an in-memory tracer, not a live Phoenix server.
+
+---
+
+## 13. Caching: prompt, semantic, and shared SQL results
+
+The issue this implements is narrow on purpose: the data changes rarely, the same intermediate work
+recurs, and both chats should benefit from it. `services/cache.py` holds all of it in the application's
+own DuckDB file. Three caches, three different keys, one invalidation rule.
+
+### 13.1 What is cached, and where it is wired in
+
+| Cache | Key | Hook | Why there |
+|---|---|---|---|
+| Prompt / context | role + model + temperature + `PROMPT_CACHE_VERSION` + the full message list | `agents/llm_resilience.invoke()` | it is the single place every model call goes through, so General Chat, House Chat, the SQL Code Agent, `agents/semantic_fallback.py` and `services/relationship_suggestions.py` are all covered without knowing about it |
+| Semantic | planner signature + wording similarity | `agents/tools.py::query_database()` | House Chat's `query_database` delegates straight to it (§ house_agent.py), so both chats share one set of answers |
+| SQL / CTE | normalized statement text | `db/duckdb_store.query_limited_cached()`, called from `run_code_query()` | every chat, tool and retry reaches SQL through it; a CTE computed for one question is free for the next |
+
+### 13.2 The rules that make a hit trustworthy
+
+* **Determinism, not optimism.** A prompt entry is written only for a `temperature == 0` client. An
+  unchanged prompt then provably produces the same completion, so replaying the text is exact reuse
+  rather than a guess. A sampling client is refused by `prompt_key()`.
+* **The semantic layer decides "equivalent".** `semantic_signature()` hashes the plan's sorted
+  `semantic_keys`, its `required_tables`, its `operation`, its `entity_filters`, its `filters` and the
+  mandatory `query_scope` filters. Two questions can only share an answer if the deterministic planner
+  already routed them identically. The wording check (`token_similarity`, a Dice coefficient over
+  content words, `CACHE_SEMANTIC_THRESHOLD` = 0.85) is the *second* gate, not the first — it filters
+  out "same plan, different intent" while the signature blocks the dangerous cases: a different entity
+  ("in Pittsburgh"), a different semantic filter, or a different house (House Chat sets the scope as a
+  `ScopeFilter`, so `house_id` is in the signature).
+* **No plan, no semantic entry.** If the catalog could not place the question (`semantic_keys` empty),
+  the signature is `None` and nothing is stored or served: two unplannable questions have nothing in
+  common worth assuming.
+* **A data fingerprint on every entry.** `data_version()` hashes the catalog version, an explicit
+  epoch (bumped by `invalidate()`) and the exact `COUNT(*)` of every non-cache table. A hit requires
+  equality. This is how a reloaded dataset can never be answered from stale rows. It is cheap —
+  DuckDB answers `COUNT(*)` from row-group metadata — and memoized for `CACHE_FINGERPRINT_TTL_S`.
+* **No embeddings on the hot path.** A cache lookup must never wait on Ollama. The plan signature
+  already encodes meaning; the wording gate is deterministic. A cache that is unavailable degrades to
+  "no hit", never to a failed request.
+* **Served before the breaker.** `invoke()` consults the cache before `gate.before_call()`, so a cached
+  answer is still available while the model server is down — which is the point of having it.
+* **Cache failures are invisible.** Every read and write is wrapped: an exception degrades to the
+  uncached path. A counter increment is not worth failing a served answer over.
+
+### 13.3 Non-answers and empty results are not cached
+
+`query_database` stores a semantic entry only when the outcome is a real answer:
+`answer_status.is_not_answered()` and `Code Agent error` results are skipped, because a
+`NOT_ANSWERED[model_unavailable]` is a statement about the server at that moment, not about the data.
+`store_sql()` skips empty frames for the same reason — in `run_code_query` a 0-row result triggers a
+repair attempt, so remembering it would memorise the mistake.
+
+### 13.4 Invalidation, and what it does not catch
+
+`invalidate(kind)` deletes the rows and moves the epoch forward, which instantly stops every hit
+(the Cache page's **Clear cache** button calls it). Expiry (`CACHE_TTL_S`, 24 h) and the LRU cap
+(`CACHE_MAX_ENTRIES`, enforced every 25 writes alongside expired-row cleanup) bound the store.
+
+The fingerprint compares **counts, not contents**. An in-place update that preserves a table's row
+count is not detected; TTL and Clear are the answer, and every write path in the app that reloads data
+changes a count. This is documented rather than papered over because it is the one assumption the
+whole design rests on.
+
+### 13.5 The graph on the Cache page
+
+`cache.graph()` returns abstractions → questions → tables. The abstractions are the live catalog's
+semantic concepts (`describe_catalog()["concepts"]`), not a hardcoded list, which is why "walkability"
+and "transit connectivity" appear with no cache-specific code, and why a concept you add on the Data
+page appears too. Concepts with zero cached questions are still returned: the page's job is to show
+what the assistant *can* reason about next to what it has actually reused. Edges are `asks`
+(concept → question) and `reads` (question → table), plus a separate role → call family for the prompt
+cache.
+
+### 13.6 Tests
+
+`tests/test_cache.py` checks the hits *and* the misses: an unchanged prompt replays while a sampling
+client does not; the same prompt under two roles is two entries; inserting a house invalidates both a
+prompt entry and a SQL result; an empty result is not stored; "how many houses" and "how many houses in
+Pittsburgh" get different signatures and never share an answer; an unplannable question caches nothing;
+the graph links a concept to its question to its table; and the HTTP API serves stats, graph, entries,
+one entry and clear. Every cache test also exercises the real fixtures (`tests/conftest.py`), so the
+fingerprint is computed against an actual DuckDB file.
