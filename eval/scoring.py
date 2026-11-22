@@ -42,7 +42,7 @@ from eval.golden_set import GoldenExample
 @dataclass
 class ScoreResult:
     example_id: str
-    verdict: str                 # "PASS" | "FAIL" | "ERROR"
+    verdict: str                 # "PASS" | "FAIL" | "ERROR" | "INCONCLUSIVE"
     method: str                   # "assert_equal" | "llm_judge"
     reason: str
     reply: str = ""
