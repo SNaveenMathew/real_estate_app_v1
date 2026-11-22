@@ -18,9 +18,17 @@ server slow, each call could wait out the full HTTP timeout, up to three times (
 
 Turns also carry a deadline (``turn()`` / ``use_turn()``).  Cancellation is cooperative: ``check_cancelled()`` runs before
 every model call, so a turn past its deadline starts no further work, and a worker thread never has to be killed.
+
+**Prompt/context cache.**  ``invoke()`` is also where the prompt cache is consulted, for the same reason it is where the
+breaker lives: it is the single choke point, so caching covers General Chat, House Chat, the SQL Code Agent, the semantic
+fallback and the relationship suggester without any of them knowing about it (``services/cache.py``).  Only
+temperature-0 calls are eligible - an unchanged prompt then provably yields the same completion, so the stored reply is
+reused rather than regenerated.  A hit is served before the breaker gate on purpose: a cached answer is exactly what
+should still be available when the model server is down.
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from contextlib import contextmanager
@@ -28,6 +36,37 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 from config import settings
+
+logger = logging.getLogger(__name__)
+
+
+class CachedReply:
+    """A cache hit shaped like what callers expect from a model client: they read ``.content`` only."""
+
+    __slots__ = ("content", "cache_hit")
+
+    def __init__(self, content: str):
+        self.content = content
+        self.cache_hit = True
+
+    def __str__(self) -> str:
+        return self.content
+
+
+def _reply_text(result) -> str:
+    """Best-effort plain text of a model reply (str, or the text parts of a content list)."""
+    content = getattr(result, "content", result)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        chunks = []
+        for item in content:
+            if isinstance(item, dict):
+                chunks.append(str(item.get("text") or ""))
+            else:
+                chunks.append(str(getattr(item, "text", "")))
+        return "".join(chunks)
+    return str(content or "")
 
 
 class ModelUnavailable(RuntimeError):
@@ -182,13 +221,30 @@ def check_cancelled() -> None:
 # ---------------------------------------------------------------------------
 # The one place a model is called
 # ---------------------------------------------------------------------------
+def _cache_hooks(client, messages, role: str):
+    """``(cache_key, services.cache)`` for this call, or ``(None, None)``.  Never raises."""
+    try:
+        from services import cache as result_cache
+        return result_cache.prompt_key(role, client, messages), result_cache
+    except Exception as exc:                            # a cache problem must never break a model call
+        logger.debug("prompt cache unavailable: %s", exc)
+        return None, None
+
+
 def invoke(client, messages, *, role: str = "model", breaker_name: str = "chat"):
-    """``client.invoke(messages)`` with classification, the breaker and cancellation.
+    """``client.invoke(messages)`` with classification, the breaker, cancellation and the prompt cache.
 
     Raises ``ModelUnavailable`` for a transient service failure (or an open breaker), ``TurnCancelled`` past the deadline,
     and re-raises anything else (a bad request is not an outage) exactly as before.
     """
     check_cancelled()
+
+    cache_key, result_cache = _cache_hooks(client, messages, role)
+    if cache_key:
+        stored = result_cache.lookup_prompt(cache_key)
+        if stored is not None:
+            return CachedReply(stored)
+
     gate = breaker(breaker_name)
     gate.before_call()
     try:
@@ -200,4 +256,10 @@ def invoke(client, messages, *, role: str = "model", breaker_name: str = "chat")
         gate.record_success()                           # the service answered (with an error about the request): it is up
         raise
     gate.record_success()
+
+    if cache_key:
+        text = _reply_text(result)
+        if text.strip():
+            result_cache.store_prompt(cache_key, role, result_cache.prompt_label(messages), text, text,
+                                      meta={"kind": "prompt"})
     return result

@@ -21,6 +21,19 @@ TRACTS = [("42003040100", "Allegheny", "PA"), ("42003050100", "Allegheny", "PA")
           ("42101000200", "Philadelphia", "PA"), ("39035100100", "Cuyahoga", "OH"), ("06037000100", "Los Angeles", "CA")]
 
 
+@pytest.fixture(autouse=True)
+def _cache_off_by_default(monkeypatch):
+    """The result cache (services/cache.py) is a performance layer with its own tests (tests/test_cache.py).
+
+    Every other module asserts routing, retry and model-call behaviour against scripted models - a replayed
+    answer is not what those tests are about, and a few fixtures share one DuckDB file across tests, which a
+    result cache would couple. tests/test_cache.py turns it back on explicitly.
+    """
+    from config import settings
+    monkeypatch.setattr(settings, "cache_enabled", False)
+    yield
+
+
 @pytest.fixture()
 def fresh_db(tmp_path, monkeypatch):
     """Point the app at an empty DuckDB file; the catalog reseeds itself on connect."""

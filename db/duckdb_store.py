@@ -122,6 +122,28 @@ def query_limited(sql: str, params=None, *, max_rows: int | None = None, timeout
             timer.cancel()
 
 
+def query_limited_cached(sql: str, params=None, *, max_rows: int | None = None,
+                         timeout_s: float | None = None, request_text: str = ""):
+    """``query_limited`` plus the shared SQL/CTE result cache: ``(DataFrame, truncated, cache_hit)``.
+
+    Both chats reach SQL through the same path, so a CTE or aggregate one of them already computed is
+    reused by the other.  A hit is only possible while the data fingerprint is unchanged; see
+    services/cache.py for how that is computed.  Caching is never allowed to break a query: any
+    failure in the cache layer falls through to a normal execution.
+    """
+    from services import cache as result_cache
+    if not result_cache.sql_cache_available(params):
+        frame, truncated = query_limited(sql, params, max_rows=max_rows, timeout_s=timeout_s)
+        return frame, truncated, False
+    hit = result_cache.lookup_sql(sql)
+    if hit is not None:
+        frame, truncated = hit
+        return frame, truncated, True
+    frame, truncated = query_limited(sql, params, max_rows=max_rows, timeout_s=timeout_s)
+    result_cache.store_sql(sql, frame, truncated, request_text=request_text)
+    return frame, truncated, False
+
+
 def is_connected() -> bool:
     """True while a connection is open (close() makes the next access open a fresh one)."""
     return _conn is not None
@@ -607,6 +629,10 @@ def _ensure_schema(conn: duckdb.DuckDBPyConnection):
     from db import catalog_store
     catalog_store.ensure_tables(conn)
     catalog_store.sync_seed(conn)
+
+    # Result cache (prompt, semantic and SQL) - same DuckDB file, same connection; see services/cache.py.
+    from services import cache as result_cache
+    result_cache.ensure_tables(conn)
 
 
 def query(sql: str, params=None) -> pd.DataFrame:

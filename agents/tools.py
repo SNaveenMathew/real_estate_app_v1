@@ -745,8 +745,11 @@ def run_code_query(
                 "sql.statement": sql,
             }) as execution_span:
                 try:
-                    df, truncated = store.query_limited(sql)     # time-limited and row-capped (db/duckdb_store.py)
+                    # Time-limited and row-capped, and served from the shared SQL/CTE cache when the
+                    # identical statement already ran against unchanged data (db/duckdb_store.py).
+                    df, truncated, cache_hit = store.query_limited_cached(sql, request_text=request)
                     if execution_span is not None:
+                        execution_span.set_attribute("sql.cache_hit", bool(cache_hit))
                         execution_span.set_attribute("sql.truncated", bool(truncated))
                         execution_span.set_attribute("sql.row_count", int(len(df)))
                         execution_span.set_attribute("sql.result_empty", bool(df.empty))
@@ -880,7 +883,26 @@ def query_database(
     if proposed:
         with schema.forcing_concepts(proposed):
             return _annotate_interpretation(_answer(request, requirements, presentation), proposed)
-    return _answer(request, requirements, presentation, structured_plan)
+
+    # Semantic cache (services/cache.py): an earlier question the deterministic planner routed to the
+    # SAME concepts, tables, operation and scope, on unchanged data, is reused verbatim - so the
+    # evidence the answer model reads is identical to a fresh run.  House Chat delegates here too,
+    # which is why the scope (e.g. this house) is part of the signature.
+    from services import cache as result_cache
+    signature = result_cache.semantic_signature(structured_plan)
+    cached = result_cache.lookup_semantic("query_database", request, signature)
+    if cached is not None:
+        return cached["response"]
+
+    out = _answer(request, requirements, presentation, structured_plan)
+    if not answer_status.is_not_answered(out) and "Code Agent error" not in out:
+        result_cache.store_semantic(
+            "query_database", request, signature, out,
+            meta={"concepts": structured_plan.semantic_keys,
+                  "tables": structured_plan.required_tables,
+                  "operation": structured_plan.operation or "",
+                  "kind": "semantic"})
+    return out
 
 
 def _annotate_interpretation(out: str, keys: list[str]) -> str:

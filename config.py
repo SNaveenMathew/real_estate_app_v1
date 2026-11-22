@@ -78,6 +78,25 @@ class Settings(BaseSettings):
     presentation_chart_max_points_hinted: int = 100
     presentation_map_max_points: int = 300
 
+    # ── Cache (services/cache.py; the Cache page at /cache) ─────────────────
+    # Most datasets here change rarely, and the same prompt, question or CTE keeps recurring across
+    # General Chat and House Chat.  Three caches share one DuckDB-backed store, all keyed on a data
+    # fingerprint so a reloaded dataset can never be answered from stale rows:
+    #   prompt   - a temperature-0 model call replayed for an unchanged prompt (agents/llm_resilience.py)
+    #   semantic - an equivalent question: same planner concepts/tables/operation/scope (agents/tools.py)
+    #   sql      - an identical statement's result, including shared CTE work (db/duckdb_store.py)
+    cache_enabled: bool = True
+    cache_prompt_enabled: bool = True
+    cache_semantic_enabled: bool = True
+    cache_sql_enabled: bool = True
+    cache_ttl_s: float = 86400.0            # entries older than this stop matching (24 h); 0 disables caching
+    cache_max_entries: int = 5000           # per table; the least recently used rows are dropped beyond it
+    # How alike two questions must be to share a cached answer.  This is the SECOND gate: the planner
+    # signature (concepts + tables + operation + scope) must already match exactly.
+    cache_semantic_threshold: float = 0.85
+    cache_semantic_scan_limit: int = 400    # stored questions compared per lookup, newest first
+    cache_fingerprint_ttl_s: float = 3.0    # how long a computed data fingerprint is reused in-process
+
     # ── Observability / Phoenix ─────────────────────────────────────────────
     # Local Phoenix is open source and runs entirely on the developer machine.
     phoenix_enabled: bool = True
