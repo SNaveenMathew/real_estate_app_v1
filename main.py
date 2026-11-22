@@ -37,6 +37,7 @@ from api import (
     data_sources_router,
     map_layers_router,
     onboarding_router,
+    cache_router,
 )
 from api.common import (
     safe_value as _safe,
@@ -90,6 +91,7 @@ app.include_router(commute_router)
 app.include_router(data_sources_router)
 app.include_router(map_layers_router)
 app.include_router(onboarding_router)
+app.include_router(cache_router)
 
 # Prometheus metrics endpoint
 app.mount("/metrics", make_asgi_app(), name="metrics")
@@ -119,6 +121,14 @@ if static_dir.exists() and static_dir.is_dir():
         """The Data page: schema map, dataset upload, and review of proposed catalog changes."""
         html = (static_dir / "data.html").read_text(encoding="utf-8")
         ver = hashlib.sha1(b"".join((static_dir / n).read_bytes() for n in ("data.js", "data.css"))).hexdigest()[:10]
+        html = re.sub(r'(/static/[\w./-]+\.(?:js|css))(\?v=\w+)?', lambda m: f"{m.group(1)}?v={ver}", html)
+        return HTMLResponse(content=html, headers={"Cache-Control": "no-cache"})
+
+    @app.get("/cache", response_class=HTMLResponse)
+    async def cache_page():
+        """The Cache page: what has been reused, and how it connects to the data model."""
+        html = (static_dir / "cache.html").read_text(encoding="utf-8")
+        ver = hashlib.sha1(b"".join((static_dir / n).read_bytes() for n in ("cache.js", "cache.css"))).hexdigest()[:10]
         html = re.sub(r'(/static/[\w./-]+\.(?:js|css))(\?v=\w+)?', lambda m: f"{m.group(1)}?v={ver}", html)
         return HTMLResponse(content=html, headers={"Cache-Control": "no-cache"})
 
