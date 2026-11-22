@@ -14,6 +14,7 @@ from agents.house_agent import run_house_chat, PROGRESS_STEPS as HOUSE_PROGRESS_
 from agents.general_agent import run_general_chat, PROGRESS_STEPS as GENERAL_PROGRESS_STEPS
 from agents import llm_resilience, turn_runner, turn_progress
 from observability import phoenix_enabled
+from services import session_memory
 from api.common import ChatRequest
 
 router = APIRouter(tags=["chat"])
@@ -72,10 +73,14 @@ async def house_chat(house_id: str, req: ChatRequest):
         vs.upsert_description(house_id, req.message)  # enforces single description
         auto_saved = True
 
+    # The client's history wins when it sends one; otherwise the server's own transcript for this session/scope
+    # continues the conversation (services/session_memory.py).
+    history = session_memory.history_or(req.history, req.session_id, "house", house_id=house_id)
+
     _seed_progress(req.turn_id, HOUSE_PROGRESS_STEPS)
     try:
         reply, updated_history, artifacts = await turn_runner.run_turn(
-            run_house_chat, house_id, req.message, req.history, turn_id=req.turn_id
+            run_house_chat, house_id, req.message, history, turn_id=req.turn_id
         )
     except Exception as e:
         raise turn_failure(e)
@@ -83,6 +88,12 @@ async def house_chat(house_id: str, req: ChatRequest):
     # Prepend acknowledgment if we auto-saved
     if auto_saved and "thank" not in reply.lower()[:50]:
         reply = "Thank you for the property description — it has been saved. " + reply
+
+    try:
+        session_memory.append_turn(req.session_id, "house", req.message, reply,
+                                   house_id=house_id, turn_id=req.turn_id)
+    except Exception:
+        pass                      # memory is a convenience; the answer already exists
 
     trace_url = updated_history[-1].get("trace_url") if updated_history else None
     return {
@@ -98,6 +109,8 @@ async def house_chat(house_id: str, req: ChatRequest):
 @router.post("/api/chat")
 async def general_chat(req: ChatRequest):
     """General chat — cross-house, MSA, national risk questions."""
+    history = session_memory.history_or(req.history, req.session_id, "general")
+
     _seed_progress(req.turn_id, GENERAL_PROGRESS_STEPS)
     try:
         main_mod = sys.modules.get("main")
@@ -105,13 +118,19 @@ async def general_chat(req: ChatRequest):
         reply, updated_history, artifacts, observability = await turn_runner.run_turn(
             chat_fn,
             req.message,
-            req.history,
+            history,
             include_metadata=True,
             session_id=req.session_id,
             turn_id=req.turn_id,
         )
     except Exception as e:
         raise turn_failure(e)
+
+    try:
+        session_memory.append_turn(req.session_id, "general", req.message, reply, turn_id=req.turn_id)
+    except Exception:
+        pass                      # see house_chat
+
     return {
         "reply": reply,
         "history": updated_history,
