@@ -7,11 +7,20 @@ so the golden set's expected answers can be verified by inspection, not
 just trusted. golden_set.py imports the constants below instead of
 duplicating magic numbers, so the two files can't drift apart.
 
-Covers all four data sources the general agent draws on:
+Covers every data source the general agent draws on that can be faked
+honestly:
   - Redfin homes   (houses)
   - Sold homes     (sold_homes)
   - NRI            (nri_tracts)
   - Census         (census_tracts, census_msa, cbsa_counties)
+  - Crime          (crime_incidents; severity from services/crime_taxonomy.py)
+  - BikePGH        (bike_routes)
+  - FTA transit    (transit_agencies, transit_ridership, transit_routes)
+  - Commute        (house_commute)
+
+The last four exist so the golden set has a quality gate for crime, bike,
+transit and commute at all (recommendation 10). Their expected values are
+re-derived from this fixture by SQL in tests/test_eval_domain_coverage.py.
 
 Design choices worth knowing about when reading the golden set:
   - houses.msa_code is NULL for every house, matching real Redfin exports
@@ -28,6 +37,7 @@ Design choices worth knowing about when reading the golden set:
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import db.duckdb_store as store
@@ -115,6 +125,110 @@ PITTSBURGH_ARMS_LENGTH_AVG_SOLD_PRICE = 340000.0
 PITTSBURGH_AVG_SOLD_PRICE_WRONG_IF_FILTER_SKIPPED = 170000.5
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Crime, bike, transit and commute — the four capabilities that had no eval
+# coverage at all (audit §12, recommendation 10). Deliberately small: every
+# number below is checkable by eye, and tests/test_eval_domain_coverage.py
+# asserts each derived constant against a real SQL aggregate over this fixture.
+# ─────────────────────────────────────────────────────────────────────────
+
+CRIME_INCIDENTS = [
+    dict(incident_id="crime-pgh-assault", city="pittsburgh", raw_type="Aggravated Assault",
+         occurred_at="2024-03-04 21:10:00", lat=40.4406, lon=-79.9959, location_text="400 Block Forbes Ave"),
+    dict(incident_id="crime-pgh-burglary", city="pittsburgh", raw_type="Burglary",
+         occurred_at="2024-03-11 02:40:00", lat=40.4440, lon=-79.9900, location_text="100 Block Atwood St"),
+    dict(incident_id="crime-pgh-theft", city="pittsburgh", raw_type="Theft",
+         occurred_at="2024-04-02 13:05:00", lat=40.4380, lon=-80.0010, location_text="500 Block Craig St"),
+    dict(incident_id="crime-mia-homicide", city="miami", raw_type="Homicide",
+         occurred_at="2024-02-18 23:30:00", lat=25.7743, lon=-80.1937, location_text="200 Block NE 2nd Ave"),
+    dict(incident_id="crime-den-theft", city="denver", raw_type="Theft",
+         occurred_at="2024-05-09 16:45:00", lat=39.7392, lon=-104.9903, location_text="1500 Block Blake St"),
+]
+
+
+def _crime_category(raw_type: str) -> tuple[str, str, float]:
+    """Category, label and severity come from the app's own taxonomy, never from a number typed here."""
+    from services.crime_taxonomy import classify_crime_text
+    return classify_crime_text(raw_type)
+
+
+def _crime_weight(raw_type: str) -> float:
+    return _crime_category(raw_type)[2]
+
+
+CRIME_SEVERITY_WEIGHTS = [_crime_weight(c["raw_type"]) for c in CRIME_INCIDENTS]
+PITTSBURGH_CRIME_COUNT = sum(1 for c in CRIME_INCIDENTS if c["city"] == "pittsburgh")
+TOTAL_CRIME_COUNT = len(CRIME_INCIDENTS)
+CRIME_CITY_COUNT = len({c["city"] for c in CRIME_INCIDENTS})
+AVG_CRIME_SEVERITY_WEIGHT = round(sum(CRIME_SEVERITY_WEIGHTS) / len(CRIME_SEVERITY_WEIGHTS), 4)
+MIAMI_CRIME_SEVERITY_TOTAL = round(
+    sum(w for c, w in zip(CRIME_INCIDENTS, CRIME_SEVERITY_WEIGHTS) if c["city"] == "miami"), 4
+)
+
+# BikePGH-style line geometry. Three segments in Pittsburgh prove the city filter,
+# one in Denver proves the table is not Pittsburgh-only.
+BIKE_ROUTES = [
+    dict(route_id="bike-pgh-lane-1", city="pittsburgh", layer_type="bike_lane", layer_label="Bike Lanes",
+         color="#2e7d32", geometry=[[-79.9959, 40.4406], [-79.9900, 40.4450]]),
+    dict(route_id="bike-pgh-lane-2", city="pittsburgh", layer_type="bike_lane", layer_label="Bike Lanes",
+         color="#2e7d32", geometry=[[-79.9800, 40.4380], [-79.9750, 40.4420]]),
+    dict(route_id="bike-pgh-trail-1", city="pittsburgh", layer_type="trail", layer_label="Trails",
+         color="#1565c0", geometry=[[-80.0100, 40.4300], [-80.0000, 40.4360]]),
+    dict(route_id="bike-den-lane-1", city="denver", layer_type="bike_lane", layer_label="Bike Lanes",
+         color="#2e7d32", geometry=[[-104.9903, 39.7392], [-104.9850, 39.7430]]),
+]
+TOTAL_BIKE_ROUTE_COUNT = len(BIKE_ROUTES)
+PITTSBURGH_BIKE_ROUTE_COUNT = sum(1 for b in BIKE_ROUTES if b["city"] == "pittsburgh")
+
+# FTA National Transit Database rows: two agencies, four months of ridership.
+TRANSIT_AGENCIES = [
+    dict(ntd_id="30001", agency="Pittsburgh Regional Transit", mode="MB", tos="DO",
+         hq_city="Pittsburgh", hq_state="PA", uza_name="Pittsburgh, PA", msa_code="38300"),
+    dict(ntd_id="30002", agency="Regional Transportation District", mode="MB", tos="DO",
+         hq_city="Denver", hq_state="CO", uza_name="Denver--Aurora, CO", msa_code="19740"),
+]
+TRANSIT_AGENCY_COUNT = len(TRANSIT_AGENCIES)
+TRANSIT_RIDERSHIP = [
+    dict(ntd_id="30001", agency="Pittsburgh Regional Transit", mode="MB", tos="DO", msa_code="38300",
+         date="2024-01-01", year=2024, month=1, upt=100000.0),
+    dict(ntd_id="30001", agency="Pittsburgh Regional Transit", mode="MB", tos="DO", msa_code="38300",
+         date="2024-02-01", year=2024, month=2, upt=120000.0),
+    dict(ntd_id="30002", agency="Regional Transportation District", mode="MB", tos="DO", msa_code="19740",
+         date="2024-01-01", year=2024, month=1, upt=50000.0),
+    dict(ntd_id="30002", agency="Regional Transportation District", mode="MB", tos="DO", msa_code="19740",
+         date="2024-02-01", year=2024, month=2, upt=60000.0),
+]
+TOTAL_TRANSIT_RIDERSHIP = sum(r["upt"] for r in TRANSIT_RIDERSHIP)          # 330,000
+TRANSIT_RIDERSHIP_BY_AGENCY = {
+    agency: sum(r["upt"] for r in TRANSIT_RIDERSHIP if r["agency"] == agency)
+    for agency in {r["agency"] for r in TRANSIT_RIDERSHIP}
+}
+TOP_RIDERSHIP_AGENCY = max(TRANSIT_RIDERSHIP_BY_AGENCY, key=TRANSIT_RIDERSHIP_BY_AGENCY.get)
+
+TRANSIT_ROUTES = [
+    dict(route_uid="tr-pgh-1", route_id="61A", ntd_id="30001", route_short_name="61A",
+         route_long_name="Braddock-Squirrel Hill", route_type="3", route_type_name="Bus",
+         geometry=[[-79.9959, 40.4406], [-79.9400, 40.4380]]),
+    dict(route_uid="tr-pgh-2", route_id="P1", ntd_id="30001", route_short_name="P1",
+         route_long_name="East Busway", route_type="3", route_type_name="Bus",
+         geometry=[[-79.9959, 40.4406], [-79.9200, 40.4420]]),
+]
+TRANSIT_ROUTE_COUNT = len(TRANSIT_ROUTES)
+
+# Commute estimates for two houses to one work location ("ok" is the status
+# services/commute.py writes for a complete row).
+COMMUTE_ROWS = [
+    dict(house_id="h1", work_key="fixture-office", work_label="Office", drive_min=22.0, drive_miles=5.0,
+         bike_min=35.0, bike_miles=4.5, walk_min=60.0, walk_miles=4.0, transit_min=40.0,
+         transit_transfers=1, straight_line_miles=4.0, status="ok", source="fixture"),
+    dict(house_id="h3", work_key="fixture-office", work_label="Office", drive_min=18.0, drive_miles=4.2,
+         bike_min=30.0, bike_miles=3.8, walk_min=55.0, walk_miles=3.5, transit_min=35.0,
+         transit_transfers=0, straight_line_miles=3.4, status="ok", source="fixture"),
+]
+AVG_DRIVE_TIME_TO_WORK = round(sum(r["drive_min"] for r in COMMUTE_ROWS) / len(COMMUTE_ROWS), 4)   # 20.0
+SHORTEST_BIKE_COMMUTE = min(r["bike_min"] for r in COMMUTE_ROWS)                                    # 30.0
+
+
 def build_fixture(db_path: Path) -> None:
     """(Re)build the evaluation fixture database at db_path from scratch."""
     if db_path.exists():
@@ -191,6 +305,70 @@ def build_fixture(db_path: Path) -> None:
              s["metro"] or "Unknown", METROS.get(s["metro"], {}).get("state", "??"), "00000",
              float(s["sold_price"]), "2024-06-01", 1500.0, s["is_arms_length"],
              tract_fips, county_fips, s["geocode_status"]],
+        )
+
+    # ── crime_incidents ──────────────────────────────────────────────────
+    for c in CRIME_INCIDENTS:
+        category, label, weight = _crime_category(c["raw_type"])
+        occurred = c["occurred_at"]
+        conn.execute(
+            "INSERT INTO crime_incidents (incident_id, city, source_file, occurred_at, year, month, year_month, "
+            "lat, lon, category, category_label, severity_weight, raw_type, location_text) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [c["incident_id"], c["city"], "eval_fixture.csv", occurred, int(occurred[:4]), int(occurred[5:7]),
+             occurred[:7], c["lat"], c["lon"], category, label, weight, c["raw_type"], c["location_text"]],
+        )
+
+    # ── bike_routes ──────────────────────────────────────────────────────
+    for b in BIKE_ROUTES:
+        lons = [point[0] for point in b["geometry"]]
+        lats = [point[1] for point in b["geometry"]]
+        conn.execute(
+            "INSERT INTO bike_routes (route_id, city, layer_type, layer_label, color, source_file, "
+            "min_lon, min_lat, max_lon, max_lat, geometry_json, properties_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [b["route_id"], b["city"], b["layer_type"], b["layer_label"], b.get("color"), "eval_fixture.geojson",
+             min(lons), min(lats), max(lons), max(lats),
+             json.dumps({"type": "LineString", "coordinates": b["geometry"]}),
+             json.dumps({"layer": b["layer_type"]})],
+        )
+
+    # ── transit agencies / ridership / routes ─────────────────────────────
+    for a in TRANSIT_AGENCIES:
+        conn.execute(
+            "INSERT INTO transit_agencies (ntd_id, agency, mode, tos, hq_city, hq_state, uza_name, msa_code) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [a["ntd_id"], a["agency"], a["mode"], a["tos"], a["hq_city"], a["hq_state"],
+             a["uza_name"], a["msa_code"]],
+        )
+    for r in TRANSIT_RIDERSHIP:
+        conn.execute(
+            "INSERT INTO transit_ridership (ntd_id, agency, mode, tos, msa_code, date, year, month, upt) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [r["ntd_id"], r["agency"], r["mode"], r["tos"], r["msa_code"], r["date"],
+             r["year"], r["month"], r["upt"]],
+        )
+    for t in TRANSIT_ROUTES:
+        lons = [point[0] for point in t["geometry"]]
+        lats = [point[1] for point in t["geometry"]]
+        conn.execute(
+            "INSERT INTO transit_routes (route_uid, route_id, ntd_id, route_short_name, route_long_name, "
+            "route_type, route_type_name, min_lon, min_lat, max_lon, max_lat, geometry_json, properties_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [t["route_uid"], t["route_id"], t["ntd_id"], t["route_short_name"], t["route_long_name"],
+             t["route_type"], t["route_type_name"], min(lons), min(lats), max(lons), max(lats),
+             json.dumps({"type": "LineString", "coordinates": t["geometry"]}), "{}"],
+        )
+
+    # ── house_commute ─────────────────────────────────────────────────────
+    for row in COMMUTE_ROWS:
+        conn.execute(
+            "INSERT INTO house_commute (house_id, work_key, work_label, drive_min, drive_miles, bike_min, "
+            "bike_miles, walk_min, walk_miles, transit_min, transit_transfers, straight_line_miles, status, source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [row["house_id"], row["work_key"], row["work_label"], row["drive_min"], row["drive_miles"],
+             row["bike_min"], row["bike_miles"], row["walk_min"], row["walk_miles"], row["transit_min"],
+             row["transit_transfers"], row["straight_line_miles"], row["status"], row["source"]],
         )
 
     store.close()

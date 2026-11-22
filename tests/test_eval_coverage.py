@@ -8,7 +8,7 @@ from eval.scoring import ScoreResult
 
 
 def test_the_set_covers_the_robustness_categories():
-    assert len(GOLDEN_SET) == 76
+    assert len(GOLDEN_SET) == 88
     ids = [e.id for e in GOLDEN_SET]
     assert len(set(ids)) == len(ids)
     tags = Counter(tag for e in GOLDEN_SET for tag in e.tags)
@@ -16,6 +16,10 @@ def test_the_set_covers_the_robustness_categories():
     assert tags["guardrails"] >= 5           # injection attempts
     assert tags["multi_turn"] >= 5           # follow-ups that need the prior turn
     assert tags["limits"] >= 3               # questions that cannot be answered in full
+    assert tags["crime"] >= 4                # recommendation 10: tables that used to have no examples
+    assert tags["bike"] >= 2
+    assert tags["transit"] >= 4
+    assert tags["commute"] >= 2
 
 
 def test_history_turns_are_well_formed():
@@ -47,7 +51,7 @@ def test_the_report_records_the_command_ids_and_judge(tmp_path, monkeypatch):
     md = next(tmp_path.glob("report-*.md")).read_text(encoding="utf-8")
     assert "run_eval.py --tags nri" in md
     assert "independent-judge" in md
-    assert "**partial run:** 2 of 76" in md
+    assert "**partial run:** 2 of 88" in md
 
     payload = json.loads(next(tmp_path.glob("report-*.json")).read_text(encoding="utf-8"))
     assert payload["command"] == meta["command"]
