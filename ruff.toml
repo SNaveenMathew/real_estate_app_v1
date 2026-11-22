@@ -1,0 +1,33 @@
+# Ruff configuration for the CI lint gate (.github/workflows/ci.yml).
+#
+# The selection is Ruff's default rule set: syntax errors, undefined names and the
+# pyflakes family (unused imports/variables, accidental redefinitions, broken
+# f-strings) — the mistakes that reach production as a crash or dead code rather
+# than a style debate. It is not a formatter and it does not reorder imports.
+#
+# The `ignore` list is pre-existing debt, recorded here in one place the same way
+# tests/golden/catalog_lint_baseline.json records pre-existing catalog findings:
+# a NEW finding fails CI, and entries come off this list as the code is cleaned up.
+# Adding an entry to turn a red build green is the thing this gate exists to stop.
+#
+#   python -m ruff check .        # what CI runs
+#   python -m ruff check . --fix  # safe fixes only
+
+target-version = "py313"
+line-length = 120
+
+[lint]
+select = ["E4", "E7", "E9", "F"]
+ignore = [
+    "E401", # multiple imports on one line — db/duckdb_store.py module header
+    "E402", # import not at top of file — sys.path / settings setup must run first
+    "E701", # multiple statements on one line (colon)
+    "E702", # multiple statements on one line (semicolon)
+    "E712", # comparison to True/False — reads like the SQL it mirrors
+    "E731", # lambda assignment
+    "E741", # ambiguous variable name (l/I/O)
+    "F401", # unused import — several imports exist for registration side effects
+    "F541", # f-string without placeholders
+    "F811", # redefinition — pytest fixtures legitimately shadow same-named imports
+    "F841", # unused local variable
+]

@@ -192,6 +192,7 @@ async def route_transit(
     actual_route_miles = 0.0
     segments = []
     current_line = None
+    current_meta = None
     current_seg_dist = 0.0
 
     for pa, pb in zip(path, path[1:]):

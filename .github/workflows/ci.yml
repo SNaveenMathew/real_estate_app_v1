@@ -1,0 +1,57 @@
+name: CI
+
+# Every guarantee this repository relies on (catalog integrity, golden plans, the
+# test suite) used to depend on somebody remembering to run it. This workflow is
+# that memory: the same four commands README §"Adding a dataset or a concept" and
+# AGENT_ARCHITECTURE §"Adding a dataset" already tell a human to run.
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: lint + catalog + plans + pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PYTHONUNBUFFERED: "1"
+      # Tracing is optional (README §Troubleshooting); no collector runs in CI, and
+      # its absence must never block or slow a test.
+      PHOENIX_ENABLED: "false"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      # Fast gates first: a lint or catalog failure should not wait for the suite.
+      - name: Ruff
+        run: python -m ruff check .
+
+      # Its own throw-away database: an empty data/real_estate.duckdb left behind
+      # here would defeat the "was data included in this build?" skip in
+      # tests/test_map_layers.py and fail those tests against no data.
+      - name: Catalog lint
+        env:
+          DUCKDB_PATH: ${{ runner.temp }}/catalog_lint.duckdb
+        run: python -m db.catalog_lint
+
+      - name: Golden plan battery
+        run: python scripts/plan_battery.py --check
+
+      - name: pytest
+        run: python -m pytest tests eval/tests -q
