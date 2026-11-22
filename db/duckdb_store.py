@@ -17,6 +17,18 @@ _conn: Optional[duckdb.DuckDBPyConnection] = None
 
 _generation: int = 0   # bumped every time a new connection is opened (see connection_generation)
 
+# How many times a corrupt/un-repayable .wal has been quarantined in this process. Nine such
+# files sit in data/ from before this counter existed; without a number the recovery is silent
+# and "the database is fine" is an assumption rather than an observation.
+_wal_recoveries: int = 0
+_recovery_lock = threading.Lock()
+
+
+def wal_recovery_count() -> int:
+    """Number of WAL quarantines this process performed (0 on a healthy start)."""
+    with _recovery_lock:
+        return _wal_recoveries
+
 
 def _safe_connect(db_path: Path) -> duckdb.DuckDBPyConnection:
     """Connect to DuckDB, automatically recovering if a corrupt or un-repayable WAL file is present."""
@@ -35,6 +47,9 @@ def _safe_connect(db_path: Path) -> duckdb.DuckDBPyConnection:
             )
             try:
                 wal_path.rename(bad_wal)
+                global _wal_recoveries
+                with _recovery_lock:
+                    _wal_recoveries += 1
             except Exception:
                 pass
             conn = duckdb.connect(str(db_path))
@@ -1486,6 +1501,20 @@ def get_top_msas_by_population(n: int = 50) -> list[dict]:
         ORDER BY m.population DESC
         LIMIT {n}
     """)
+
+
+def checkpoint(db_path: Path | None = None) -> None:
+    """Flush the write-ahead log into the database file, then disconnect.
+
+    ``close()`` does this for the process's own connection on shutdown; this is the
+    standalone form the backup command uses on a database nobody else has open.
+    """
+    target = Path(db_path) if db_path is not None else settings.duckdb_path
+    conn = duckdb.connect(str(target))
+    try:
+        conn.execute("CHECKPOINT")
+    finally:
+        conn.close()
 
 
 def close():

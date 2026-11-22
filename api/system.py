@@ -15,6 +15,7 @@ def stats():
     houses = store.query("SELECT COUNT(*) as n FROM houses").iloc[0]["n"]
     tracts = store.query("SELECT COUNT(*) as n FROM nri_tracts").iloc[0]["n"]
     sold = store.query("SELECT COUNT(*) as n FROM sold_homes").iloc[0]["n"]
+    wal_recoveries = store.wal_recovery_count()
     crime = store.query("SELECT COUNT(*) as n FROM crime_incidents").iloc[0]["n"]
     docs = vs.collection_count()
     return {
@@ -23,6 +24,7 @@ def stats():
         "sold_homes": int(sold),
         "crime_incidents": int(crime),
         "vector_documents": docs,
+        "wal_recoveries": wal_recoveries,
     }
 
 
