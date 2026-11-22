@@ -149,6 +149,77 @@ TABLES = {
         setup_hint="Set a work location on the Commute tab to populate commute estimates for every house.",
         hidden_columns=("work_key",), grain="one row per house, for the current work location",
     ),
+    "transit_agencies": TableMeta(
+        "transit_agencies", "Federal Transit Administration (FTA) National Transit Database (NTD) transit agencies, modes, service statistics, expenses, and fares.",
+        grain="one row per transit agency, mode, and type of service",
+        column_notes=(
+            ColumnNote("ntd_id", "5-digit zero-padded NTD agency ID."),
+            ColumnNote("agency", "Transit agency name, e.g. 'Pittsburgh Regional Transit' or 'King County Metro'."),
+            ColumnNote("mode", "2-letter transit mode code: MB (Bus), LR (Light Rail), HR (Heavy Rail/Subway), CR (Commuter Rail), DR (Demand Response), FB (Ferryboat)."),
+            ColumnNote("tos", "Type of service: DO (Directly Operated) or PT (Purchased Transportation)."),
+            ColumnNote("hq_city", "Agency headquarters city."),
+            ColumnNote("hq_state", "Agency headquarters 2-letter state code."),
+            ColumnNote("uza_name", "Urbanized area name."),
+            ColumnNote("msa_code", "Resolved CBSA/MSA code; joins census_msa.msa_code."),
+            ColumnNote("uza_population", "Population of the urbanized area."),
+            ColumnNote("operating_expenses", "Total annual operating expenses in dollars ($)."),
+            ColumnNote("fare_revenues", "Total annual fare revenues in dollars ($)."),
+            ColumnNote("avg_cost_per_trip", "Average operating cost per passenger trip ($)."),
+            ColumnNote("avg_fares_per_trip", "Average fare revenue collected per passenger trip ($)."),
+        ),
+    ),
+    "transit_ridership": TableMeta(
+        "transit_ridership", "Monthly transit ridership (unlinked passenger trips - UPT) by agency, mode, and month (2002–2026).",
+        grain="one row per agency, mode, type of service, and month",
+        column_notes=(
+            ColumnNote("ntd_id", "5-digit zero-padded NTD agency ID; joins transit_agencies.ntd_id."),
+            ColumnNote("agency", "Transit agency name."),
+            ColumnNote("mode", "Transit mode code (MB, LR, HR, CR, etc.)."),
+            ColumnNote("tos", "Type of service (DO or PT)."),
+            ColumnNote("msa_code", "Resolved CBSA/MSA code; joins census_msa.msa_code."),
+            ColumnNote("date", "First day of the reporting month (YYYY-MM-01)."),
+            ColumnNote("year", "Reporting calendar year."),
+            ColumnNote("month", "Reporting calendar month (1–12)."),
+            ColumnNote("upt", "Unlinked passenger trips (monthly ridership count). Sum over a year for annual ridership."),
+        ),
+    ),
+    "transit_safety": TableMeta(
+        "transit_safety", "FTA NTD Safety and Security (S&S) time series: threshold-adjusted monthly/annual safety incidents, collisions, injuries, and fatalities.",
+        grain="one row per year, agency, mode, and type of service",
+        column_notes=(
+            ColumnNote("year", "Observation calendar year."),
+            ColumnNote("ntd_id", "5-digit zero-padded NTD agency ID; joins transit_agencies.ntd_id."),
+            ColumnNote("agency", "Transit agency name."),
+            ColumnNote("mode", "Transit mode code."),
+            ColumnNote("tos", "Type of service."),
+            ColumnNote("city", "Agency reporting city."),
+            ColumnNote("state", "Agency reporting state."),
+            ColumnNote("uza_name", "Urbanized area name."),
+            ColumnNote("msa_code", "Resolved CBSA/MSA code; joins census_msa.msa_code."),
+            ColumnNote("event_total", "Total safety and security events."),
+            ColumnNote("collision_total", "Total collision events."),
+            ColumnNote("derailment_total", "Total derailment events."),
+            ColumnNote("fire_total", "Total fire events."),
+            ColumnNote("security_total", "Total security/crime events on transit."),
+            ColumnNote("transit_worker_assault_events", "Assault/homicide events involving transit workers."),
+            ColumnNote("total_fatalities", "Total fatalities across passengers, employees, and public."),
+            ColumnNote("total_injuries", "Total injuries across passengers, employees, and public."),
+            ColumnNote("serious_injuries", "Count of serious injuries."),
+        ),
+    ),
+    "transit_routes": TableMeta(
+        "transit_routes", "National Transit Map nationwide transit routes with geospatial line features (bus, rail, subway, light rail, ferry).",
+        grain="one row per route shape line feature",
+        column_notes=(
+            ColumnNote("route_uid", "Unique identifier for this route shape feature."),
+            ColumnNote("route_id", "Agency route identifier (e.g. '61C', 'Blue Line')."),
+            ColumnNote("ntd_id", "5-digit zero-padded NTD agency ID; joins transit_agencies.ntd_id."),
+            ColumnNote("route_short_name", "Route short display name or number (e.g. '61C')."),
+            ColumnNote("route_long_name", "Route full descriptive name."),
+            ColumnNote("route_type_name", "Transit mode: Bus, Rail, Tram/Light rail, Subway/Metro, Ferry, etc."),
+            ColumnNote("route_color", "Hex color code representing the transit route on maps."),
+        ),
+    ),
 }
 
 RELATIONSHIPS = [
@@ -175,6 +246,16 @@ RELATIONSHIPS = [
     Relationship("houses", "zip", "market_heat_index", "region_name", "House ZIP to zip-level Market Heat Index (filter market_heat_index.region_type = 'zip').", "one-to-many", grain_effect="house -> zip-month series"),
     Relationship("houses", "msa_code", "market_heat_index", "msa_code", "House metro to metro-level Market Heat Index (filter market_heat_index.region_type = 'metro').", "one-to-many", grain_effect="house -> metro-month series"),
     Relationship("census_msa", "msa_code", "market_heat_index", "msa_code", "MSA to metro-level Market Heat Index (filter market_heat_index.region_type = 'metro').", "one-to-many", grain_effect="MSA -> metro-month series"),
+    # Transit relationships
+    Relationship("transit_routes", "ntd_id", "transit_agencies", "ntd_id", "Route to agency identity join.", "many-to-one", grain_effect="route -> agency"),
+    Relationship("transit_ridership", "ntd_id", "transit_agencies", "ntd_id", "Monthly ridership to agency identity join.", "many-to-one", grain_effect="ridership series -> agency"),
+    Relationship("transit_safety", "ntd_id", "transit_agencies", "ntd_id", "Safety time series to agency identity join.", "many-to-one", grain_effect="safety series -> agency"),
+    Relationship("transit_agencies", "msa_code", "census_msa", "msa_code", "Transit agency to Census MSA metro join.", "many-to-one", grain_effect="agency -> MSA"),
+    Relationship("transit_agencies", "msa_code", "cbsa_counties", "cbsa_code", "Transit agency to CBSA constituent counties bridge.", "one-to-many", bridge=True, grain_effect="agency -> counties"),
+    Relationship("transit_ridership", "msa_code", "census_msa", "msa_code", "Transit ridership to Census MSA metro join.", "many-to-one", grain_effect="ridership series -> MSA"),
+    Relationship("transit_safety", "msa_code", "census_msa", "msa_code", "Transit safety metrics to Census MSA metro join.", "many-to-one", grain_effect="safety series -> MSA"),
+    Relationship("houses", "city", "transit_agencies", "hq_city", "Contextual city-level link between houses and transit agency headquarters.", "many-to-many", confidence="medium", preferred=False),
+    Relationship("houses", "msa_code", "transit_agencies", "msa_code", "Contextual metro-level link between houses and transit agencies in the same CBSA.", "many-to-many", confidence="medium", preferred=False),
 ]
 
 # ---------------------------------------------------------------------------
@@ -250,6 +331,88 @@ SEMANTIC_GLOSSARY.update({
     "history": _concept("history", ["house_snapshots"], ["price history", "listing history", "historical price", "price changes", "price cuts"], "Historical listing/sale observations.", columns=("house_snapshots.snapshot_date", "house_snapshots.price"), grain="snapshot"),
     "zhvi": _concept("zhvi", ["zhvi"], ["zhvi", "home value index", "zillow home value index", "home value trend", "typical home value"], "Zillow Home Value Index (ZHVI): smoothed, seasonally-adjusted typical home value by region and month, at whichever geography level (zip/metro/state/etc.) is loaded — filter region_type for a single level.", columns=("zhvi.home_value",), operations=(AVG("zhvi.home_value"), MEDIAN("zhvi.home_value"), MIN("zhvi.home_value"), MAX("zhvi.home_value"), RANK_DESC("zhvi.home_value"), RANK_ASC("zhvi.home_value")), grain="region-month"),
     "market_heat_index": _concept("market_heat_index", ["market_heat_index"], ["market heat index", "zillow heat index", "buyer's market", "seller's market", "market temperature"], "Zillow Market Heat Index: buyer/seller market temperature (~0-100+) by region and month; higher is more seller-favorable. Mixed geography levels — filter region_type for a single level.", columns=("market_heat_index.heat_index",), operations=(AVG("market_heat_index.heat_index"), MEDIAN("market_heat_index.heat_index"), MIN("market_heat_index.heat_index"), MAX("market_heat_index.heat_index"), RANK_DESC("market_heat_index.heat_index"), RANK_ASC("market_heat_index.heat_index")), grain="region-month"),
+    # Transit concepts
+    "transit_ridership": _concept(
+        "transit_ridership", ["transit_ridership"],
+        ["transit ridership", "public transit ridership", "bus ridership", "rail ridership",
+         "subway ridership", "transit passenger trips", "unlinked passenger trips",
+         "monthly transit ridership", "annual transit ridership", "transit trip count"],
+        "Unlinked passenger trips (monthly ridership count) by transit agency and mode.",
+        columns=("transit_ridership.upt", "transit_ridership.agency"),
+        operations=(
+            SUM("transit_ridership.upt"), AVG("transit_ridership.upt"),
+            RANK_DESC("SUM(transit_ridership.upt)", group_by="transit_ridership.agency"),
+            RANK_ASC("SUM(transit_ridership.upt)", group_by="transit_ridership.agency"),
+        ),
+        grain="agency-month", groupings=("transit_ridership.agency", "transit_ridership.year"),
+    ),
+    "transit_safety_events": _concept(
+        "transit_safety_events", ["transit_safety"],
+        ["transit safety events", "transit safety incidents", "transit collisions", "transit accidents",
+         "transit derailments", "transit fires", "transit safety records"],
+        "FTA NTD threshold-adjusted safety and security events on transit.",
+        columns=("transit_safety.event_total", "transit_safety.collision_total"),
+        operations=(
+            SUM("transit_safety.event_total"), SUM("transit_safety.collision_total"),
+            RANK_DESC("SUM(transit_safety.event_total)", group_by="transit_safety.agency"),
+        ),
+        grain="agency-year", groupings=("transit_safety.agency", "transit_safety.year"),
+    ),
+    "transit_fatalities": _concept(
+        "transit_fatalities", ["transit_safety"],
+        ["transit fatalities", "transit deaths", "public transit fatalities", "fatal transit accidents"],
+        "Fatalities reported on transit systems across passengers, employees, and public.",
+        columns=("transit_safety.total_fatalities",),
+        operations=(
+            SUM("transit_safety.total_fatalities"),
+            RANK_DESC("SUM(transit_safety.total_fatalities)", group_by="transit_safety.agency"),
+        ),
+        grain="agency-year", groupings=("transit_safety.agency", "transit_safety.year"),
+    ),
+    "transit_injuries": _concept(
+        "transit_injuries", ["transit_safety"],
+        ["transit injuries", "public transit injuries", "transit worker injuries", "transit serious injuries"],
+        "Injuries and serious injuries reported on public transit systems.",
+        columns=("transit_safety.total_injuries", "transit_safety.serious_injuries"),
+        operations=(
+            SUM("transit_safety.total_injuries"), SUM("transit_safety.serious_injuries"),
+            RANK_DESC("SUM(transit_safety.total_injuries)", group_by="transit_safety.agency"),
+        ),
+        grain="agency-year", groupings=("transit_safety.agency", "transit_safety.year"),
+    ),
+    "transit_operating_expenses": _concept(
+        "transit_operating_expenses", ["transit_agencies"],
+        ["transit operating expenses", "transit operating cost", "transit agency budget", "transit cost per trip"],
+        "Annual operating expenses and average cost per trip for transit agencies.",
+        columns=("transit_agencies.operating_expenses", "transit_agencies.avg_cost_per_trip"),
+        operations=(
+            SUM("transit_agencies.operating_expenses"), AVG("transit_agencies.avg_cost_per_trip"),
+            RANK_DESC("SUM(transit_agencies.operating_expenses)", group_by="transit_agencies.agency"),
+        ),
+        grain="agency", groupings=("transit_agencies.agency",),
+    ),
+    "transit_fare_revenues": _concept(
+        "transit_fare_revenues", ["transit_agencies"],
+        ["transit fare revenues", "transit fare revenue", "transit ticket revenue", "transit farebox revenue", "transit fares collected"],
+        "Annual fare revenues and average fare collected per passenger trip.",
+        columns=("transit_agencies.fare_revenues", "transit_agencies.avg_fares_per_trip"),
+        operations=(
+            SUM("transit_agencies.fare_revenues"), AVG("transit_agencies.avg_fares_per_trip"),
+            RANK_DESC("SUM(transit_agencies.fare_revenues)", group_by="transit_agencies.agency"),
+        ),
+        grain="agency", groupings=("transit_agencies.agency",),
+    ),
+    "transit_routes": _concept(
+        "transit_routes", ["transit_routes"],
+        ["transit routes", "transit route count", "number of transit routes", "public transit routes"],
+        "National Transit Map transit route lines.",
+        columns=("transit_routes.route_id", "transit_routes.route_short_name"),
+        operations=(
+            COUNT("transit_routes.route_uid"),
+            {"op": "distinct", "aliases": ["list of transit routes", "which transit routes"], "expr": "transit_routes.route_short_name"},
+        ),
+        grain="route",
+    ),
 })
 
 # Commute concepts. Each mode phrase (e.g. "bike commute") textually contains the generic
@@ -429,6 +592,8 @@ ENTITY_DOMAINS = (
     EntityDomain("tract_fips", "census_tracts", "tract_fips", "tract_fips", "Census tract identifiers", match_mode="exact", preferred_for=("census_tract_population",)),
     EntityDomain("nri_tract_fips", "nri_tracts", "tract_fips", "tract_fips", "NRI tract identifiers", match_mode="exact", preferred_for=("nri_overall_risk", "nri_riverine_flood")),
     EntityDomain("sold_tract_fips", "sold_homes", "tract_fips", "tract_fips", "Sold-home tract identifiers when geocoded", match_mode="exact", preferred_for=("sold_price", "arms_length_sale")),
+    EntityDomain("transit_agency_name", "transit_agencies", "agency", "agency", "Transit agency names", match_mode="components", preferred_for=("transit_ridership", "transit_safety_events", "transit_operating_expenses", "transit_fare_revenues")),
+    EntityDomain("transit_mode", "transit_agencies", "mode", "transit_mode", "Transit mode codes (MB, LR, HR, CR, DR, FB)", match_mode="exact", preferred_for=("transit_ridership", "transit_safety_events")),
 )
 
 # Display grouping for the Data page's schema map (metadata, not routing).
@@ -442,6 +607,10 @@ SEED_DOMAINS = {
     "sold_homes": "sales",
     "crime_incidents": "safety",
     "bike_routes": "mobility",
+    "transit_agencies": "transit",
+    "transit_ridership": "transit",
+    "transit_safety": "transit",
+    "transit_routes": "transit",
     "zhvi": "housing",
     "market_heat_index": "housing",
     "geocode_cache": "system",
