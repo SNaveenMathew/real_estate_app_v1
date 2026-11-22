@@ -7,6 +7,7 @@ Unit and integration tests for the Federal Transit Administration (FTA) datasets
 - API endpoint POST /api/transit/route
 - Agent tool find_transit_route
 """
+
 import json
 import pytest
 from fastapi.testclient import TestClient
@@ -17,6 +18,11 @@ from services.transit_routing import route_transit
 from api.common import TransitRouteRequest
 from agents.tools import find_transit_route
 from main import app
+
+# This module asserts against the real data/real_estate.duckdb (row counts, live catalog
+# tables). It is marked integration so plain `pytest` is green without it; `pytest -m
+# integration` runs it.
+pytestmark = pytest.mark.integration
 
 
 @pytest.fixture(scope="module")
@@ -86,7 +92,7 @@ class TestTransitCatalog:
             SELECT name FROM catalog_tables
             WHERE name IN ('transit_agencies', 'transit_ridership', 'transit_safety', 'transit_routes')
         """)["name"].tolist()
-        expected = {'transit_agencies', 'transit_ridership', 'transit_safety', 'transit_routes'}
+        expected = {"transit_agencies", "transit_ridership", "transit_safety", "transit_routes"}
         assert expected.issubset(set(tables))
 
     def test_catalog_relationships_registered(self):
