@@ -53,5 +53,10 @@ jobs:
       - name: Golden plan battery
         run: python scripts/plan_battery.py --check
 
+      # docs/REFERENCE.md and eval/CAPABILITY_MATRIX.md are rendered from the app, the approved-function
+      # registry and the eval set. A new route or example without a regenerated document fails here.
+      - name: Generated docs
+        run: python scripts/gen_docs_tables.py --check
+
       - name: pytest
         run: python -m pytest tests eval/tests -q
