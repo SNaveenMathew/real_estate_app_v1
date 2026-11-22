@@ -4,7 +4,7 @@ A screenshot-led tour of the map, house views, and chat workflows. For the proje
 overview and complete technical and setup documentation, see the [README](README.md).
 
 > **About the screenshots in this guide.** These were captured from the local application
-> and database on September 27, 2026 (with transit routing and layers added in November 2026).
+> and database on September 27, 2026 (with transit routing and layers, and the thinking-process panel, added in November 2026).
 > At capture time the database contained 1,778 houses, 85,154 NRI records, 450 bike routes,
 > ~5.9 M ZHVI rows, ~80 K Market Heat Index rows, and 76,687 National Transit Map routes.
 > Your screens will vary with the data loaded in your own database. Some views below
@@ -20,14 +20,15 @@ overview and complete technical and setup documentation, see the [README](README
 3. [The house sidebar](#the-house-sidebar)
 4. [House Chat](#house-chat)
 5. [General Chat](#general-chat)
-6. [Map layers](#map-layers)
-7. [Bike route planner](#bike-route-planner)
-8. [Transit routes & route planner](#transit-routes--route-planner)
-9. [Commute times](#commute-times)
-10. [The Data page](#the-data-page)
-11. [Keeping data fresh](#keeping-data-fresh)
-12. [Troubleshooting](#troubleshooting)
-13. [Privacy](#privacy)
+6. [Thinking process](#thinking-process)
+7. [Map layers](#map-layers)
+8. [Bike route planner](#bike-route-planner)
+9. [Transit routes & route planner](#transit-routes--route-planner)
+10. [Commute times](#commute-times)
+11. [The Data page](#the-data-page)
+12. [Keeping data fresh](#keeping-data-fresh)
+13. [Troubleshooting](#troubleshooting)
+14. [Privacy](#privacy)
 
 ---
 
@@ -124,6 +125,25 @@ you've loaded — not just the one you have open.
 
 For example questions and supported query areas, see the README's [Usage Guide](README.md#usage-guide)
 and [capability matrix](README.md#capability-matrix).
+
+---
+
+## Thinking process
+
+Both chats can show their working. The **🧠 Thinking** button in the top bar opens the **Thinking Process**
+panel; sending a message in General Chat or House Chat opens it for you and it updates while the agent runs.
+
+![The Thinking Process side panel showing every step of a General Chat run completed, beside the answer and its table](screenshots/15-llm-thinking-progress.png)
+
+- Each agent shows the steps it will actually run, so the list is different per chat:
+  **Query Planning → Data Model Retrieval → Code Generation → Code Execution → Answer Synthesis** in
+  General Chat, and **Property Analysis → Code Generation → Code Execution → Answer Synthesis** in House Chat.
+- The list advances as the turn advances: `●` is the step running now, `✓` a step that finished, `o` a step
+  still to come, and `✗` a step that failed.
+- It begins at **● Starting**, turns that into **✓ Started** once the first real step begins, and ends on
+  **✓ result**. The finished list stays on screen until you send your next question.
+- The answer itself appears in the chat as usual; a **Thinking process** link under any answer reopens the panel.
+- If a step fails, it is marked `✗` and the badge reads **Failed** instead of **Completed**.
 
 ---
 
