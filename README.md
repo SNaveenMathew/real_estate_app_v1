@@ -106,8 +106,9 @@ architecture; the SQL agent queries physical tables only.
 ┌────────────────────────────────────────────────────────────────────────────┐
 │ Browser (Leaflet map + chat UI)                                            │
 │  ├─ House markers + sidebar                                                │
-│  ├─ Layer control: None / Crime / NRI / Bike Lanes                         │
+│  ├─ Layer control: None / Crime / NRI / Bike Lanes / Transit Routes        │
 │  ├─ Bike route planner (start/end inputs with local BikePGH route map)     │
+│  ├─ Transit route planner (General Chat tool with line badges + route map) │
 │  ├─ House Chat (per-property Code Agent)                                   │
 │  └─ General Chat (cross-city Code Agent)                                   │
 └──────────────────────────────┬─────────────────────────────────────────────┘
@@ -118,7 +119,9 @@ architecture; the SQL agent queries physical tables only.
 │  ├─ /api/layers/crime           Severity-weighted heatmap grid             │
 │  ├─ /api/layers/nri             NRI tract choropleth (GeoJSON)             │
 │  ├─ /api/layers/bike            BikePGH overlay for current viewport       │
+│  ├─ /api/layers/transit_routes  National Transit Map overlay               │
 │  ├─ /api/bike/route             Local BikePGH routing endpoint             │
+│  ├─ /api/transit/route          Multimodal transit routing endpoint        │
 │  ├─ /api/house/{id}/chat        House-specific agent                       │
 │  ├─ /api/chat                   General agent                              │
 │  ├─ /metrics                    Prometheus metrics endpoint                │
@@ -133,6 +136,10 @@ architecture; the SQL agent queries physical tables only.
 │  ├─ sold_homes               │      └──────────────────────────────────┘
 │  ├─ crime_incidents          │
 │  ├─ bike_routes              │
+│  ├─ transit_agencies         │
+│  ├─ transit_ridership        │
+│  ├─ transit_safety           │
+│  ├─ transit_routes           │
 │  ├─ zhvi                     │
 │  ├─ market_heat_index        │
 │  ├─ cbsa_*                   │
@@ -182,6 +189,7 @@ real_estate_app/
     ├── census/       ← DECENNIALPL2020.P1-Data.csv, DECENNIALPL2020.P1-2026-03-25T232220.csv, list1_2023.xlsx
     ├── crime/        ← one folder per city, e.g. crime/chicago/, crime/pittsburgh/
     ├── bike/         ← BikePGH route layers by city
+    ├── fta/          ← FTA ridership, safety time series, and National Transit Map routes
     ├── shapefiles/   ← TIGER/Line tract shapefiles (optional but recommended)
     └── chroma/       ← vector DB working files
 ```
@@ -272,7 +280,7 @@ Open **http://localhost:8000** in your browser.
 
 The app includes a built-in data-source registry and a Data page upload flow for refreshing files without changing the normal `python setup_data.py` workflow. The source details distinguish direct downloads from portals that require choosing a file; Chicago and Buffalo have direct CSV links, while Chicago's endpoint defaults to a 1,000-row limit. Refreshes validate replacement files before overwriting existing data, with rollback coverage for Census, NRI, sold homes, crime, and bike sources. Append-vs-replace behavior is handled for multi-file sources, and Redfin refreshes record houses missing from a reused export in house history.
 
-The "Add a dataset" workflow recognizes known source schemas and upserts into the matching table. Upload prechecks are declared per source in the registry, with contract tests guarding required validation for shared append tables. The Data page also offers an on-demand concurrent link-health check; a reachable portal does not guarantee its file schema is unchanged, so upload validation and rollback remain important. Crime-source schemas may drift over time, particularly for Pittsburgh, Indianapolis, and Minneapolis. The Commute table's catalog and semantic-query registration have also been restored.
+The "Add a dataset" workflow recognizes known source schemas and upserts into the matching table. Upload prechecks are declared per source in the registry, with contract tests guarding required validation for shared append tables. The Data page also offers an on-demand concurrent link-health check; a reachable portal does not guarantee its file schema is unchanged, so upload validation and rollback remain important. Crime-source schemas may drift over time, particularly for Pittsburgh, Indianapolis, and Minneapolis. The Commute table's catalog and semantic-query registration have also been restored. In November 2026, Federal Transit Administration (FTA) and Bureau of Transportation Statistics (BTS) national transit datasets were integrated, adding monthly ridership, safety & security time series, and 76,000+ National Transit Map route geometries along with multimodal shortest path transit routing.
 
 ### Redfin Favorites (required to see houses on the map)
 
@@ -330,6 +338,25 @@ If those files are present, the app can answer route questions like:
 - “Find a safe bike route from A to B”
 
 No external road-routing engine is used for the route graph itself; the service only geocodes place names with Nominatim.
+
+### Federal Transit Administration (FTA) Data (Transit ridership, safety & National Transit Map)
+
+The app ingests national transit data from the Federal Transit Administration (FTA) and Bureau of Transportation Statistics (BTS) located under `data/fta/`:
+
+- **Safety & Security Time Series**: `data/fta/S&S Time Series-July 2026_261102.xlsx`
+  - Monthly threshold-adjusted safety incidents, collisions, derailments, transit worker assaults, fatalities, and injuries across US transit agencies and modes (2014–2026; 24,888 records).
+- **Monthly Raw Ridership**: `data/fta/September 2026 Raw Monthly Ridership (no adjustments or estimates)_261102.xlsx`
+  - Unadjusted monthly Unlinked Passenger Trips (UPT) by transit agency, mode (bus, heavy rail, light rail, commuter rail, trolleybus, etc.), and service type (2002–2026; 369,310 unpivoted records).
+- **National Transit Map Routes**: `data/fta/connections/National_Transit_Map_Routes.shp`
+  - Nationwide geospatial shapefile of 76,687 transit routes across all participating US transit agencies with 2D LineString/MultiLineString geometries and precomputed spatial bounding box coordinates.
+
+Ingested into DuckDB as:
+- `transit_agencies`: Agency directory (2,359 agencies) with NTD IDs, names, city, state, reporter types, and primary modes.
+- `transit_ridership`: Unpivoted monthly time series for ridership trend queries and cross-agency comparisons.
+- `transit_safety`: Monthly incident, collision, derailment, worker assault, fatality, and injury metrics.
+- `transit_routes`: Spatial route geometries with precomputed bounding coordinates, route short/long names, types, and agency links.
+
+Run `python setup_data.py --only transit` to ingest or refresh these datasets.
 
 ### Sold Homes (optional)
 
@@ -449,6 +476,8 @@ Agent: [compares HOA against other houses in the same city]
 - *"Compare tornado risk between Dallas and Houston census tracts"*
 - *"What's the median price/sqft across all my Austin houses?"*
 - *"Which city has the most severe crime, weighted, not just the most incidents?"*
+- *"Find a transit route from Shadyside to Highland Park"*
+- *"Compare transit ridership and safety incidents between Pittsburgh PRT and Philadelphia SEPTA"*
 
 ---
 
@@ -463,6 +492,7 @@ python setup_data.py --only crime     # just crime data
 python setup_data.py --only zhvi              # just Zillow Home Value Index
 python setup_data.py --only market_heat_index # just Zillow Market Heat Index
 python setup_data.py --only bike      # just BikePGH route data
+python setup_data.py --only transit   # FTA ridership, safety, and transit routes
 python setup_data.py --only census    # CBSA crosswalk + tract/MSA populations
 python setup_data.py --only geocode   # retry pending sold-home geocodes
 python setup_data.py --only match     # link sold records to houses
@@ -651,13 +681,16 @@ of your file:
 | Crime | heat | overlay | weighted by `severity_weight` (769,286 rows); filter by year dropdown or animate across years with a constant density scale |
 | Sold Homes | heat | overlay | uniform count (no weight-like column on this table) |
 | Bike Routes | lines | overlay | its own overlap-resolution logic, unchanged (see below) |
+| Transit Routes | lines | overlay | 76,687 nationwide routes from National Transit Map; draws as blue lines (`#2563eb`) with route names, types, and agency details |
 | Commute time to work | decoration on Houses | overlay | needs a work location set in the Commute tab |
 
 Not shown, on purpose: `bike_lanes` is a real, populated-looking table left over from before this catalog
 existed, but it was never registered through the Data page, so — like anything outside the catalog — the
 map (and chat) correctly doesn't know about it; `geocode_cache` is marked internal
-(`agent_visible: false`); `house_snapshots`, `house_commute`, `census_msa` and `cbsa_counties` have no
-coordinates or shared polygon source of their own, so they stay fully queryable in chat without becoming a
+(`agent_visible: false`); `house_snapshots`, `house_commute`, `census_msa`, `cbsa_counties`, `transit_agencies`,
+`transit_ridership`, and `transit_safety` have no coordinates or line/polygon geometry of their own, so they stay
+fully queryable in chat without becoming a map layer. `transit_routes` carries linework geometry and is classified
+automatically as a lines overlay layer.
 map layer. `census_msa`/`cbsa_counties` (county/CBSA-level data) could become choropleths the same way NRI
 and Population do; nothing in the real data currently links to them richly enough to be worth it, and
 there's no bundled county/CBSA polygon source the way there is for tracts, so that stayed out of this pass.
@@ -891,10 +924,11 @@ api/
   onboarding.py       Data page HTTP API (/api/onboarding/*)
   commute.py          Commute tab HTTP API (/api/commute/*)
   map_layers.py       Map layer panel HTTP API (/api/layers/*)
+  transit.py          Transit routing HTTP API (/api/transit/*)
   data_sources.py     Built-in dataset registry and refresh API (/api/data-sources/*)
 
 agents/
-  tools.py            LangChain tools (SQL, vector search, price estimation, bike routing)
+  tools.py            LangChain tools (SQL, vector search, price estimation, bike routing, transit routing)
   query_planner.py    Deterministic analytical query planning and semantic mappings
   house_agent.py      Per-house Code Agent
   general_agent.py    General Code Agent
@@ -910,7 +944,7 @@ db/
   vector_store.py     ChromaDB — embed, store, search text documents
 
 services/
-  data_loader.py      Parsers for Redfin, NRI, Census, Sold, Crime
+  data_loader.py      Parsers for Redfin, NRI, Census, Sold, Crime, FTA
   data_sources.py     Built-in dataset registry, health check, and refresh orchestrator
   zillow_sources.py   Parsers for Zillow Home Value Index (ZHVI) and Market Heat Index datasets
   geocoder.py         Address geocoding and caching for sold homes
@@ -926,6 +960,8 @@ services/
   house_links.py      Rows of user-added datasets linked to one house (House Chat)
   commute.py          Commute times: work-address lookup, OSRM/OpenTripPlanner clients, refresh job
   map_layers.py       Generic, catalog-driven map layer classification and data builders
+  routing_common.py   Shared Dijkstra, spatial snapping, bearings, and Nominatim caching
+  transit_routing.py  Multimodal transit routing engine (bounding box queries, transfer graph, directions)
 
 eval/
   fixtures.py         Builds a small deterministic DB with hand-verifiable answers
@@ -955,6 +991,7 @@ data/
   census/             Census P1 tables + CBSA crosswalk
   crime/<city>/       Drop each city's raw crime export here
   bike/               BikePGH network sources used by the local router
+  fta/                FTA ridership, safety time series, and National Transit Map routes
   shapefiles/         TIGER/Line tract shapefiles (optional)
 ```
 
@@ -1000,7 +1037,9 @@ The browser uses these main endpoints:
 | `GET /api/layers/crime` | Return the viewport's severity-weighted crime grid |
 | `GET /api/layers/nri` | Return NRI tract geometry and attributes |
 | `GET /api/layers/bike` | Return BikePGH features for the current viewport |
+| `GET /api/layers/transit_routes` | Return National Transit Map routes for the current viewport |
 | `POST /api/bike/route` | Route between geocoded places on the local bike graph |
+| `POST /api/transit/route` | Route between geocoded places on the national transit graph |
 | `POST /api/chat` | Ask the general cross-city agent |
 | `POST /api/house/{id}/chat` | Ask the agent about one house |
 | `GET /metrics` | Expose Prometheus metrics |
@@ -1141,6 +1180,8 @@ capabilities currently covered by the deterministic evaluation fixture.
 | Individual houses | Stored details, NRI data, risk percentile, EAL, vulnerability/resilience fields, and data-derived price estimates | Strong or partial when fields are NULL |
 | House documents | Search a house’s stored descriptions/documents or search across all houses | Supported when documents are loaded |
 | Bike routing | Route addresses, neighborhoods, landmarks, parks, or coordinates on the loaded BikePGH network | Supported when BikePGH data is loaded |
+| Transit routing | Multimodal transit route planning (stops, line transfers, duration, directions, Leaflet preview) | Strong |
+| Transit ridership & safety | Agency and national monthly ridership trends, safety events, collisions, derailments, worker assaults, fatalities, injuries | Strong |
 | Crime-aware routing | Remove BikePGH edges intersecting buffered high-density crime cells before Dijkstra and return analysis visualization | Supported, but heuristic |
 | Crime analytics | Incident counts, severity-weighted crime, standardized categories, and city/month analysis | Supported when crime data is loaded |
 
@@ -1171,6 +1212,10 @@ capabilities currently covered by the deterministic evaluation fixture.
   means no continuous path in the loaded BikePGH graph, not necessarily no
   real-world route. Crime avoidance is a density heuristic, not a safety
   guarantee.
+- Transit routing snaps endpoints to the nearest loaded transit lines from the
+  National Transit Map and computes transfers at intersecting line coordinates
+  within 150m. Real-world schedule timetables and headways are not modeled;
+  durations are calculated from mode speed and network distance.
 - Geometry/blob columns are hidden from the SQL agent, so arbitrary polygon or
   geometry analytics are not available through `query_database`.
 - General Chat is grounded in loaded application data and approved functions; it
@@ -1258,12 +1303,44 @@ If the locally ingested network does not contain a continuous path between the s
 
 ---
 
+## Transit routing
+
+The app exposes `POST /api/transit/route` with:
+
+```json
+{"start": "Shadyside", "end": "Highland Park", "city": "Pittsburgh, PA"}
+```
+
+Like bike routing, endpoints are human-readable place strings geocoded via Nominatim (cached in DuckDB `geocode_cache`). The routing engine operates directly on the locally ingested National Transit Map network (`transit_routes` table in DuckDB).
+
+### How it works
+
+1. **Shared Graph & Routing Infrastructure (`services/routing_common.py`)**:
+   - Common routing algorithms (Dijkstra shortest-path graph search, network snapping, spherical haversine distance, segment bearing calculation, and geocode caching) are shared cleanly between bike and transit routing engines.
+2. **Local Bounding Box Extraction**:
+   - Dynamically queries `transit_routes` in DuckDB using the spatial bounding box of the geocoded start and end points plus an adaptive buffer.
+3. **Multi-Line Transfer Graph (`services/transit_routing.py`)**:
+   - Converts 2D LineString/MultiLineString geometries into routable transit network segments.
+   - Discovers transfer points across intersecting or proximate lines using a spatial grid index (default 150-meter transfer buffer).
+   - Weights edges by estimated travel times based on transit mode speed (e.g., 15 mph for bus, 25 mph for rail) with an added transfer delay penalty (default 5 minutes).
+4. **Maneuvers & Presentation**:
+   - Produces step-by-step transit maneuvers:
+     - **Boarding**: Initial transit line, stop location, and direction (e.g. `Board 71B towards Highland Park`).
+     - **Transfers**: Route transitions at transfer points (e.g. `Transfer to 64`).
+     - **Alighting**: Final destination stop.
+   - Computes distance in miles, estimated travel duration in minutes, and transfer count.
+   - General Chat tool `find_transit_route` returns a structured `transit_route` card artifact with interactive line badges (e.g. `[64]`, `[71B]`), turn-by-turn maneuvers, and an embedded Leaflet map showing the exact route path.
+
+---
+
 ## Developer scripts & tests
 
 These utility scripts and tests are intended for debugging, data validation, evaluation, and regression testing. Run them from the repository root:
 
 - `tests/test_guardrails.py`: Full test suite for multi-layer guardrails (Input prompt injection defense, Code AST sandboxing, read-only SQL validation, output grounding) plus microsecond latency benchmark. Usage: `python tests/test_guardrails.py`
 - `tests/test_bikepg_h_visualization.py`: Regression checks verifying BikePGH visualization specs and styling matches ground truth. Usage: `python tests/test_bikepg_h_visualization.py`
+- `tests/test_transit_integration.py`: End-to-end unit and integration tests for FTA dataset loading, DuckDB schemas, catalog seed definitions, metadata, routing engine, and API endpoints. Usage: `pytest tests/test_transit_integration.py`
+- `tests/test_playwright_transit.py`: Browser end-to-end verification using Playwright, verifying the Transit Routes map layer rendering, General Chat query handling with the local LLM, and route card artifact visualization. Usage: `pytest tests/test_playwright_transit.py`
 - `run_eval.py`: Agent evaluation pipeline. Runs the golden set examples against real agents or mock fixture DB, scores them, and writes timestamped reports to `eval/reports/`. Usage: `python run_eval.py [--mock]`
 - `debug_bike_route.py`: Lightweight checks for BikePGH city-key normalization and routing helpers. Usage: `python debug_bike_route.py`
 - `debug_flood_query.py`: Step-by-step SQL debugger for the flood-risk query; runs CTEs, prints table counts, join diagnostics, and sample rows to pinpoint where the chain breaks. Usage: `python debug_flood_query.py`

@@ -36,3 +36,10 @@ class BikeRouteRequest(BaseModel):
     end: str
     city: str = "Pittsburgh, PA"
 
+
+class TransitRouteRequest(BaseModel):
+    start: str
+    end: str
+    city: str = "Pittsburgh, PA"
+
+

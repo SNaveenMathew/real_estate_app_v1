@@ -17,6 +17,7 @@ import db.duckdb_store as store
 import db.vector_store as vs
 import db.schema_catalog as schema
 import services.bike_routing as bike_routing
+import services.transit_routing as transit_routing
 from agents.query_planner import build_query_plan
 from agents import answer_policy, answer_status, llm_resilience, semantic_fallback
 from agents.artifacts import classify_dataframe, emit_artifact
@@ -1122,11 +1123,111 @@ def get_database_schema(_: str = "") -> str:
 
 
 
+@tool
+def find_transit_route(
+    start: str,
+    end: str,
+    city: str = "Pittsburgh, PA",
+) -> str:
+    """Find a public transit route between two places using the National Transit Map.
+
+    Places may be neighborhoods, landmarks, parks, addresses, or coordinates.
+    Finds the shortest path using buses, light rail, trains, and pedestrian transfers.
+    Returns the transit lines used, boarding instructions, transfers, distance,
+    and estimated travel time.
+    """
+    try:
+        result = _run_async_safely(
+            transit_routing.route_transit,
+            start.strip(),
+            end.strip(),
+            city=(city or "Pittsburgh, PA").strip(),
+        )
+        if not isinstance(result, dict):
+            raise TypeError(f"Transit routing returned an unexpected result type: {type(result).__name__}")
+        route_data = result.get("route") or {}
+        summary = route_data.get("summary") or {}
+        transit_lines = result.get("transit_lines") or []
+        instructions = []
+        for maneuver in (route_data.get("maneuvers") or [])[:15]:
+            instruction = maneuver.get("instruction")
+            if instruction:
+                instructions.append(instruction)
+
+        start_name = result.get("start", {}).get("display_name", start) if isinstance(result.get("start"), dict) else start
+        end_name = result.get("end", {}).get("display_name", end) if isinstance(result.get("end"), dict) else end
+        line_names = [
+            f"{l.get('route_type_name', 'Line')} {l.get('route_short_name') or l.get('route_long_name')}"
+            for l in transit_lines
+        ]
+
+        if route_data.get("shape"):
+            emit_artifact({
+                "type": "map",
+                "map_kind": "transit_route",
+                "title": f"Transit route: {start_name} \u2192 {end_name}",
+                "city": result.get("city") or city or "Pittsburgh, PA",
+                "start": start_name,
+                "end": end_name,
+                "route_shape": route_data.get("shape", []) or [],
+                "bbox": route_data.get("bbox"),
+                "distance_miles": round(float(summary.get("length", 0) or 0), 2),
+                "duration_minutes": round(float(summary.get("duration_minutes", 0) or 0), 1),
+                "transit_lines_used": transit_lines,
+                "turn_by_turn": instructions,
+                "transfers": result.get("transfers", 0),
+                "provider": result.get("provider"),
+                "attribution": result.get("attribution"),
+            })
+
+        return json.dumps({
+            "status": "ok",
+            "kind": "route_found",
+            "message": f"Yes — a transit route was found using {', '.join(line_names) if line_names else 'public transit'}.",
+            "presentation": "route_map",
+            "start": start_name,
+            "end": end_name,
+            "city": result.get("city") or city or "Pittsburgh, PA",
+            "provider": result.get("provider"),
+            "distance_miles": round(float(summary.get("length", 0) or 0), 2),
+            "duration_minutes": round(float(summary.get("duration_minutes", 0) or 0), 1),
+            "transfers": result.get("transfers", 0),
+            "transit_lines_used": transit_lines,
+            "turn_by_turn": instructions,
+            "route_shape": route_data.get("shape", []) or [],
+            "bbox": route_data.get("bbox"),
+            "attribution": result.get("attribution"),
+            "note": result.get("note"),
+        }, indent=2)
+    except ValueError as exc:
+        message = str(exc)
+        lower = message.lower()
+        kind = "no_data" if "no transit routes" in lower else "no_route" if "no continuous" in lower else "input"
+        return json.dumps({
+            "status": "error",
+            "kind": kind,
+            "message": message,
+            "start": start,
+            "end": end,
+            "city": city or "Pittsburgh, PA",
+        })
+    except Exception as exc:
+        return json.dumps({
+            "status": "error",
+            "kind": "routing_service",
+            "message": str(exc),
+            "start": start,
+            "end": end,
+            "city": city or "Pittsburgh, PA",
+        })
+
+
 GENERAL_TOOLS = [
     check_data_availability,
     get_database_schema,
     query_database,
     retrieve_data_model_context,
     find_bike_route,
+    find_transit_route,
     search_all_house_descriptions,
 ]

@@ -4,8 +4,9 @@ A screenshot-led tour of the map, house views, and chat workflows. For the proje
 overview and complete technical and setup documentation, see the [README](README.md).
 
 > **About the screenshots in this guide.** These were captured from the local application
-> and database on September 27, 2026. At capture time the database contained 1,778 houses,
-> 85,154 NRI records, 450 bike routes, ~5.9 M ZHVI rows, and ~80 K Market Heat Index rows.
+> and database on September 27, 2026 (with transit routing and layers added in November 2026).
+> At capture time the database contained 1,778 houses, 85,154 NRI records, 450 bike routes,
+> ~5.9 M ZHVI rows, ~80 K Market Heat Index rows, and 76,687 National Transit Map routes.
 > Your screens will vary with the data loaded in your own database. Some views below
 > reflect data or services that were unavailable in this local run; those states are called
 > out where they appear.
@@ -21,11 +22,12 @@ overview and complete technical and setup documentation, see the [README](README
 5. [General Chat](#general-chat)
 6. [Map layers](#map-layers)
 7. [Bike route planner](#bike-route-planner)
-8. [Commute times](#commute-times)
-9. [The Data page](#the-data-page)
-10. [Keeping data fresh](#keeping-data-fresh)
-11. [Troubleshooting](#troubleshooting)
-12. [Privacy](#privacy)
+8. [Transit routes & route planner](#transit-routes--route-planner)
+9. [Commute times](#commute-times)
+10. [The Data page](#the-data-page)
+11. [Keeping data fresh](#keeping-data-fresh)
+12. [Troubleshooting](#troubleshooting)
+13. [Privacy](#privacy)
 
 ---
 
@@ -154,6 +156,8 @@ inferred from the local crime database:
 
 ![Bike Routes overlay: several colored facility-type lines with a legend](screenshots/11-bike-routes-layer.png)
 
+The panel also includes **Transit Routes**, which draws nationwide transit routes (76,000+ features from the National Transit Map) as distinct blue lines (`#2563eb`) with route name and agency tooltips.
+
 To add a dataset that can appear as a layer, see [The Data page](#the-data-page) and the README's
 [Map layers](README.md#map-layers) documentation.
 
@@ -169,6 +173,46 @@ route behavior, and the services involved.
 
 The result panel shows distance, estimated time, and the route's overlap with mapped bike
 facilities.
+
+---
+
+## Transit routes & route planner
+
+The National Transit Map nationwide route network and multimodal transit routing engine allow you to explore public transit routes on the map and plan point-to-point transit journeys directly within **General Chat**.
+
+![Transit routes overlay on the Pittsburgh map and multimodal transit route directions with line badges in General Chat](screenshots/14-transit-routes-and-routing.png)
+
+### Transit Routes map layer
+
+- Open the **Map Layers** panel in the top-right.
+- Under **Overlays**, check **Transit Routes**.
+- The map renders transit routes as crisp blue lines (`#2563eb`) with tooltips displaying the transit agency, route short name, and route description.
+- The layer dynamically queries 76,000+ routes in DuckDB scoped to your active map viewport with automatic deduplication.
+
+### Transit routing in General Chat
+
+- Open **General Chat** (💬 in the top navigation bar) and ask for transit directions between any two addresses, neighborhoods, or landmarks:
+  - *"Find a transit route from Shadyside to Highland Park"*
+  - *"How can I get from Downtown to Oakland using public transit?"*
+  - *"Plan a transit route from Squirrel Hill to East Liberty"*
+- The transit routing engine:
+  1. Geocodes start and end locations using Nominatim (cached locally in DuckDB).
+  2. Snaps both points to the nearest active transit lines within the National Transit Map network.
+  3. Builds a local multi-line transit graph with spatial transfer intersections (within a 150-meter walking transfer buffer).
+  4. Runs Dijkstra shortest-path search across route segments and transfer nodes.
+  5. Computes realistic boarding instructions, line transfers, alighting stops, and travel times.
+- **Interactive Route Card**: The chat response renders an embedded **Transit Route** artifact featuring:
+  - Distinct transit line badges (e.g. `[64]`, `[71B]`, `[P1]`)
+  - Origin, destination, distance in miles, and estimated trip time
+  - Step-by-step transit maneuvers (Boarding, Transferring, Alighting)
+  - An embedded interactive Leaflet map tracing the exact route geometry and transit stop markers
+
+### Transit ridership & safety analytics
+
+Beyond routing, General Chat can query national and agency-level ridership and safety records from the Federal Transit Administration (FTA) time-series datasets:
+- *"Which transit agency had the highest ridership in 2025?"*
+- *"Show me safety incidents and derailments for Pittsburgh Regional Transit over time."*
+- *"Compare monthly ridership trends between Boston MBTA and Chicago CTA."*
 
 ---
 
@@ -201,6 +245,7 @@ python setup_data.py --only redfin    # just Redfin
 python setup_data.py --only sold      # just sold homes
 python setup_data.py --only crime     # just crime data
 python setup_data.py --only bike      # just BikePGH route data
+python setup_data.py --only transit   # FTA ridership, safety, and transit routes
 python setup_data.py --only census    # CBSA crosswalk + tract/MSA populations
 python setup_data.py --only zhvi      # just Zillow Home Value Index
 python setup_data.py --only market_heat_index  # just Zillow Market Heat Index
@@ -220,15 +265,16 @@ is saved automatically.
 | Issue | Fix |
 |---|---|
 For setup and data-loading issues, see the README's [Troubleshooting](README.md#troubleshooting)
-table. The README also documents [data sources](README.md#data-sources) and [bike routing](README.md#bike-routing).
+table. The README also documents [data sources](README.md#data-sources), [bike routing](README.md#bike-routing), and [transit routing](README.md#transit-routing).
 
 ---
 
 ## Privacy
 
-- The README documents network use for [bike routing](README.md#bike-routing) and
-  [commute times](README.md#commute-times).
+- The README documents network use for [bike routing](README.md#bike-routing),
+  [transit routing](README.md#transit-routing), and [commute times](README.md#commute-times).
 - **Commute times** use public routing servers by default. See the README's [Commute times](README.md#commute-times)
   section for the exact data sent and self-hosting instructions.
+- **Routing endpoints**: Bike and transit routing use Nominatim for geocoding input place names (cached locally in DuckDB). The route graphs and calculations themselves run entirely on your local machine using local DuckDB tables.
 - Everything else — your houses, descriptions, photos, risk data, and chat history —
   stays in the local DuckDB/Chroma files under `data/`.
