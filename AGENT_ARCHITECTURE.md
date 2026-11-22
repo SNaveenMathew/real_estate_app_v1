@@ -799,8 +799,9 @@ mislead), and the tab offers **Recompute**. This is why changing any input needs
 
 ### 9.2 Threading
 
-As in the rest of the application, the single DuckDB connection is used only on the event-loop thread. Only pure-HTTP
-work (geocoding, routing) runs in worker threads, so a slow public server never freezes the map or the chats. The job
+As in the rest of the application, DuckDB is reached through the calling thread's own cursor (`get_conn()` in
+`db/duckdb_store.py`), so a handler that only blocks is a plain `def` and runs in FastAPI's worker pool; only pure-HTTP
+work (geocoding, routing) needs a worker thread of its own, so a slow public server never freezes the map or the chats. The job
 is single-flight (`start_refresh` claims it synchronously), always leaves the `running` state (errors are recorded as
 job state, never raised), and reports *why* a mode came back empty (`client.last_error`), so a dead bike server is a
 visible warning instead of silently missing numbers.

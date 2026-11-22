@@ -841,9 +841,16 @@ keeps the evidence it was approved on. Lanes are ordered to keep linked tables c
 
 ### Limits
 
-- Single-user, local. Work runs on the event-loop thread like the rest of the app (one shared DuckDB
-  connection), so a very large upload or a geocoding run blocks other requests while it works. Caps:
-  `ONBOARDING_MAX_UPLOAD_MB`, `ONBOARDING_GEOCODE_ROW_CAP`, `ONBOARDING_API_ROW_CAP`.
+- Single-user, local. DuckDB hands every thread its own cursor on the shared database
+  (`db/duckdb_store.py`), so a request handler that only blocks is a plain `def` and runs in the API's worker
+  pool - a slow map layer no longer stalls the chats. Dataset ingest (upload, profile, enrich, analyze) is
+  offloaded explicitly, so a 250 MB parse holds neither the loop nor a request thread. Caps:
+  `ONBOARDING_MAX_UPLOAD_MB`, `ONBOARDING_GEOCODE_ROW_CAP`, `ONBOARDING_API_ROW_CAP`, and
+  `PHOTO_MAX_UPLOAD_MB` (10) for house photos.
+- Uploads are hostile input: the client's filename is reduced to a sanitized basename (no traversal, no
+  absolute paths, no Windows device names), the size is capped while streaming and a rejected upload leaves
+  no partial file, and a photo's stored extension comes from the bytes Pillow decoded - not from the name or
+  the declared Content-Type.
 - Links are equality joins on normalized keys. Polygon layers are not modeled as spatial joins; for
   point data use *Add census tract from coordinates*. Text keys are matched exactly (after
   trim/case), not fuzzily.
