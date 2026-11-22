@@ -9,8 +9,8 @@ Priority order for geometry source:
      Download: https://www.census.gov/cgi-bin/geo/shapefiles/index.php
   3. Census Geocoder API  — fallback, ~0.15 s per house, requires internet.
 """
+
 import time
-import requests
 import pandas as pd
 import geopandas as gpd
 from pathlib import Path
@@ -18,9 +18,11 @@ from functools import lru_cache
 from typing import Optional
 
 from config import settings
+from services import http_client
 
 
 # ── Source 1: NRI geometry cache (parquet written by data_loader.load_nri) ──
+
 
 @lru_cache(maxsize=1)
 def _load_nri_geometry() -> Optional[gpd.GeoDataFrame]:
@@ -43,6 +45,7 @@ def _load_nri_geometry() -> Optional[gpd.GeoDataFrame]:
 
 
 # ── Source 2: TIGER/Line shapefiles in data/shapefiles/ ──────────────────────
+
 
 @lru_cache(maxsize=1)
 def _load_tiger_shapefiles() -> Optional[gpd.GeoDataFrame]:
@@ -79,6 +82,7 @@ def _load_tiger_shapefiles() -> Optional[gpd.GeoDataFrame]:
 
 # ── Unified loader: NRI cache → TIGER/Line → None ────────────────────────────
 
+
 @lru_cache(maxsize=1)
 def _load_tracts_gdf() -> Optional[gpd.GeoDataFrame]:
     """Return the best available tract geometry GeoDataFrame."""
@@ -93,6 +97,7 @@ def _load_tracts_gdf() -> Optional[gpd.GeoDataFrame]:
 
 # ── Spatial join ──────────────────────────────────────────────────────────────
 
+
 def assign_tract_fips_spatial(df: pd.DataFrame) -> pd.DataFrame:
     tracts_gdf = _load_tracts_gdf()
     if tracts_gdf is None:
@@ -105,7 +110,7 @@ def assign_tract_fips_spatial(df: pd.DataFrame) -> pd.DataFrame:
         crs="EPSG:4326",
     )
     joined = gpd.sjoin(pts, tracts_gdf, how="left", predicate="within")
-    joined = joined.drop(columns=['tract_fips_left']).rename(columns={'tract_fips_right':'tract_fips'})
+    joined = joined.drop(columns=["tract_fips_left"]).rename(columns={"tract_fips_right": "tract_fips"})
     df = df.copy()
     df["tract_fips"] = joined["tract_fips"].values
     return df
@@ -121,10 +126,8 @@ _GEOCODER_URL = (
 
 def _get_tract_from_api(lat: float, lon: float) -> Optional[str]:
     try:
-        resp = requests.get(_GEOCODER_URL.format(lat=lat, lon=lon), timeout=10)
-        tracts = (resp.json().get("result", {})
-                             .get("geographies", {})
-                             .get("Census Tracts", []))
+        resp = http_client.get(_GEOCODER_URL.format(lat=lat, lon=lon), timeout=10)
+        tracts = resp.json().get("result", {}).get("geographies", {}).get("Census Tracts", [])
         if tracts:
             return tracts[0].get("GEOID")
     except Exception:
@@ -149,6 +152,7 @@ def assign_tract_fips_api(df: pd.DataFrame) -> pd.DataFrame:
 
 # ── Main entry ────────────────────────────────────────────────────────────────
 
+
 def assign_tract_fips(df: pd.DataFrame) -> pd.DataFrame:
     """Assign census tract FIPS to every row. Uses best available geometry."""
     if _load_tracts_gdf() is not None:
@@ -163,4 +167,3 @@ def geometry_source() -> str:
     if _load_tiger_shapefiles() is not None:
         return "TIGER/Line shapefiles"
     return "Census Geocoder API (fallback)"
-

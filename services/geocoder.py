@@ -31,9 +31,11 @@ import pandas as pd
 from typing import Optional
 
 import db.duckdb_store as store
+from services import http_client
 
 
 # ── Geocode cache ─────────────────────────────────────────────────────────────
+
 
 def _ensure_cache_table():
     store.get_conn().execute("""
@@ -60,9 +62,7 @@ def _lookup_cache(keys: list[str]) -> dict[str, dict]:
     if not keys:
         return {}
     placeholders = ", ".join("?" * len(keys))
-    rows = store.query_json(
-        f"SELECT * FROM geocode_cache WHERE address_key IN ({placeholders})", keys
-    )
+    rows = store.query_json(f"SELECT * FROM geocode_cache WHERE address_key IN ({placeholders})", keys)
     return {r["address_key"]: r for r in rows}
 
 
@@ -74,8 +74,7 @@ def _save_cache(results: list[dict]):
     _ensure_cache_table()
     df = pd.DataFrame(results)
     # Explicit columns — must match geocode_cache schema exactly (no created_at)
-    cache_cols = ["address_key", "full_address", "lat", "lon",
-                  "tract_fips", "geocode_source", "geocode_accuracy"]
+    cache_cols = ["address_key", "full_address", "lat", "lon", "tract_fips", "geocode_source", "geocode_accuracy"]
     for col in cache_cols:
         if col not in df.columns:
             df[col] = None
@@ -87,7 +86,7 @@ def _save_cache(results: list[dict]):
     # for col in schema_cols:
     #     if col not in df.columns:
     #         df[col] = None
-    
+
     # df = df[schema_cols]
     # conn.register("__geo_tmp", df)
     # conn.execute("INSERT OR REPLACE INTO geocode_cache SELECT * FROM __geo_tmp")
@@ -106,7 +105,8 @@ def _flush_to_sold_homes(updates: list[dict]):
     if not updates:
         return
     conn = store.get_conn()
-    conn.executemany("""
+    conn.executemany(
+        """
         UPDATE sold_homes SET
             lat              = ?,
             lon              = ?,
@@ -115,12 +115,20 @@ def _flush_to_sold_homes(updates: list[dict]):
             geocode_source   = ?,
             geocode_accuracy = ?
         WHERE sale_id = ?
-    """, [
-        (r["lat"], r["lon"], r["tract_fips"],
-         r["geocode_status"], r["geocode_source"], r["geocode_accuracy"],
-         r["sale_id"])
-        for r in updates
-    ])
+    """,
+        [
+            (
+                r["lat"],
+                r["lon"],
+                r["tract_fips"],
+                r["geocode_status"],
+                r["geocode_source"],
+                r["geocode_accuracy"],
+                r["sale_id"],
+            )
+            for r in updates
+        ],
+    )
 
 
 # ── Census Batch Geocoder ─────────────────────────────────────────────────────
@@ -133,7 +141,7 @@ _CENSUS_SINGLE_URL = (
     "?street={street}&city={city}&state={state}&zip={zip}"
     "&benchmark=Public_AR_Current&vintage=Current_Current&format=json"
 )
-_BATCH_SIZE = 900   # stay under the 1,000-row hard limit
+_BATCH_SIZE = 900  # stay under the 1,000-row hard limit
 
 
 def _parse_census_batch_response(text: str) -> list[dict]:
@@ -159,8 +167,8 @@ def _parse_census_batch_response(text: str) -> list[dict]:
             if len(parts) < 3:
                 continue
 
-            row_id     = parts[0].strip()
-            match      = parts[2].strip()
+            row_id = parts[0].strip()
+            match = parts[2].strip()
             match_type = parts[3].strip() if len(parts) > 3 else ""
 
             lat = lon = tract_fips = None
@@ -170,7 +178,7 @@ def _parse_census_batch_response(text: str) -> list[dict]:
                 # 13-field has unquoted lon in parts[5], lat in parts[6]
                 if len(parts) >= 13:
                     # 13-field layout: coordinates are separate
-                    coord_offset = 0   # extra field shifts everything right by 1
+                    coord_offset = 0  # extra field shifts everything right by 1
                     try:
                         lon = float(parts[5].strip())
                         lat = float(parts[6].strip())
@@ -200,39 +208,36 @@ def _parse_census_batch_response(text: str) -> list[dict]:
                     tr = parts[fips_start + 2].strip()
                     if sf and cf and tr:
                         try:
-                            tract_fips = (
-                                sf.zfill(2) + cf.zfill(3) + tr.zfill(6)
-                            )
+                            tract_fips = sf.zfill(2) + cf.zfill(3) + tr.zfill(6)
                         except Exception:
                             pass
 
-            results.append({
-                "row_id":           row_id,
-                "match":            match,
-                "match_type":       match_type,
-                "lat":              lat,
-                "lon":              lon,
-                "tract_fips":       tract_fips,
-                "geocode_source":   "census_batch",
-                "geocode_accuracy": match_type if match == "Match" else "No_Match",
-            })
+            results.append(
+                {
+                    "row_id": row_id,
+                    "match": match,
+                    "match_type": match_type,
+                    "lat": lat,
+                    "lon": lon,
+                    "tract_fips": tract_fips,
+                    "geocode_source": "census_batch",
+                    "geocode_accuracy": match_type if match == "Match" else "No_Match",
+                }
+            )
         except Exception:
             # Skip malformed rows — don't let one bad row kill the whole batch
             continue
-    
+
     return results
 
 
-def _geocode_batch_census(batch_df: pd.DataFrame, retries: int = 2,
-                         debug_first: bool = False) -> list[dict]:
+def _geocode_batch_census(batch_df: pd.DataFrame, retries: int = 2, debug_first: bool = False) -> list[dict]:
     """
     Send one batch (≤900 rows) to Census Batch Geocoder.
     batch_df must have columns: row_id, street, city, state, zip
     """
     csv_buf = io.StringIO()
-    batch_df[["row_id", "street", "city", "state", "zip"]].to_csv(
-        csv_buf, index=False, header=False
-    )
+    batch_df[["row_id", "street", "city", "state", "zip"]].to_csv(csv_buf, index=False, header=False)
     csv_bytes = csv_buf.getvalue().encode("utf-8")
 
     if debug_first:
@@ -242,21 +247,22 @@ def _geocode_batch_census(batch_df: pd.DataFrame, retries: int = 2,
 
     for attempt in range(retries + 1):
         try:
-            resp = requests.post(
+            # retries=0: this loop owns the (longer) backoff and prints between attempts.
+            resp = http_client.post(
                 _CENSUS_BATCH_URL,
                 files={"addressFile": ("addresses.csv", csv_bytes, "text/csv")},
                 data={
-                    "benchmark":  "Public_AR_Current",
-                    "vintage":    "Current_Current",
+                    "benchmark": "Public_AR_Current",
+                    "vintage": "Current_Current",
                     "returntype": "geographies",
                 },
                 timeout=180,
+                retries=0,
             )
             resp.raise_for_status()
 
             if debug_first:
-                print(f"  [DEBUG] HTTP {resp.status_code}, "
-                      f"response length: {len(resp.text)} chars")
+                print(f"  [DEBUG] HTTP {resp.status_code}, response length: {len(resp.text)} chars")
                 print(f"  [DEBUG] First 3 response lines:")
                 for line in resp.text.splitlines()[:3]:
                     print(f"    {line!r}")
@@ -265,8 +271,7 @@ def _geocode_batch_census(batch_df: pd.DataFrame, retries: int = 2,
 
             if debug_first:
                 matched = sum(1 for r in parsed if r.get("match") == "Match")
-                print(f"  [DEBUG] Parsed {len(parsed)} rows, "
-                      f"{matched} matches")
+                print(f"  [DEBUG] Parsed {len(parsed)} rows, {matched} matches")
 
             return parsed
         except requests.exceptions.Timeout:
@@ -284,8 +289,8 @@ def _geocode_batch_census(batch_df: pd.DataFrame, retries: int = 2,
 
 # ── Single-address fallback ───────────────────────────────────────────────────
 
-def _geocode_single_census(street: str, city: str,
-                           state: str, zip_code: str) -> Optional[dict]:
+
+def _geocode_single_census(street: str, city: str, state: str, zip_code: str) -> Optional[dict]:
     """One address at a time — only use for small targeted retries."""
     try:
         url = _CENSUS_SINGLE_URL.format(
@@ -294,7 +299,7 @@ def _geocode_single_census(street: str, city: str,
             state=requests.utils.quote(state),
             zip=requests.utils.quote(zip_code or ""),
         )
-        resp = requests.get(url, timeout=15)
+        resp = http_client.get(url, timeout=15)
         matches = resp.json().get("result", {}).get("addressMatches", [])
         if not matches:
             return None
@@ -304,16 +309,12 @@ def _geocode_single_census(street: str, city: str,
         tract_fips = None
         if tracts:
             t = tracts[0]
-            tract_fips = (
-                t.get("STATE", "").zfill(2)
-                + t.get("COUNTY", "").zfill(3)
-                + t.get("TRACT", "").zfill(6)
-            )
+            tract_fips = t.get("STATE", "").zfill(2) + t.get("COUNTY", "").zfill(3) + t.get("TRACT", "").zfill(6)
         return {
-            "lat":             coords.get("y"),
-            "lon":             coords.get("x"),
-            "tract_fips":      tract_fips,
-            "geocode_source":  "census_single",
+            "lat": coords.get("y"),
+            "lon": coords.get("x"),
+            "tract_fips": tract_fips,
+            "geocode_source": "census_single",
             "geocode_accuracy": "Exact",
         }
     except Exception:
@@ -322,16 +323,17 @@ def _geocode_single_census(street: str, city: str,
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+
 def geocode_dataframe(
     df: pd.DataFrame,
-    street_col:            str  = "address",
-    city_col:              str  = "city",
-    state_col:             str  = "state",
-    zip_col:               str  = "zip",
-    full_addr_col:         str  = "full_address",
-    sale_id_col:           str  = "sale_id",
-    single_fallback_limit: int  = 0,
-    verbose:               bool = True,
+    street_col: str = "address",
+    city_col: str = "city",
+    state_col: str = "state",
+    zip_col: str = "zip",
+    full_addr_col: str = "full_address",
+    sale_id_col: str = "sale_id",
+    single_fallback_limit: int = 0,
+    verbose: bool = True,
 ) -> pd.DataFrame:
     """
     Geocode rows in df that are missing lat/lon.
@@ -360,8 +362,7 @@ def geocode_dataframe(
     _ensure_cache_table()
 
     # Ensure output columns exist
-    for col in ["lat", "lon", "tract_fips", "geocode_status",
-                "geocode_source", "geocode_accuracy"]:
+    for col in ["lat", "lon", "tract_fips", "geocode_status", "geocode_source", "geocode_accuracy"]:
         if col not in df.columns:
             df[col] = None
 
@@ -380,9 +381,9 @@ def geocode_dataframe(
     def _build_full(row):
         parts = [
             str(row.get(street_col, "") or "").strip(),
-            str(row.get(city_col,   "") or "").strip(),
-            str(row.get(state_col,  "") or "").strip(),
-            str(row.get(zip_col,    "") or "").strip(),
+            str(row.get(city_col, "") or "").strip(),
+            str(row.get(state_col, "") or "").strip(),
+            str(row.get(zip_col, "") or "").strip(),
         ]
         return ", ".join(p for p in parts if p)
 
@@ -392,17 +393,17 @@ def geocode_dataframe(
 
     # ── Step 1: Cache lookup ──────────────────────────────────────────────
     addr_keys = [_address_key(str(a)) for a in todo[full_addr_col]]
-    cache     = _lookup_cache(addr_keys)
-    hits      = 0
+    cache = _lookup_cache(addr_keys)
+    hits = 0
     for idx, row in todo.iterrows():
         key = _address_key(str(row.get(full_addr_col, "")))
         if key in cache:
             c = cache[key]
-            df.at[idx, "lat"]              = c["lat"]
-            df.at[idx, "lon"]              = c["lon"]
-            df.at[idx, "tract_fips"]       = c["tract_fips"]
-            df.at[idx, "geocode_status"]   = "success" if c.get("lat") else "failed"
-            df.at[idx, "geocode_source"]   = c["geocode_source"]
+            df.at[idx, "lat"] = c["lat"]
+            df.at[idx, "lon"] = c["lon"]
+            df.at[idx, "tract_fips"] = c["tract_fips"]
+            df.at[idx, "geocode_status"] = "success" if c.get("lat") else "failed"
+            df.at[idx, "geocode_source"] = c["geocode_source"]
             df.at[idx, "geocode_accuracy"] = c["geocode_accuracy"]
             hits += 1
 
@@ -415,80 +416,85 @@ def geocode_dataframe(
     if still.empty:
         _print_summary(df, needs_geo, verbose)
         return df
-    
+
     n_chunks = (len(still) + _BATCH_SIZE - 1) // _BATCH_SIZE
     if verbose:
-        print(f"    Census Batch: {len(still):,} addresses → "
-              f"{n_chunks} chunk(s) of ≤{_BATCH_SIZE}")
+        print(f"    Census Batch: {len(still):,} addresses → {n_chunks} chunk(s) of ≤{_BATCH_SIZE}")
 
     still["row_id"] = still.index.astype(str)
     still["street"] = still[street_col].fillna("").astype(str).str.strip()
-    still["city"]   = still[city_col  ].fillna("").astype(str).str.strip()
-    still["state"]  = still[state_col ].fillna("").astype(str).str.strip()
-    still["zip"]    = still[zip_col   ].fillna("").astype(str).str.strip()
+    still["city"] = still[city_col].fillna("").astype(str).str.strip()
+    still["state"] = still[state_col].fillna("").astype(str).str.strip()
+    still["zip"] = still[zip_col].fillna("").astype(str).str.strip()
 
     # ── Pre-flight: test one address before committing to 31k batches ─────
     if verbose:
         sample = still.iloc[0]
-        print(f"    Pre-flight sample: street={sample['street']!r}  "
-              f"city={sample['city']!r}  state={sample['state']!r}  "
-              f"zip={sample['zip']!r}")
+        print(
+            f"    Pre-flight sample: street={sample['street']!r}  "
+            f"city={sample['city']!r}  state={sample['state']!r}  "
+            f"zip={sample['zip']!r}"
+        )
         # warn if fields look empty or malformed
         empty_street = still["street"].str.strip().eq("").sum()
-        empty_city   = still["city"].str.strip().eq("").sum()
+        empty_city = still["city"].str.strip().eq("").sum()
         if empty_street > len(still) * 0.5:
-            print(f"    ⚠ WARNING: {empty_street:,}/{len(still):,} rows have "
-                  f"empty street — check column mapping (street_col={street_col!r})")
+            print(
+                f"    ⚠ WARNING: {empty_street:,}/{len(still):,} rows have "
+                f"empty street — check column mapping (street_col={street_col!r})"
+            )
         if empty_city > len(still) * 0.5:
-            print(f"    ⚠ WARNING: {empty_city:,}/{len(still):,} rows have "
-                  f"empty city — geocoding will likely fail")
+            print(f"    ⚠ WARNING: {empty_city:,}/{len(still):,} rows have empty city — geocoding will likely fail")
 
     total_matched = 0
     for chunk_num, chunk_start in enumerate(range(0, len(still), _BATCH_SIZE), 1):
         chunk = still.iloc[chunk_start : chunk_start + _BATCH_SIZE].copy()
-        print(f"    [{chunk_num:>3}/{n_chunks}] {len(chunk)} rows … ",
-              end="", flush=True)
+        print(f"    [{chunk_num:>3}/{n_chunks}] {len(chunk)} rows … ", end="", flush=True)
 
         # Pass debug_first=True only for the very first chunk
-        results   = _geocode_batch_census(chunk, debug_first=(chunk_num == 1 and verbose))
+        results = _geocode_batch_census(chunk, debug_first=(chunk_num == 1 and verbose))
         by_row_id = {r["row_id"]: r for r in results}
 
         cache_batch = []
-        db_batch    = []
+        db_batch = []
 
         for idx, row in chunk.iterrows():
-            res       = by_row_id.get(str(idx))
+            res = by_row_id.get(str(idx))
             full_addr = str(row.get(full_addr_col, ""))
-            sale_id   = row.get(sale_id_col)
+            sale_id = row.get(sale_id_col)
 
             if res and res.get("lat"):
-                df.at[idx, "lat"]              = res["lat"]
-                df.at[idx, "lon"]              = res["lon"]
-                df.at[idx, "tract_fips"]       = res["tract_fips"]
-                df.at[idx, "geocode_status"]   = "success"
-                df.at[idx, "geocode_source"]   = res["geocode_source"]
+                df.at[idx, "lat"] = res["lat"]
+                df.at[idx, "lon"] = res["lon"]
+                df.at[idx, "tract_fips"] = res["tract_fips"]
+                df.at[idx, "geocode_status"] = "success"
+                df.at[idx, "geocode_source"] = res["geocode_source"]
                 df.at[idx, "geocode_accuracy"] = res["geocode_accuracy"]
                 total_matched += 1
 
-                cache_batch.append({
-                    "address_key":     _address_key(full_addr),
-                    "full_address":    full_addr,
-                    "lat":             res["lat"],
-                    "lon":             res["lon"],
-                    "tract_fips":      res["tract_fips"],
-                    "geocode_source":  res["geocode_source"],
-                    "geocode_accuracy": res["geocode_accuracy"],
-                })
-                if sale_id:
-                    db_batch.append({
-                        "sale_id":         sale_id,
-                        "lat":             res["lat"],
-                        "lon":             res["lon"],
-                        "tract_fips":      res["tract_fips"],
-                        "geocode_status":  "success",
-                        "geocode_source":  res["geocode_source"],
+                cache_batch.append(
+                    {
+                        "address_key": _address_key(full_addr),
+                        "full_address": full_addr,
+                        "lat": res["lat"],
+                        "lon": res["lon"],
+                        "tract_fips": res["tract_fips"],
+                        "geocode_source": res["geocode_source"],
                         "geocode_accuracy": res["geocode_accuracy"],
-                    })
+                    }
+                )
+                if sale_id:
+                    db_batch.append(
+                        {
+                            "sale_id": sale_id,
+                            "lat": res["lat"],
+                            "lon": res["lon"],
+                            "tract_fips": res["tract_fips"],
+                            "geocode_status": "success",
+                            "geocode_source": res["geocode_source"],
+                            "geocode_accuracy": res["geocode_accuracy"],
+                        }
+                    )
             else:
                 df.at[idx, "geocode_status"] = "pending"
 
@@ -497,22 +503,23 @@ def geocode_dataframe(
         _flush_to_sold_homes(db_batch)
 
         pct = 100 * len(db_batch) // max(len(chunk), 1)
-        print(f"{len(db_batch)}/{len(chunk)} matched ({pct}%)  "
-              f"[total: {total_matched:,}]")
+        print(f"{len(db_batch)}/{len(chunk)} matched ({pct}%)  [total: {total_matched:,}]")
 
         # Early exit if 5 consecutive batches all return 0 — API is likely
         # rejecting the format, no point sending 35 more batches
         if chunk_num == 1 and len(db_batch) == 0:
-            consecutive_zeros = getattr(_geocode_batch_census, '_consecutive_zeros', 0) + 1
+            consecutive_zeros = getattr(_geocode_batch_census, "_consecutive_zeros", 0) + 1
         elif len(db_batch) == 0:
-            consecutive_zeros = getattr(_geocode_batch_census, '_consecutive_zeros', 0) + 1
+            consecutive_zeros = getattr(_geocode_batch_census, "_consecutive_zeros", 0) + 1
         else:
             consecutive_zeros = 0
         _geocode_batch_census._consecutive_zeros = consecutive_zeros
 
         if consecutive_zeros >= 5 and total_matched == 0:
-            print(f"\n    ⚠ 5 consecutive batches returned 0 matches "
-                  f"({consecutive_zeros * _BATCH_SIZE} rows tried, 0 matched).")
+            print(
+                f"\n    ⚠ 5 consecutive batches returned 0 matches "
+                f"({consecutive_zeros * _BATCH_SIZE} rows tried, 0 matched)."
+            )
             print("    This usually means:")
             print("      1. The Census API is temporarily down — try again later")
             print("      2. Address fields are blank/malformed — check pre-flight output above")
@@ -520,7 +527,7 @@ def geocode_dataframe(
             print("    Stopping early. Remaining rows marked 'pending'.")
             print("    → Retry later: python setup_data.py --only geocode")
             # Mark remaining rows as pending
-            remaining_idx = still.iloc[chunk_start + _BATCH_SIZE:].index
+            remaining_idx = still.iloc[chunk_start + _BATCH_SIZE :].index
             df.loc[remaining_idx, "geocode_status"] = "pending"
             break
 
@@ -529,62 +536,67 @@ def geocode_dataframe(
 
     # ── Step 3: Optional single-address retry — hard-capped ───────────────
     pending_mask = needs_geo & (df["geocode_status"] == "pending")
-    n_pending    = int(pending_mask.sum())
+    n_pending = int(pending_mask.sum())
 
     if single_fallback_limit > 0 and n_pending > 0:
-        cap      = min(single_fallback_limit, n_pending)
+        cap = min(single_fallback_limit, n_pending)
         to_retry = df[pending_mask].head(cap)
         if verbose:
-            print(f"    Single-address retry: {cap} of {n_pending:,} pending "
-                  f"(cap={single_fallback_limit}) …")
+            print(f"    Single-address retry: {cap} of {n_pending:,} pending (cap={single_fallback_limit}) …")
 
         cache_batch = []
-        db_batch    = []
-        resolved    = 0
+        db_batch = []
+        resolved = 0
         for i, (idx, row) in enumerate(to_retry.iterrows(), 1):
             res = _geocode_single_census(
                 str(row.get(street_col, "") or ""),
-                str(row.get(city_col,   "") or ""),
-                str(row.get(state_col,  "") or ""),
-                str(row.get(zip_col,    "") or ""),
+                str(row.get(city_col, "") or ""),
+                str(row.get(state_col, "") or ""),
+                str(row.get(zip_col, "") or ""),
             )
             full_addr = str(row.get(full_addr_col, ""))
-            sale_id   = row.get(sale_id_col)
+            sale_id = row.get(sale_id_col)
 
             if res and res.get("lat"):
-                df.at[idx, "lat"]              = res["lat"]
-                df.at[idx, "lon"]              = res["lon"]
-                df.at[idx, "tract_fips"]       = res.get("tract_fips")
-                df.at[idx, "geocode_status"]   = "success"
-                df.at[idx, "geocode_source"]   = res["geocode_source"]
+                df.at[idx, "lat"] = res["lat"]
+                df.at[idx, "lon"] = res["lon"]
+                df.at[idx, "tract_fips"] = res.get("tract_fips")
+                df.at[idx, "geocode_status"] = "success"
+                df.at[idx, "geocode_source"] = res["geocode_source"]
                 df.at[idx, "geocode_accuracy"] = res["geocode_accuracy"]
                 resolved += 1
-                cache_batch.append({
-                    "address_key":     _address_key(full_addr),
-                    "full_address":    full_addr,
-                    "lat":             res["lat"],
-                    "lon":             res["lon"],
-                    "tract_fips":      res.get("tract_fips"),
-                    "geocode_source":  res["geocode_source"],
-                    "geocode_accuracy": res["geocode_accuracy"],
-                })
-                if sale_id:
-                    db_batch.append({
-                        "sale_id":         sale_id,
-                        "lat":             res["lat"],
-                        "lon":             res["lon"],
-                        "tract_fips":      res.get("tract_fips"),
-                        "geocode_status":  "success",
-                        "geocode_source":  res["geocode_source"],
+                cache_batch.append(
+                    {
+                        "address_key": _address_key(full_addr),
+                        "full_address": full_addr,
+                        "lat": res["lat"],
+                        "lon": res["lon"],
+                        "tract_fips": res.get("tract_fips"),
+                        "geocode_source": res["geocode_source"],
                         "geocode_accuracy": res["geocode_accuracy"],
-                    })
+                    }
+                )
+                if sale_id:
+                    db_batch.append(
+                        {
+                            "sale_id": sale_id,
+                            "lat": res["lat"],
+                            "lon": res["lon"],
+                            "tract_fips": res.get("tract_fips"),
+                            "geocode_status": "success",
+                            "geocode_source": res["geocode_source"],
+                            "geocode_accuracy": res["geocode_accuracy"],
+                        }
+                    )
             else:
                 df.at[idx, "geocode_status"] = "failed"
 
             # Flush every 50 rows in case of interruption
             if i % 50 == 0:
-                _save_cache(cache_batch);  cache_batch = []
-                _flush_to_sold_homes(db_batch); db_batch = []
+                _save_cache(cache_batch)
+                cache_batch = []
+                _flush_to_sold_homes(db_batch)
+                db_batch = []
                 if verbose:
                     print(f"    … {i}/{cap} ({resolved} resolved)", flush=True)
             time.sleep(0.4)
@@ -609,16 +621,15 @@ def _print_summary(df, needs_geo, verbose):
     sub = df.loc[needs_geo, "geocode_status"]
     success = (sub == "success").sum()
     pending = (sub == "pending").sum()
-    failed  = (sub == "failed").sum()
-    na      = sub.isna().sum()
-    print(f"    Geocoding — success: {success:,}  "
-          f"pending: {pending + na:,}  failed: {failed:,}")
+    failed = (sub == "failed").sum()
+    na = sub.isna().sum()
+    print(f"    Geocoding — success: {success:,}  pending: {pending + na:,}  failed: {failed:,}")
 
 
 # ── Retry pending from DB ─────────────────────────────────────────────────────
 
-def geocode_pending(single_fallback_limit: int = 500,
-                    verbose: bool = True) -> int:
+
+def geocode_pending(single_fallback_limit: int = 500, verbose: bool = True) -> int:
     """
     Re-attempt geocoding for sold_homes rows still marked pending.
     Runs another full batch pass first, then up to `single_fallback_limit`
@@ -636,7 +647,7 @@ def geocode_pending(single_fallback_limit: int = 500,
 
     if verbose:
         print(f"  Retrying {len(pending_df):,} pending rows …")
-    
+
     before = (pending_df["geocode_status"] == "success").sum()
     updated = geocode_dataframe(
         pending_df,
