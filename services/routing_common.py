@@ -11,7 +11,11 @@ import copy
 import hashlib
 import heapq
 import json
+import logging
 import math
+import re
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -19,10 +23,16 @@ from shapely.geometry import LineString, Point, box, shape
 
 import db.duckdb_store as store
 
+logger = logging.getLogger(__name__)
+
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 USER_AGENT = "RealEstateIntelligence/1.0 (routing engine)"
 NOMINATIM_MIN_INTERVAL_SECONDS = 1.0
 HTTP_TIMEOUT_SECONDS = 30.0
+
+# How long an unresolved address is remembered before the geocoder is asked
+# again (a miss is cached too, so a repeated turn costs no HTTP request).
+GEOCODE_MISS_TTL_SECONDS = 3 * 24 * 3600
 
 # Pittsburgh bounding box guard
 PITTSBURGH_BOUNDS = {
@@ -124,8 +134,304 @@ async def _get_json(url: str | tuple[str, ...], *, params=None, json_body=None) 
     raise RuntimeError(f"Public routing service unavailable. Last error: {last_error}")
 
 
+# ---------------------------------------------------------------------------
+# Address normalisation
+# ---------------------------------------------------------------------------
+# A geocoder is only as reliable as the spelling it is handed, and the two
+# sides of this system spell addresses differently: the house dataset stores
+# "4940 2nd Ave" while OpenStreetMap names the same street "Second Avenue"
+# (OSM is itself inconsistent - it keeps "South 18th Street" in digits).
+# Nominatim expands "Ave"->"Avenue" and "St"->"Street", but it does not
+# normalise the ordinal "2nd"->"Second", so a single abbreviation can turn a
+# real, mapped house into "address not found".
+#
+# Every lookup is therefore keyed on a canonical spelling (ordinals spelled
+# out, street types and directionals expanded, comma-part boundaries kept),
+# and a miss walks a short ladder of alternative spellings before giving up.
+# The canonical key is what makes the cache spelling-invariant: "2nd Ave" and
+# "Second Avenue" resolve to one row, so one successful lookup is reused by
+# every spelling of that address from then on.
+
+_STREET_TYPE_WORDS = {
+    "aly": "alley", "av": "avenue", "ave": "avenue", "blvd": "boulevard",
+    "cir": "circle", "ct": "court", "dr": "drive", "expy": "expressway",
+    "ft": "fort", "hls": "hills", "hts": "heights", "hwy": "highway",
+    "ln": "lane", "mt": "mount", "pkwy": "parkway", "pl": "place",
+    "rd": "road", "sq": "square", "st": "street", "str": "street",
+    "ter": "terrace", "trl": "trail", "vly": "valley", "xing": "crossing",
+}
+
+_DIRECTION_WORDS = {
+    "n": "north", "ne": "northeast", "nw": "northwest", "s": "south",
+    "se": "southeast", "sw": "southwest", "e": "east", "w": "west",
+}
+
+_ORDINAL_UNITS = (
+    "zeroth", "first", "second", "third", "fourth", "fifth", "sixth",
+    "seventh", "eighth", "ninth", "tenth", "eleventh", "twelfth",
+    "thirteenth", "fourteenth", "fifteenth", "sixteenth", "seventeenth",
+    "eighteenth", "nineteenth",
+)
+_TENS_CARDINAL = {
+    2: "twenty", 3: "thirty", 4: "forty", 5: "fifty",
+    6: "sixty", 7: "seventy", 8: "eighty", 9: "ninety",
+}
+# "112th" style numbers above 99 keep their digits: a rare street name is not
+# worth guessing at ("one hundred twelfth" is not how anyone writes it).
+_ORDINAL_TOKEN_RE = re.compile(r"^(\d+)(?:st|nd|rd|th)$")
+
+
+def _ordinal_word(number: int) -> str:
+    if 0 <= number < len(_ORDINAL_UNITS):
+        return _ORDINAL_UNITS[number]
+    if 10 <= number < 100:
+        tens, ones = divmod(number, 10)
+        base = _TENS_CARDINAL[tens]
+        return f"{base} {_ORDINAL_UNITS[ones]}" if ones else f"{base[:-1]}ieth"
+    return f"{number}th"
+
+
+def _canonical_token(token: str, *, ordinal_words: bool) -> str:
+    if ordinal_words:
+        ordinal = _ORDINAL_TOKEN_RE.match(token)
+        if ordinal:
+            return _ordinal_word(int(ordinal.group(1)))
+    return _STREET_TYPE_WORDS.get(token) or _DIRECTION_WORDS.get(token) or token
+
+
+def _canonical_address(text: str, *, ordinal_words: bool = True) -> str:
+    """Spelling-invariant form of an address, keeping its comma-part boundaries."""
+    parts = []
+    for part in str(text or "").split(","):
+        # Keep apostrophes ("O'Hara St"): they are part of the emitted query.
+        cleaned = " ".join(re.sub(r"[^a-z0-9' ]+", " ", part.lower()).split())
+        tokens = [_canonical_token(t, ordinal_words=ordinal_words) for t in cleaned.split()]
+        if tokens:
+            parts.append(" ".join(tokens))
+    return ", ".join(parts)
+
+
+def _query_has_context(query: str, city_context: str) -> bool:
+    """True when the query already names every word of the city context."""
+    context_tokens = _canonical_address(city_context).replace(",", " ").split()
+    query_tokens = set(_canonical_address(query).replace(",", " ").split())
+    return bool(context_tokens) and all(token in query_tokens for token in context_tokens)
+
+
+def _raw_search_text(query: str, city_context: Optional[str]) -> str:
+    """The query exactly as earlier versions sent it (kept for continuity)."""
+    if city_context and city_context.lower() not in " ".join(query.lower().split()):
+        return f"{query}, {city_context}"
+    return query
+
+
+def _canonical_search_text(
+    query: str, city_context: Optional[str], *, ordinal_words: bool = True
+) -> str:
+    text = _canonical_address(query, ordinal_words=ordinal_words)
+    if city_context and not _query_has_context(query, city_context):
+        suffix = _canonical_address(city_context, ordinal_words=ordinal_words)
+        return f"{text}, {suffix}"
+    return text
+
+
+def _address_cache_key(query: str, city_context: Optional[str]) -> str:
+    """Cache key that is identical for every spelling of the same address."""
+    return hashlib.md5(_canonical_search_text(query, city_context).encode("utf-8")).hexdigest()
+
+
+def _legacy_address_key(search_text: str) -> str:
+    """Key used by earlier versions, so previously cached rows stay reachable."""
+    return hashlib.md5(search_text.lower().strip().encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Geocode cache (DuckDB geocode_cache, shared with services/geocoder.py)
+# ---------------------------------------------------------------------------
+
+_CACHE_MISS_SOURCE = "nominatim_miss"
+
+
+def _cache_read(keys: list[str]) -> Optional[dict]:
+    """First cached row among `keys`, in the caller's preference order."""
+    keys = [key for key in keys if key]
+    if not keys:
+        return None
+    placeholders = ", ".join("?" * len(keys))
+    try:
+        frame = store.query(
+            "SELECT address_key, full_address, lat, lon, geocode_source, geocode_accuracy, "
+            f"CAST(geocoded_at AS VARCHAR) AS geocoded_at FROM geocode_cache "
+            f"WHERE address_key IN ({placeholders})",
+            keys,
+        )
+    except Exception:
+        return None
+    if frame.empty:
+        return None
+    rows = {row["address_key"]: row for _, row in frame.iterrows()}
+    for key in keys:
+        if key in rows:
+            return rows[key]
+    return None
+
+
+def _cache_write(
+    key: str,
+    full_address: str,
+    lat: Optional[float],
+    lon: Optional[float],
+    source: str,
+    accuracy: str,
+) -> None:
+    """Persist one geocode (or one miss) so later turns never repeat the work."""
+    try:
+        conn = store.get_conn()
+        conn.execute(
+            """INSERT OR REPLACE INTO geocode_cache
+               (address_key, full_address, lat, lon, geocode_source, geocode_accuracy, geocoded_at)
+               VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+            [key, full_address, lat, lon, source, accuracy],
+        )
+        conn.commit()
+    except Exception:
+        # The cache is an accelerator: a read-only or busy database must never
+        # turn a working geocode into a failed request.
+        logger.debug("Could not write geocode cache entry for %s", key, exc_info=True)
+
+
+def _miss_is_fresh(geocoded_at: Optional[str]) -> bool:
+    """A remembered miss expires, so a fixed spelling or new OSM data can win."""
+    if not geocoded_at:
+        return False
+    try:
+        stamp = datetime.fromisoformat(str(geocoded_at).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - stamp < timedelta(seconds=GEOCODE_MISS_TTL_SECONDS)
+
+
+# Nominatim's usage policy allows at most one request per second. The ladder
+# below can issue more than one request for a single lookup, so every call is
+# spaced here rather than by each caller.
+_nominatim_last_call = 0.0
+
+
+async def _wait_for_nominatim_slot() -> None:
+    global _nominatim_last_call
+    gap = NOMINATIM_MIN_INTERVAL_SECONDS - (time.monotonic() - _nominatim_last_call)
+    if gap > 0:
+        await asyncio.sleep(gap)
+    _nominatim_last_call = time.monotonic()
+
+
+def _best_bounded_hit(data: list, city_context: Optional[str]) -> Optional[tuple[float, float, str]]:
+    """Best in-bounds Nominatim hit, preferring a Pittsburgh match."""
+    candidates = []
+    for hit in data or ():
+        try:
+            lat, lon = float(hit["lat"]), float(hit["lon"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (math.isfinite(lat) and math.isfinite(lon)):
+            continue
+        if city_context and not in_pittsburgh_bounds(lat, lon):
+            continue
+        candidates.append((hit, lat, lon))
+    if not candidates:
+        return None
+
+    def rank(item):
+        hit, _, _ = item
+        text = (hit.get("display_name") or "").lower()
+        address = hit.get("address") or {}
+        pittsburgh_match = 0 if "pittsburgh" in text or str(address.get("city", "")).lower() == "pittsburgh" else 1
+        importance = -(float(hit.get("importance", 0) or 0))
+        return (pittsburgh_match, importance)
+
+    hit, lat, lon = sorted(candidates, key=rank)[0]
+    return lat, lon, hit.get("display_name") or ""
+
+
+def _house_coordinates(query: str, city_context: Optional[str]) -> Optional[dict]:
+    """Coordinates already stored for a listed house - no network involved.
+
+    The application knows the exact position of every house it lists, so an
+    address that names one of them needs no geocoder at all. Matching is on the
+    same canonical form used for the cache, which is why "4940 2nd Ave" here
+    matches however the caller spells it.
+    """
+    match = re.match(r"^(\d+[A-Za-z]?)\s+([^,]+)", query.strip())
+    if not match:
+        return None
+    number, street = match.group(1), match.group(2)
+    target = _canonical_address(f"{number} {street}")
+    if not target:
+        return None
+
+    clauses = ["lat IS NOT NULL", "lon IS NOT NULL", "lower(address) LIKE ?"]
+    params: list = [f"{number.lower()} %"]
+    zip_match = re.search(r"\b(\d{5})\b", query)
+    if zip_match:
+        clauses.append("zip = ?")
+        params.append(zip_match.group(1))
+    else:
+        parts = [part.strip() for part in query.split(",")]
+        city = parts[1] if len(parts) > 1 else (city_context or "").split(",")[0].strip()
+        if not city:
+            return None
+        clauses.append("lower(city) = lower(?)")
+        params.append(city)
+
+    try:
+        frame = store.query(
+            f"SELECT address, city, state, zip, lat, lon FROM houses "
+            f"WHERE {' AND '.join(clauses)} LIMIT 50",
+            params,
+        )
+    except Exception:
+        return None
+
+    for row in frame.itertuples(index=False):
+        if _canonical_address(row.address) != target:
+            continue
+        try:
+            lat, lon = float(row.lat), float(row.lon)
+        except (TypeError, ValueError):
+            continue
+        if not (math.isfinite(lat) and math.isfinite(lon)):
+            continue
+        if city_context and not in_pittsburgh_bounds(lat, lon):
+            continue
+        region = " ".join(part for part in (row.state, row.zip) if part)
+        label = ", ".join(part for part in (row.address, row.city, region) if part)
+        return {
+            "lat": lat,
+            "lon": lon,
+            "display_name": label,
+            "cached": True,
+            "source": "houses",
+        }
+    return None
+
+
 async def geocode_place(query: str, city_context: Optional[str] = "Pittsburgh, PA") -> dict:
-    """Geocode a place/address with a Pittsburgh spatial constraint and DuckDB cache validation."""
+    """Geocode a place/address with a Pittsburgh spatial constraint and DuckDB cache validation.
+
+    Resolution order, cheapest and most authoritative first:
+
+    1. exact local Pittsburgh aliases and endpoint fallbacks (deterministic)
+    2. the coordinates already stored for a listed house (local, no network)
+    3. the DuckDB geocode cache, keyed on a spelling-invariant form
+    4. Nominatim, trying a short ladder of spellings before giving up
+
+    Every success is written back under the canonical key, so the cost of a
+    lookup is paid once for *all* spellings of that address. A real miss is
+    remembered too, but only for GEOCODE_MISS_TTL_SECONDS, so repeated turns
+    stop hammering the geocoder without pinning the answer forever.
+    """
     q = query.strip()
     if not q:
         raise ValueError("A start or destination is required.")
@@ -149,105 +455,94 @@ async def geocode_place(query: str, city_context: Optional[str] = "Pittsburgh, P
         if local_alias:
             return {**local_alias, "cached": True, "source": "local_pittsburgh_alias"}
 
-    search_q = q
-    if city_context and city_context.lower() not in normalized:
-        search_q = f"{q}, {city_context}"
+    canonical_key = _address_cache_key(q, city_context)
+    legacy_key = _legacy_address_key(_raw_search_text(q, city_context))
 
-    address_key = hashlib.md5(search_q.lower().strip().encode("utf-8")).hexdigest()
+    known_house = _house_coordinates(q, city_context)
+    if known_house:
+        _cache_write(
+            canonical_key, known_house["display_name"], known_house["lat"],
+            known_house["lon"], "houses", "house_coordinates",
+        )
+        return known_house
 
-    cached = store.query(
-        "SELECT lat, lon, full_address FROM geocode_cache WHERE address_key = ? LIMIT 1",
-        [address_key],
-    )
-    if not cached.empty:
-        r = cached.iloc[0]
+    cached = _cache_read([canonical_key, legacy_key])
+    if cached is not None:
         try:
-            lat, lon = float(r["lat"]), float(r["lon"])
-            if math.isfinite(lat) and math.isfinite(lon) and (
-                city_context is None or in_pittsburgh_bounds(lat, lon)
-            ):
-                return {
-                    "lat": lat,
-                    "lon": lon,
-                    "display_name": r["full_address"] or q,
-                    "cached": True,
-                }
+            lat, lon = float(cached["lat"]), float(cached["lon"])
         except (TypeError, ValueError):
-            pass
+            lat = lon = float("nan")
+        in_bounds = math.isfinite(lat) and math.isfinite(lon) and (
+            city_context is None or in_pittsburgh_bounds(lat, lon)
+        )
+        if in_bounds:
+            return {
+                "lat": lat,
+                "lon": lon,
+                "display_name": cached["full_address"] or q,
+                "cached": True,
+                "source": cached["geocode_source"] or "cache",
+            }
+        if not math.isfinite(lat) and _miss_is_fresh(cached["geocoded_at"]):
+            raise ValueError(
+                cached["full_address"]
+                or f"Could not find \u201c{q}\u201d in {city_context or 'target area'}. "
+                "Try a street address or more specific landmark."
+            )
 
     viewbox = (
         f'{PITTSBURGH_BOUNDS["west"]},{PITTSBURGH_BOUNDS["north"]},'
         f'{PITTSBURGH_BOUNDS["east"]},{PITTSBURGH_BOUNDS["south"]}'
     )
-    data = await _get_json(
-        NOMINATIM_URL,
-        params={
-            "q": search_q,
-            "format": "jsonv2",
-            "limit": 8,
-            "countrycodes": "us",
-            "addressdetails": 1,
-            "viewbox": viewbox,
-            "bounded": 1,
-        },
-    )
-    if not data:
-        raise ValueError(f"Could not find \u201c{q}\u201d in {city_context or 'target area'}. Try a street address or more specific landmark.")
 
-    candidates = []
-    for hit in data:
-        try:
-            lat, lon = float(hit["lat"]), float(hit["lon"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if not (math.isfinite(lat) and math.isfinite(lon)):
-            continue
-        if city_context and not in_pittsburgh_bounds(lat, lon):
-            continue
-        candidates.append((hit, lat, lon))
+    # Ladder: the spelling this app has always sent, then the canonical
+    # spellings with ordinals as words (OSM's "Second Avenue") and as digits
+    # (OSM's "18th Street"). Nominatim expands neither form into the other.
+    candidates: list[str] = []
+    for candidate in (
+        _raw_search_text(q, city_context),
+        _canonical_search_text(q, city_context, ordinal_words=True),
+        _canonical_search_text(q, city_context, ordinal_words=False),
+    ):
+        if candidate and candidate.lower() not in {seen.lower() for seen in candidates}:
+            candidates.append(candidate)
 
-    if not candidates:
-        raise ValueError(
+    saw_any_hit = False
+    for search_q in candidates:
+        await _wait_for_nominatim_slot()
+        data = await _get_json(
+            NOMINATIM_URL,
+            params={
+                "q": search_q,
+                "format": "jsonv2",
+                "limit": 8,
+                "countrycodes": "us",
+                "addressdetails": 1,
+                "viewbox": viewbox,
+                "bounded": 1,
+            },
+        )
+        if data:
+            saw_any_hit = True
+        hit = _best_bounded_hit(data, city_context)
+        if hit is None:
+            continue
+        lat, lon, display_name = hit
+        _cache_write(canonical_key, display_name, lat, lon, "nominatim", "pittsburgh_bounded_place")
+        return {"lat": lat, "lon": lon, "display_name": display_name or q, "cached": False, "source": "nominatim"}
+
+    if saw_any_hit:
+        message = (
             f"Could not find a valid location for \u201c{q}\u201d. "
             "Use a more specific neighborhood, landmark, or street address."
         )
-
-    def rank(item):
-        hit, lat, lon = item
-        text = (hit.get("display_name") or "").lower()
-        address = hit.get("address") or {}
-        pittsburgh_match = 0 if "pittsburgh" in text or str(address.get("city", "")).lower() == "pittsburgh" else 1
-        importance = -(float(hit.get("importance", 0) or 0))
-        return (pittsburgh_match, importance)
-
-    hit, lat, lon = sorted(candidates, key=rank)[0]
-    result = {
-        "lat": lat,
-        "lon": lon,
-        "display_name": hit.get("display_name", q),
-        "cached": False,
-    }
-
-    try:
-        store.get_conn().execute(
-            """INSERT OR REPLACE INTO geocode_cache
-               (address_key, full_address, lat, lon, geocode_source, geocode_accuracy)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            [
-                address_key,
-                result["display_name"],
-                result["lat"],
-                result["lon"],
-                "nominatim",
-                "pittsburgh_bounded_place",
-            ],
+    else:
+        message = (
+            f"Could not find \u201c{q}\u201d in {city_context or 'target area'}. "
+            "Try a street address or more specific landmark."
         )
-        store.get_conn().commit()
-    except Exception:
-        pass
-
-    return result
-
+    _cache_write(canonical_key, message, None, None, _CACHE_MISS_SOURCE, "unresolved")
+    raise ValueError(message)
 
 def dijkstra(
     adjacency: dict[tuple[float, float], dict[tuple[float, float], float]],
