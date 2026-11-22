@@ -1,114 +1,161 @@
+"""eval/scoring.py's assert-equal logic, tested in both directions.
+
+These were module-level `check(...)` calls: importing the file printed results and the default
+pytest run collected zero tests from it, so a regression here was reported by nobody. Each case
+is now a test, including the ones that must FAIL - a scorer that only ever passes is worse than
+no scorer at all.
 """
-eval/tests/test_scoring.py
 
-Unit tests for eval/scoring.py's assert-equal logic, against hand-crafted
-reply strings. No LLM, no database — these test the scorer itself: does it
-actually discriminate a correct reply from a wrong one, in both directions?
-A scorer that only ever passes (or only ever fails) is worse than no scorer.
+from __future__ import annotations
 
-Run directly: python3 eval/tests/test_scoring.py
-"""
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import pytest
 
 from eval.golden_set import GoldenExample
 from eval.scoring import score_structured
-
-_passed = 0
-_failed = 0
-
-
-def check(label: str, condition: bool, detail: str = ""):
-    global _passed, _failed
-    if condition:
-        _passed += 1
-        print(f"  [pass] {label}")
-    else:
-        _failed += 1
-        print(f"  [FAIL] {label}  {detail}")
 
 
 def verdict(example: GoldenExample, reply: str) -> str:
     return score_structured(example, reply).verdict
 
 
-# ── Set comparison (order_matters=False) ────────────────────────────────────
-print("Set comparison")
-ex = GoldenExample(id="t_set", agent="general", question="q",
-                    expected=["Pittsburgh", "Denver", "Miami", "Austin"],
-                    order_matters=False, value_type="string",
-                    distractors=["Seattle"])
+@pytest.fixture()
+def example_set() -> GoldenExample:
+    return GoldenExample(
+        id="t_set",
+        agent="general",
+        question="q",
+        expected=["Pittsburgh", "Denver", "Miami", "Austin"],
+        order_matters=False,
+        value_type="string",
+        distractors=["Seattle"],
+    )
 
-check("correct set, any order -> PASS",
-      verdict(ex, "You have houses in Austin, Miami, Pittsburgh, and Denver.") == "PASS")
-check("missing one city -> FAIL",
-      verdict(ex, "You have houses in Pittsburgh, Denver, and Miami.") == "FAIL")
-check("all correct but distractor also present -> FAIL",
-      verdict(ex, "Pittsburgh, Denver, Miami, Austin, and Seattle.") == "FAIL")
 
-# ── Ordered comparison (order_matters=True) ─────────────────────────────────
-print("\nOrdered comparison")
-ex_ord = GoldenExample(id="t_order", agent="general", question="q",
-                        expected=["Miami", "Denver", "Pittsburgh", "Austin"],
-                        order_matters=True, value_type="string")
+@pytest.fixture()
+def example_ordered() -> GoldenExample:
+    return GoldenExample(
+        id="t_order",
+        agent="general",
+        question="q",
+        expected=["Miami", "Denver", "Pittsburgh", "Austin"],
+        order_matters=True,
+        value_type="string",
+    )
 
-check("correct order -> PASS",
-      verdict(ex_ord, "Ranked by population: 1. Miami 2. Denver 3. Pittsburgh 4. Austin.") == "PASS")
-check("right set, wrong order -> FAIL",
-      verdict(ex_ord, "Ranked: 1. Denver 2. Miami 3. Austin 4. Pittsburgh.") == "FAIL")
-check("missing item -> FAIL",
-      verdict(ex_ord, "Miami, then Denver, then Pittsburgh.") == "FAIL")
-check("earlier out-of-order mention does not override the correctly ordered list",
-      verdict(ex_ord, "Denver and Miami are both large. Ranked: "
-                       "1. Miami 2. Denver 3. Pittsburgh 4. Austin.") == "PASS")
 
-# ── Numeric, exact (tolerance=0 — counts) ───────────────────────────────────
-print("\nNumeric, exact match required (counts)")
-ex_count = GoldenExample(id="t_count", agent="general", question="q",
-                          expected=[2], value_type="number", tolerance=0)
+def test_correct_set_in_any_order_passes(example_set):
+    assert verdict(example_set, "You have houses in Austin, Miami, Pittsburgh, and Denver.") == "PASS"
 
-check("exact digit match -> PASS", verdict(ex_count, "You have 2 houses in Pittsburgh.") == "PASS")
-check("spelled-out number matches too -> PASS",
-      verdict(ex_count, "You have two houses in Pittsburgh.") == "PASS")
-check("off by one -> FAIL", verdict(ex_count, "You have 3 houses in Pittsburgh.") == "FAIL")
 
-# ── Numeric, with tolerance + distractor (NULL-handling case) ───────────────
-print("\nNumeric with tolerance + distractor (NULL-handling)")
-ex_null = GoldenExample(id="t_null", agent="general", question="q",
-                         expected=[55.0], value_type="number",
-                         distractors=[27.5])
+def test_missing_member_fails(example_set):
+    assert verdict(example_set, "You have houses in Pittsburgh, Denver, and Miami.") == "FAIL"
 
-check("correct NULL-safe average -> PASS",
-      verdict(ex_null, "The average walk score in Austin is 55.0.") == "PASS")
-check("small rounding within tolerance -> PASS",
-      verdict(ex_null, "The average walk score in Austin is approximately 55.") == "PASS")
-check("NULL treated as zero (distractor) -> FAIL even though not the only number",
-      verdict(ex_null, "The average walk score in Austin is 27.5 "
-                        "(averaging both houses, treating the missing "
-                        "score as zero).") == "FAIL")
 
-# ── Currency, with tolerance + distractor (filter-skipped case) ─────────────
-print("\nCurrency with distractor (arm's-length filter)")
-ex_cur = GoldenExample(id="t_cur", agent="general", question="q",
-                        expected=[340000.0], value_type="currency",
-                        distractors=[170000.5])
+def test_distractor_fails_even_when_every_expected_value_is_present(example_set):
+    assert verdict(example_set, "Pittsburgh, Denver, Miami, Austin, and Seattle.") == "FAIL"
 
-check("correct filtered average -> PASS",
-      verdict(ex_cur, "The average arm's-length sold price is $340,000.") == "PASS")
-check("unfiltered average (distractor) -> FAIL",
-      verdict(ex_cur, "The average sold price is $170,000.50.") == "FAIL")
 
-# ── Edge cases ────────────────────────────────────────────────────────────
-print("\nEdge cases")
-check("empty reply -> FAIL", verdict(ex_count, "") == "FAIL")
-check("whitespace-only reply -> FAIL", verdict(ex_count, "   \n  ") == "FAIL")
-check("a large unrelated number (e.g. a FIPS code) doesn't false-match a small target",
-      verdict(GoldenExample(id="t_fips", agent="general", question="q",
-                             expected=[4200], value_type="number", tolerance=0),
-              "The tract FIPS code is 42003140300.") == "FAIL")
+def test_correct_order_passes(example_ordered):
+    assert verdict(example_ordered, "Ranked by population: 1. Miami 2. Denver 3. Pittsburgh 4. Austin.") == "PASS"
 
-print(f"\n{_passed} passed, {_failed} failed")
-if _failed:
-    sys.exit(1)
+
+def test_right_values_in_the_wrong_order_fail(example_ordered):
+    assert verdict(example_ordered, "Ranked: 1. Denver 2. Miami 3. Austin 4. Pittsburgh.") == "FAIL"
+
+
+def test_missing_item_fails_ordered(example_ordered):
+    assert verdict(example_ordered, "Miami, then Denver, then Pittsburgh.") == "FAIL"
+
+
+def test_an_earlier_out_of_order_mention_does_not_override_the_ordered_list(example_ordered):
+    assert (
+        verdict(example_ordered, "Denver and Miami are both large. Ranked: 1. Miami 2. Denver 3. Pittsburgh 4. Austin.")
+        == "PASS"
+    )
+
+
+@pytest.fixture()
+def example_count() -> GoldenExample:
+    return GoldenExample(id="t_count", agent="general", question="q", expected=[2], value_type="number", tolerance=0)
+
+
+@pytest.fixture()
+def example_null() -> GoldenExample:
+    return GoldenExample(
+        id="t_null", agent="general", question="q", expected=[55.0], value_type="number", distractors=[27.5]
+    )
+
+
+@pytest.fixture()
+def example_currency() -> GoldenExample:
+    return GoldenExample(
+        id="t_cur", agent="general", question="q", expected=[340000.0], value_type="currency", distractors=[170000.5]
+    )
+
+
+def test_exact_digit_match_passes(example_count):
+    assert verdict(example_count, "You have 2 houses in Pittsburgh.") == "PASS"
+
+
+def test_spelled_out_number_matches(example_count):
+    assert verdict(example_count, "You have two houses in Pittsburgh.") == "PASS"
+
+
+def test_off_by_one_fails(example_count):
+    assert verdict(example_count, "You have 3 houses in Pittsburgh.") == "FAIL"
+
+
+def test_null_safe_average_passes(example_null):
+    assert verdict(example_null, "The average walk score in Austin is 55.0.") == "PASS"
+
+
+def test_small_rounding_within_tolerance_passes(example_null):
+    assert verdict(example_null, "The average walk score in Austin is approximately 55.") == "PASS"
+
+
+def test_null_treated_as_zero_fails_on_the_distractor(example_null):
+    assert (
+        verdict(
+            example_null,
+            "The average walk score in Austin is 27.5 (averaging both houses, treating the missing score as zero).",
+        )
+        == "FAIL"
+    )
+
+
+def test_currency_with_commas_passes(example_currency):
+    assert verdict(example_currency, "The average arm's-length sold price is $340,000.") == "PASS"
+
+
+def test_unfiltered_average_fails_on_the_distractor(example_currency):
+    assert verdict(example_currency, "The average sold price is $170,000.50.") == "FAIL"
+
+
+def test_empty_reply_fails(example_count):
+    assert verdict(example_count, "") == "FAIL"
+
+
+def test_whitespace_only_reply_fails(example_count):
+    assert verdict(example_count, "   \n  ") == "FAIL"
+
+
+def test_a_fips_code_does_not_false_match_a_small_target():
+    example = GoldenExample(
+        id="t_fips", agent="general", question="q", expected=[4200], value_type="number", tolerance=0
+    )
+    assert verdict(example, "The tract FIPS code is 42003140300.") == "FAIL"
+
+
+def test_free_text_examples_are_not_scored_structurally():
+    example = GoldenExample(
+        id="t_free",
+        agent="general",
+        question="q",
+        answer_type="free_text",
+        rubric="must explain",
+        expected=[],
+        order_matters=False,
+        value_type="string",
+    )
+    with pytest.raises(ValueError):
+        score_structured(example, "anything")

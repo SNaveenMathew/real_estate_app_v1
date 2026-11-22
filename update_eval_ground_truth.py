@@ -24,9 +24,11 @@ The script also validates fixture invariants, but house-count/city truth is base
 on the `houses` table itself rather than `is_favorite`. The evaluation questions
 intentionally test the houses present in the fixture, not saved/favorite semantics.
 """
+
 from __future__ import annotations
 
 import argparse
+import json
 import ast
 import json
 import re
@@ -35,10 +37,7 @@ from pathlib import Path
 try:
     import duckdb
 except ImportError as exc:
-    raise SystemExit(
-        "duckdb is required. Install it in the house_agent environment with: "
-        "pip install duckdb"
-    ) from exc
+    raise SystemExit("duckdb is required. Install it in the house_agent environment with: pip install duckdb") from exc
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -105,7 +104,6 @@ SQL = {
         FROM census_tracts
         WHERE tract_fips = '42003140300'
     """,
-
     # Four-metro population ranking.  Use short labels so the golden scorer
     # can match either "Miami" or a full MSA title in an agent response.
     "msa_population_rank": """
@@ -123,7 +121,6 @@ SQL = {
           )
         ORDER BY population DESC
     """,
-
     # Riverine risk must be calculated through the documented relationship:
     # census_msa -> cbsa_counties -> nri_tracts.
     "msa_flood_risk_rank": """
@@ -149,7 +146,6 @@ SQL = {
         GROUP BY t.metro
         ORDER BY avg_riverine_flood_risk DESC
     """,
-
     # Free-text tradeoff facts.
     "tradeoff_population_and_flood": """
         WITH target_msas AS (
@@ -174,7 +170,6 @@ SQL = {
         JOIN flood f USING (metro)
         ORDER BY t.metro
     """,
-
     # Unmatched MSA / CBSA explanation.
     "unmatched_msa": """
         SELECT
@@ -186,7 +181,6 @@ SQL = {
           ON m.msa_code = c.cbsa_code
         WHERE m.name = 'Sample Micro Area'
     """,
-
     "seattle_house_count": """
         SELECT COUNT(*)
         FROM houses
@@ -251,13 +245,10 @@ def build_truth(conn) -> dict:
             "The eval fixture must contain the houses expected by the golden set."
         )
     if total_count != 6:
-        raise RuntimeError(
-            f"Fixture integrity failure: expected 6 houses, got {total_count}."
-        )
+        raise RuntimeError(f"Fixture integrity failure: expected 6 houses, got {total_count}.")
     if sorted(house_cities) != ["Austin", "Denver", "Miami", "Pittsburgh"]:
         raise RuntimeError(
-            "Fixture integrity failure: house cities differ from the intended fixture: "
-            f"{house_cities!r}"
+            f"Fixture integrity failure: house cities differ from the intended fixture: {house_cities!r}"
         )
     if pgh_count == 0:
         raise RuntimeError(
@@ -285,8 +276,7 @@ def build_truth(conn) -> dict:
     no_cbsa_match = unmatched_row["cbsa_code"] is None
     if not no_cbsa_match:
         raise RuntimeError(
-            "Fixture integrity failure: Sample Micro Area unexpectedly matched a CBSA: "
-            f"{unmatched_row['cbsa_code']}"
+            f"Fixture integrity failure: Sample Micro Area unexpectedly matched a CBSA: {unmatched_row['cbsa_code']}"
         )
 
     # Numeric tradeoff facts by metro.
@@ -325,10 +315,26 @@ def build_truth(conn) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def py_literal(value) -> str:
+    """Render a value the way the formatter leaves it: double-quoted strings, `[a, b]`.
+
+    `repr()` writes single quotes, so an updater using it produced a file that `ruff format`
+    immediately rewrote - the golden set then never matched a second run of the updater, and
+    the "is the golden set current?" check could not tell stale facts from a quote style.
+    """
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(py_literal(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{py_literal(k)}: {py_literal(v)}" for k, v in value.items()) + "}"
+    return repr(value)
+
+
 def replace_assignment(text: str, variable: str, value) -> str:
     """Replace a top-level simple assignment while preserving surrounding code."""
     pattern = re.compile(rf"^({re.escape(variable)}\s*=\s*).*?$", re.MULTILINE)
-    replacement = f"{variable} = {repr(value)}"
+    replacement = f"{variable} = {py_literal(value)}"
     new_text, n = pattern.subn(replacement, text, count=1)
     if n != 1:
         raise RuntimeError(f"Could not find assignment for {variable}")
@@ -390,16 +396,20 @@ def patch_golden(text: str, truth: dict, house_agent_only: bool = False) -> str:
         return source[:start] + value_text + source[end:]
 
     replacements = [
-        ("cities_with_houses", "expected", repr(truth["cities_with_houses"])),
-        ("msa_population_rank", "expected", repr(truth["msa_population_rank"])),
-        ("msa_flood_risk_rank", "expected", repr(truth["msa_flood_risk_rank"])),
-        ("pittsburgh_house_count", "expected", repr([truth["pittsburgh_house_count"]])),
-        ("total_house_count", "expected", repr([truth["total_house_count"]])),
-        ("austin_avg_walk_score", "expected", repr([truth["austin_avg_walk_score"]])),
-        ("pittsburgh_arms_length_avg_sold_price", "expected", repr([truth["pittsburgh_arms_length_avg_sold_price"]])),
-        ("pittsburgh_tract_population", "expected", repr([truth["pittsburgh_tract_population"]])),
-        ("miami_house_walk_score", "expected", repr([truth["miami_house_walk_score"]])),
-        ("pittsburgh_house_nri_score", "expected", repr([truth["pittsburgh_house_nri_score"]])),
+        ("cities_with_houses", "expected", py_literal(truth["cities_with_houses"])),
+        ("msa_population_rank", "expected", py_literal(truth["msa_population_rank"])),
+        ("msa_flood_risk_rank", "expected", py_literal(truth["msa_flood_risk_rank"])),
+        ("pittsburgh_house_count", "expected", py_literal([truth["pittsburgh_house_count"]])),
+        ("total_house_count", "expected", py_literal([truth["total_house_count"]])),
+        ("austin_avg_walk_score", "expected", py_literal([truth["austin_avg_walk_score"]])),
+        (
+            "pittsburgh_arms_length_avg_sold_price",
+            "expected",
+            py_literal([truth["pittsburgh_arms_length_avg_sold_price"]]),
+        ),
+        ("pittsburgh_tract_population", "expected", py_literal([truth["pittsburgh_tract_population"]])),
+        ("miami_house_walk_score", "expected", py_literal([truth["miami_house_walk_score"]])),
+        ("pittsburgh_house_nri_score", "expected", py_literal([truth["pittsburgh_house_nri_score"]])),
     ]
     if house_agent_only:
         replacements = [item for item in replacements if example_agents.get(item[0]) == "house"]
@@ -413,7 +423,13 @@ def patch_golden(text: str, truth: dict, house_agent_only: bool = False) -> str:
         target = next((kw.value for kw in node.keywords if kw.arg == keyword), None)
         if target is None:
             raise RuntimeError(f"Example {example_id} has no {keyword}= field")
-        edits.append((abs_offset(target.lineno, target.col_offset), abs_offset(target.end_lineno, target.end_col_offset), value_text))
+        edits.append(
+            (
+                abs_offset(target.lineno, target.col_offset),
+                abs_offset(target.end_lineno, target.end_col_offset),
+                value_text,
+            )
+        )
 
     p = truth["tradeoff"]["Pittsburgh"]
     m = truth["tradeoff"]["Miami"]
@@ -443,7 +459,13 @@ def patch_golden(text: str, truth: dict, house_agent_only: bool = False) -> str:
         target = next((kw.value for kw in node.keywords if kw.arg == "rubric"), None)
         if target is None:
             raise RuntimeError(f"Example {example_id} has no rubric= field")
-        edits.append((abs_offset(target.lineno, target.col_offset), abs_offset(target.end_lineno, target.end_col_offset), repr(rubric_text)))
+        edits.append(
+            (
+                abs_offset(target.lineno, target.col_offset),
+                abs_offset(target.end_lineno, target.end_col_offset),
+                repr(rubric_text),
+            )
+        )
 
     for start, end, replacement in sorted(edits, key=lambda x: x[0], reverse=True):
         text = text[:start] + replacement + text[end:]
