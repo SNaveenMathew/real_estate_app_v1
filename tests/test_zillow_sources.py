@@ -5,7 +5,7 @@ Unit tests for Zillow research data sources (ZHVI and Market Heat Index):
 - RegionType normalization and column alignments
 - CBSA / MSA code resolution (services/data_loader.py::_compute_zillow_msa_codes)
 - DuckDB store ZHVI price estimation with 3-tier fallback (zip -> metro -> state)
-- House agent price estimator tool output (agents/tools.py::make_house_tools)
+- House Chat price estimator output (agents/house_agent.py::make_house_approved_functions)
 - Unified catalog registration of tables, relationships, and concepts
 """
 import io
@@ -299,56 +299,113 @@ def test_get_zhvi_price_estimate_none_when_no_data_or_no_sale(fresh_db):
     assert fresh_db.get_zhvi_price_estimate("h_none") is None
 
 
-# ─── 6. House Agent Price Estimation Tool Output ──────────────────────────────
+# ─── 6. House Chat Price Estimation Output ────────────────────────────────────
+#
+# These tests target agents.house_agent.make_house_approved_functions — the function
+# set House Chat actually executes. They used to target agents.tools.make_house_tools,
+# an unused parallel copy, which is how the ZHVI estimate documented in the README
+# stayed unreachable in the product path while this file passed.
 
-def test_make_house_tools_price_estimator_with_zhvi(fresh_db):
-    from agents.tools import make_house_tools
 
-    conn = fresh_db.get_conn()
-    conn.execute("""
-        INSERT INTO houses (house_id, address, city, state, zip, tract_fips, lat, lon)
-        VALUES ('h10', '10 Elm St', 'Pittsburgh', 'PA', '15213', '42003040100', 40.44, -80.0)
-    """)
-    conn.execute("""
-        INSERT INTO house_snapshots (snapshot_id, house_id, snapshot_date, price, source_type)
-        VALUES ('s10', 'h10', '2021-01-10', 250000, 'sold')
-    """)
-    conn.execute("""
-        INSERT INTO zhvi (region_id, region_type, region_name, state_name, date, home_value)
-        VALUES
-            ('z1', 'zip', '15213', 'PA', '2021-01-31', 200000),
-            ('z1', 'zip', '15213', 'PA', '2024-01-31', 250000)
-    """)
+def _seed_house_with_zhvi(store, house_id: str) -> None:
+    """A house with one recorded sale and a ZIP-level ZHVI series (1.25x growth)."""
+    conn = store.get_conn()
+    conn.execute(
+        "INSERT INTO houses (house_id, address, city, state, zip, tract_fips, lat, lon) "
+        "VALUES (?, '10 Elm St', 'Pittsburgh', 'PA', '15213', '42003040100', 40.44, -80.0)",
+        [house_id],
+    )
+    conn.execute(
+        "INSERT INTO house_snapshots (snapshot_id, house_id, snapshot_date, price, source_type) "
+        "VALUES (?, ?, '2021-01-10', 250000, 'sold')",
+        [f"s_{house_id}", house_id],
+    )
+    conn.execute(
+        "INSERT INTO zhvi (region_id, region_type, region_name, state_name, date, home_value) "
+        "VALUES ('z1', 'zip', '15213', 'PA', '2021-01-31', 200000), "
+        "('z1', 'zip', '15213', 'PA', '2024-01-31', 250000)"
+    )
 
-    tools = {t.name: t for t in make_house_tools("h10")}
-    estimate_tool = tools["estimate_price_with_code"]
-    output = estimate_tool.invoke({})
+
+def test_house_chat_price_estimator_includes_zhvi(fresh_db):
+    from agents.house_agent import make_house_approved_functions
+
+    house_id = "h10"
+    _seed_house_with_zhvi(fresh_db, house_id)
+
+    output = make_house_approved_functions(house_id)["estimate_price_with_code"]()
 
     assert "### ZHVI-Adjusted Estimate" in output
     assert "Last recorded sale: $250,000" in output
     assert "ZIP 15213" in output
     assert "Growth since sale: 1.250x" in output
-    assert "Estimated value (last sold price × growth): $312,500" in output
+    assert "Estimated value (last sold price x growth): $312,500" in output
 
 
-def test_make_house_tools_price_estimator_sold_without_zhvi_shows_guidance(fresh_db):
-    from agents.tools import make_house_tools
+def test_house_chat_price_estimator_sold_without_zhvi_shows_guidance(fresh_db):
+    from agents.house_agent import make_house_approved_functions
 
+    house_id = "h11"
     conn = fresh_db.get_conn()
-    conn.execute("""
-        INSERT INTO houses (house_id, address, city, state, zip, tract_fips, lat, lon)
-        VALUES ('h11', '11 Elm St', 'Pittsburgh', 'PA', '15213', '42003040100', 40.44, -80.0)
-    """)
-    conn.execute("""
-        INSERT INTO house_snapshots (snapshot_id, house_id, snapshot_date, price, source_type)
-        VALUES ('s11', 'h11', '2021-01-10', 250000, 'sold')
-    """)
+    conn.execute(
+        "INSERT INTO houses (house_id, address, city, state, zip, tract_fips, lat, lon) "
+        "VALUES (?, '11 Elm St', 'Pittsburgh', 'PA', '15213', '42003040100', 40.44, -80.0)",
+        [house_id],
+    )
+    conn.execute(
+        "INSERT INTO house_snapshots (snapshot_id, house_id, snapshot_date, price, source_type) "
+        "VALUES (?, ?, '2021-01-10', 250000, 'sold')",
+        [f"s_{house_id}", house_id],
+    )
 
-    tools = {t.name: t for t in make_house_tools("h11")}
-    output = tools["estimate_price_with_code"].invoke({})
+    output = make_house_approved_functions(house_id)["estimate_price_with_code"]()
 
     assert "### ZHVI-Adjusted Estimate" in output
     assert "python setup_data.py --only zhvi" in output
+
+
+def test_house_chat_turn_reports_the_zhvi_estimate(fresh_db, monkeypatch):
+    """One golden example through House Chat: a ZHVI-derived number must reach the user.
+
+    The code agent is scripted to call the price estimator (the documented "what is this
+    house worth" path), and the answer model echoes the evidence it was handed — so this
+    asserts the value survives the whole turn, not merely the tool call.
+    """
+    from agents import house_agent
+    from services.guardrails import GuardrailManager, GuardrailResult
+
+    house_id = "h12"
+    _seed_house_with_zhvi(fresh_db, house_id)
+
+    class _CodeLLM:
+        def invoke(self, messages):
+            class _R:
+                content = "final_result = estimate_price_with_code()"
+            return _R()
+
+    class _EvidenceEchoLLM:
+        def invoke(self, messages):
+            evidence = str(messages[0].content).split("EXECUTED EVIDENCE:", 1)[-1]
+
+            class _R:
+                content = evidence.strip()
+            return _R()
+
+    monkeypatch.setattr(house_agent, "_get_house_code_agent", lambda: _CodeLLM())
+    monkeypatch.setattr(house_agent, "_get_house_response_agent", lambda: _EvidenceEchoLLM())
+    monkeypatch.setattr(
+        GuardrailManager, "inspect_turn_input",
+        staticmethod(lambda msg: GuardrailResult(passed=True, sanitized_text=msg, reasons=[])),
+    )
+    monkeypatch.setattr(house_agent, "validate_response", lambda reply, *a, **kw: reply)
+
+    reply, history, _artifacts = house_agent.run_house_chat(
+        house_id, "What is this house worth after its last sale and local home-value growth?"
+    )
+
+    assert "ZHVI-Adjusted Estimate" in reply
+    assert "Estimated value (last sold price x growth): $312,500" in reply
+    assert any(m.get("role") == "assistant" for m in history)
 
 
 # ─── 7. Unified Catalog Registration Tests ────────────────────────────────────

@@ -100,7 +100,7 @@ def make_house_approved_functions(house_id: str) -> dict:
         }, indent=2)
 
     def estimate_price_with_code() -> str:
-        """Compute price estimates using comparable data from DuckDB."""
+        """Compute price estimates from comparable data and ZHVI home-value growth."""
         import pandas as pd
         house = store.get_house(house_id)
         if not house:
@@ -171,6 +171,30 @@ def make_house_approved_functions(house_id: str) -> dict:
                     ))
                 except Exception:
                     pass
+        # ZHVI-adjusted estimate: this house's own last recorded sale, grown
+        # forward by Zillow Home Value Index appreciation for its area. Falls
+        # back zip -> metro -> state depending on ZHVI coverage; see
+        # db.duckdb_store.get_zhvi_price_estimate for the exact tier logic.
+        zhvi_est = store.get_zhvi_price_estimate(house_id)
+        if zhvi_est:
+            level = zhvi_est["geography_level"]
+            level_label = {"zip": f"ZIP {zhvi_est['geography_key']}",
+                           "metro": "metro area (ZIP had no ZHVI coverage)",
+                           "state": "state (ZIP and metro had no ZHVI coverage)"}[level]
+            lines.append("\n### ZHVI-Adjusted Estimate (last sold price x home-value growth)")
+            lines.append(f"  Last recorded sale: ${zhvi_est['sold_price']:,.0f} on {zhvi_est['sold_date'][:10]}")
+            lines.append(f"  Geography used: {level_label}")
+            lines.append(
+                f"  ZHVI at sale ({zhvi_est['date_at_sale'][:10]}): ${zhvi_est['value_at_sale']:,.0f}  ->  "
+                f"latest ({zhvi_est['latest_date'][:10]}): ${zhvi_est['latest_value']:,.0f}"
+            )
+            lines.append(f"  Growth since sale: {zhvi_est['growth_multiple']:.3f}x")
+            lines.append(f"  -> Estimated value (last sold price x growth): ${zhvi_est['estimated_value']:,.0f}")
+        elif store.get_last_sold_snapshot(house_id):
+            lines.append("\n### ZHVI-Adjusted Estimate")
+            lines.append("  This house has a recorded sale, but no ZHVI data is loaded for its "
+                          "ZIP, metro, or state - run `python setup_data.py --only zhvi` after "
+                          "downloading a ZHVI export to enable this estimate.")
         return "\n".join(lines) if lines else "Insufficient data for price estimation."
 
     def get_nearby_sold_homes() -> str:
