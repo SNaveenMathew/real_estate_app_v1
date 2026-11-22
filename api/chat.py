@@ -32,6 +32,23 @@ _turn_failure = turn_failure  # alias for backwards compatibility
 _TRACKER_WAIT_S = 5.0
 
 
+def _queue_listener(queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
+    """Turn a progress notification into a queue item without touching the loop's internals.
+
+    ``ProgressTracker._notify`` runs on the agent's worker thread, and ``asyncio.Queue`` is
+    not thread-safe: ``put_nowait`` from that thread need not wake the loop's waiter, so the
+    next frame (sometimes the final one) could sit in the queue until the 10 s keep-alive
+    ping re-entered the loop. Handing the put to the loop itself is the one-line fix, and it
+    keeps the failure visible: a closed loop means the client is gone, which is not an error.
+    """
+    def listener(snapshot: dict) -> None:
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, snapshot)
+        except RuntimeError:          # loop already closed: the tab went away
+            pass
+    return listener
+
+
 def _seed_progress(turn_id: str | None, steps) -> None:
     """Register a turn's step plan before the turn runs.
 
@@ -128,13 +145,9 @@ async def stream_turn_progress(turn_id: str):
 
     async def event_generator():
         queue: asyncio.Queue[dict] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
 
-        def listener(snapshot: dict):
-            try:
-                queue.put_nowait(snapshot)
-            except Exception:
-                pass
-
+        listener = _queue_listener(queue, loop)
         tracker.add_listener(listener)
         try:
             while True:
