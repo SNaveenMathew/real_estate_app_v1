@@ -8,8 +8,11 @@
     GET    /api/commute/house/{id}      one house's estimates
     GET    /api/commute/summary         every fresh estimate (drives the map layer)
 
-Threading: like the rest of the app, DuckDB is used on the event-loop thread; only the pure-HTTP address
-lookup runs in a worker thread, and the compute job does its routing calls in worker threads too.
+Threading: the read/write handlers are plain ``def`` and run in FastAPI's worker pool (each thread gets
+its own DuckDB cursor, db/duckdb_store.py), so the Commute tab never stalls the map. The two handlers
+that stay ``async`` do so because they schedule the background compute job on the running loop (or, for
+``put_work``, look the address up over HTTP first); the job itself does its routing calls in worker
+threads too.
 """
 from __future__ import annotations
 
@@ -24,7 +27,7 @@ router = APIRouter(prefix="/api/commute", tags=["commute"])
 
 
 @router.get("/config")
-async def get_config():
+def get_config():
     store.get_conn()
     return commute.status()
 
@@ -53,7 +56,7 @@ async def put_work(payload: dict = Body(...)):
 
 
 @router.delete("/work")
-async def delete_work():
+def delete_work():
     store.get_conn()
     commute.clear_work()
     return commute.status()
@@ -71,20 +74,20 @@ async def post_refresh(payload: dict = Body(default={})):
 
 
 @router.get("/status")
-async def get_status():
+def get_status():
     store.get_conn()
     s = commute.status()
     return {"job": s["job"], "counts": s["counts"]}
 
 
 @router.get("/house/{house_id}")
-async def get_house_commute(house_id: str):
+def get_house_commute(house_id: str):
     store.get_conn()
     place = commute.get_work()
     return {"work": place.as_dict() if place else None, "commute": commute.commute_for_house(house_id) if place else None}
 
 
 @router.get("/summary")
-async def get_summary():
+def get_summary():
     store.get_conn()
     return commute.summary()

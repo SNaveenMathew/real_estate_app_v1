@@ -11,7 +11,7 @@ router = APIRouter(tags=["system"])
 
 
 @router.get("/api/stats")
-async def stats():
+def stats():
     houses = store.query("SELECT COUNT(*) as n FROM houses").iloc[0]["n"]
     tracts = store.query("SELECT COUNT(*) as n FROM nri_tracts").iloc[0]["n"]
     sold = store.query("SELECT COUNT(*) as n FROM sold_homes").iloc[0]["n"]
@@ -27,7 +27,7 @@ async def stats():
 
 
 @router.get("/api/config")
-async def get_client_config():
+def get_client_config():
     """Return runtime client configuration (e.g. Map tiles API key)."""
     return {
         "cartoApiKey": settings.carto_api_key,

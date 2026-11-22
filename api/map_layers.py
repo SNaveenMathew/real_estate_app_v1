@@ -26,13 +26,13 @@ _NO_DATA_HERE = {"houses", "commute"}
 
 
 @router.get("")
-async def list_layers():
+def list_layers():
     store.get_conn()
     return ml.describe_layers()
 
 
 @router.get("/{name}")
-async def get_layer(
+def get_layer(
     name: str,
     west: float = Query(..., description="Viewport west longitude"),
     south: float = Query(..., description="Viewport south latitude"),

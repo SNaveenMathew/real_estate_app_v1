@@ -106,7 +106,7 @@ async def general_chat(req: ChatRequest):
 
 
 @router.get("/api/chat/progress/{turn_id}")
-async def get_turn_progress(turn_id: str):
+def get_turn_progress(turn_id: str):
     """Get the current progress snapshot for an agent turn."""
     tracker = turn_progress.get_progress_tracker(turn_id)
     if not tracker:
@@ -162,7 +162,7 @@ async def stream_turn_progress(turn_id: str):
 
 
 @router.get("/api/agent/status")
-async def agent_status():
+def agent_status():
     """Is the language model reachable, and how busy is the agent? Makes no model call."""
     return {
         "model": llm_resilience.breaker().status(),

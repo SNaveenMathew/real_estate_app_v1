@@ -121,7 +121,7 @@ if static_dir.exists() and static_dir.is_dir():
     _STATIC_VER = _static_version()
 
     @app.get("/data", response_class=HTMLResponse)
-    async def data_page():
+    def data_page():
         """The Data page: schema map, dataset upload, and review of proposed catalog changes."""
         html = (static_dir / "data.html").read_text(encoding="utf-8")
         ver = hashlib.sha1(b"".join((static_dir / n).read_bytes() for n in ("data.js", "data.css"))).hexdigest()[:10]
@@ -129,7 +129,7 @@ if static_dir.exists() and static_dir.is_dir():
         return HTMLResponse(content=html, headers={"Cache-Control": "no-cache"})
 
     @app.get("/cache", response_class=HTMLResponse)
-    async def cache_page():
+    def cache_page():
         """The Cache page: what has been reused, and how it connects to the data model."""
         html = (static_dir / "cache.html").read_text(encoding="utf-8")
         ver = hashlib.sha1(b"".join((static_dir / n).read_bytes() for n in ("cache.js", "cache.css"))).hexdigest()[:10]
@@ -137,7 +137,7 @@ if static_dir.exists() and static_dir.is_dir():
         return HTMLResponse(content=html, headers={"Cache-Control": "no-cache"})
 
     @app.get("/", response_class=HTMLResponse)
-    async def root():
+    def root():
         html = (static_dir / "index.html").read_text(encoding="utf-8")
         client_config = json.dumps({"cartoApiKey": settings.carto_api_key}).replace("</", "<\\/")
         html = html.replace("</head>", f"<script>window.APP_CONFIG={client_config};</script>\n</head>", 1)
