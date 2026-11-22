@@ -3,6 +3,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- Model output is sanitised in app.js; this policy is the second line: no inline script, no
+       object/embed, no form posts off-origin, and only the two CDNs the map and markdown need. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src 'none'" />
   <title>Real Estate Intelligence</title>
 
   <!-- Leaflet -->
@@ -184,7 +187,8 @@
 
 
 
-<script src="/static/app.js?v=5"></script>
+<script src="/static/sanitize.js?v=1"></script>
+<script src="/static/app.js?v=6"></script>
 <script src="/static/commute.js?v=1"></script>
 <script src="/static/layers.js?v=1"></script>
 </body>

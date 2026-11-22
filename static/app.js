@@ -610,9 +610,18 @@ function appendMsg(ctx, role, content, traceUrl = null) {
   const el = document.getElementById(containerId);
   const div = document.createElement('div');
   div.className = `msg ${role}`;
-  const safeContent = content == null ? 'The assistant returned no response.' : String(content);
-  const html = typeof marked !== 'undefined' ? marked.parse(safeContent) : safeContent;
-  div.innerHTML = `<div class="bubble">${html}</div>`;
+  const rawContent = content == null ? 'The assistant returned no response.' : String(content);
+  // Model output is untrusted: markdown -> HTML -> whitelist sanitiser, then the DOM. The
+  // variable used to be called safeContent and was handed to innerHTML unescaped.
+  const html = typeof marked !== 'undefined' ? marked.parse(rawContent) : rawContent;
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  if (typeof sanitizeHtml === 'function') {
+    bubble.innerHTML = sanitizeHtml(html);
+  } else {
+    bubble.textContent = rawContent;          // no sanitiser loaded: show the text, never the HTML
+  }
+  div.appendChild(bubble);
   if (role === 'assistant') {
     const actions = document.createElement('div');
     actions.className = 'msg-actions';
