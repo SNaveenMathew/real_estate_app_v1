@@ -60,3 +60,4 @@ pytest-asyncio==1.0.0
 
 # Lint (CI gate: .github/workflows/ci.yml)
 ruff==0.17.6
+mypy==2.4.1

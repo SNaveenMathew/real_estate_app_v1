@@ -42,6 +42,16 @@ jobs:
       - name: Ruff
         run: python -m ruff check .
 
+      # Formatting is a gate, not a preference: an unformatted diff hides the one line that
+      # matters. `ruff format .` is the fix.
+      - name: Ruff format
+        run: python -m ruff format --check .
+
+      # A baseline, not a conversion: mypy.ini lists the modules written with type hints.
+      # Widening that list is the ratchet.
+      - name: Type check (baseline)
+        run: python -m mypy --config-file mypy.ini
+
       # Its own throw-away database: an empty data/real_estate.duckdb left behind
       # here would defeat the "was data included in this build?" skip in
       # tests/test_map_layers.py and fail those tests against no data.
@@ -58,5 +68,8 @@ jobs:
       - name: Generated docs
         run: python scripts/gen_docs_tables.py --check
 
+      # pytest.ini excludes the `integration` marker: those tests assert against
+      # data/real_estate.duckdb, which is not in the repository. tests/test_frontend_sanitizer.py
+      # shells out to `node --test` (Node is preinstalled on GitHub runners).
       - name: pytest
         run: python -m pytest tests eval/tests -q
