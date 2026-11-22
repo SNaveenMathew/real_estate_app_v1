@@ -905,6 +905,19 @@ def _extract_bike_zip(tmp_path: Path, dest_root: Path) -> tuple[list[Path], dict
 
 # ── Orchestration ────────────────────────────────────────────────────────────
 
+def _invalidate_layer_cache() -> None:
+    """Row counts shown in the layer panel just changed; drop the derived specs.
+
+    Imported lazily: services/map_layers.py reads the catalog, and this module is
+    imported by the catalog's own seed path.
+    """
+    try:
+        from services import map_layers
+        map_layers.invalidate_caches()
+    except Exception:
+        pass
+
+
 def refresh_source(key: str, tmp_path: Path, orig_filename: str) -> dict:
     """
     Save an uploaded file into the right place for `key` and re-run its loader.
@@ -1071,6 +1084,7 @@ def refresh_source(key: str, tmp_path: Path, orig_filename: str) -> dict:
     message = " ".join(message_parts)
 
     store.record_source_load(source.key, source.label, rows_after, saved_files, message)
+    _invalidate_layer_cache()          # the row counts the map panel shows have changed
 
     return {
         "ok": True, "source_key": source.key, "rows_before": rows_before, "rows_after": rows_after,

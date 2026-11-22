@@ -48,8 +48,10 @@ serve data for them (there is nothing generic to serve — the frontend already 
 """
 from __future__ import annotations
 
+import copy
 import json
 import re
+import threading
 from typing import Any
 
 import pandas as pd
@@ -313,8 +315,35 @@ def _classify(table: str, meta) -> dict | None:
 _SPECIAL_TABLES = {"houses", "house_commute"}
 
 
+# ── Spec cache ───────────────────────────────────────────────────────────────
+# Building a spec means a COUNT(*) per visible table - 740,679 crime rows among them -
+# recomputed on every request to answer a question whose answer changes only when the
+# catalog (or the data behind it) does. Memoise on schema.catalog_version(); a data-only
+# reload keeps the catalog version, so refresh_source invalidates explicitly below.
+_SPEC_LOCK = threading.RLock()
+_SPEC_CACHE: dict[str, tuple[str, Any]] = {}
+
+
+def invalidate_caches() -> None:
+    """Forget derived specs and row counts. Call after a data-only reload."""
+    with _SPEC_LOCK:
+        _SPEC_CACHE.clear()
+
+
 def derive_layer_specs() -> list[dict]:
     """Every generic (non-special) map layer the live catalog currently supports."""
+    version = schema.catalog_version()
+    with _SPEC_LOCK:
+        cached = _SPEC_CACHE.get("generic")
+        if cached is not None and cached[0] == version:
+            return copy.deepcopy(cached[1])
+    specs = _build_layer_specs()
+    with _SPEC_LOCK:
+        _SPEC_CACHE["generic"] = (version, specs)
+    return copy.deepcopy(specs)
+
+
+def _build_layer_specs() -> list[dict]:
     out = []
     for name, meta in sorted(schema._tables().items()):
         if not meta.agent_visible or name in _SPECIAL_TABLES:
@@ -334,6 +363,18 @@ def derive_layer_specs() -> list[dict]:
 
 def describe_layers() -> dict:
     """Full spec for the frontend panel: generic layers plus the two special, JS-driven ones."""
+    version = schema.catalog_version()
+    with _SPEC_LOCK:
+        cached = _SPEC_CACHE.get("panel")
+        if cached is not None and cached[0] == version:
+            return copy.deepcopy(cached[1])
+    payload = _build_describe_layers(version)
+    with _SPEC_LOCK:
+        _SPEC_CACHE["panel"] = (version, payload)
+    return copy.deepcopy(payload)
+
+
+def _build_describe_layers(version: str) -> dict:
     layers = derive_layer_specs()
     layers.insert(0, {"name": "houses", "title": "Houses", "kind": "points", "group": "overlay",
                       "row_count": schema._row_count("houses"), "domain": "housing", "origin": "builtin",
@@ -346,7 +387,7 @@ def describe_layers() -> dict:
                    "available": commute_available, "reason": None if commute_available else "Not set up.",
                    "special": "commute", "default_on": False})
     fill_group = [l["name"] for l in layers if l["group"] == "fill"]
-    return {"layers": layers, "exclusive_groups": {"fill": fill_group}, "catalog_version": schema.catalog_version()}
+    return {"layers": layers, "exclusive_groups": {"fill": fill_group}, "catalog_version": version}
 
 
 def _spec_for(name: str) -> dict:
