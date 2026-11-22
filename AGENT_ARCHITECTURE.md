@@ -806,6 +806,17 @@ is single-flight (`start_refresh` claims it synchronously), always leaves the `r
 job state, never raised), and reports *why* a mode came back empty (`client.last_error`), so a dead bike server is a
 visible warning instead of silently missing numbers.
 
+The same shape now backs the Data page (`services/jobs.py`): dataset ingest, enrichment, analysis and a built-in
+source reload each answer `202` with a `job_id`, a worker thread runs the callable, and `GET /api/jobs/{id}`
+returns the snapshot the page polls. One job per kind, and a second request is refused with `409` rather than
+interleaving catalog mutations.
+
+Two smaller consequences of the same move: the progress stream hands every frame to the loop with
+`loop.call_soon_threadsafe` (`api/chat.py`), because `ProgressTracker._notify` fires on the agent's worker
+thread and `asyncio.Queue` is not thread-safe; and `services/map_layers.py` caches derived layer specs per
+`schema.catalog_version()`, dropping them after a data-only reload, so a map pan no longer repeats a
+`COUNT(*)` for every visible table.
+
 ### 9.3 How the chats reach it
 
 - **General Chat**: `house_commute` is an ordinary built-in catalog table (`db/catalog_seed.py`), related to `houses` by

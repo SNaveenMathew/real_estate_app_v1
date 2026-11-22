@@ -855,6 +855,18 @@ keeps the evidence it was approved on. Lanes are ordered to keep linked tables c
   point data use *Add census tract from coordinates*. Text keys are matched exactly (after
   trim/case), not fuzzily.
 - A published dataset is read-only in the UI; retire it and upload again to change it.
+- Everything that takes longer than a request should is a background job. Uploading a dataset, enriching
+  it, analysing it and reloading a built-in source answer `202` with a `job_id`; the page polls
+  `GET /api/jobs/{job_id}` and shows the job's own progress message. A job keeps running if you close the
+  tab, and one job of each kind runs at a time (a second request gets `409`). Jobs are in memory: they
+  describe work in this process, not durable state - the catalog transaction the work commits is the
+  durable part.
+- Map-layer metadata (the per-table `COUNT(*)` behind the layer panel) is cached per catalog version and
+  dropped when a source is reloaded, so panning the map no longer re-counts 740,679 crime rows per request.
+- Back up the database with `python scripts/db_backup.py backup` (checkpoint, copy, verify). `list`,
+  `verify` and `restore` cover the rest; `restore` refuses while the app holds the file and keeps the
+  replaced database as `<name>.pre-restore-<timestamp>.duckdb`. Shutdown runs `CHECKPOINT`, and
+  `GET /api/stats` reports `wal_recoveries` so a silent WAL recovery is visible.
 
 ---
 
@@ -1158,7 +1170,9 @@ The browser uses these main endpoints:
 |---|---|---|
 | GET | `/data` | The Data page |
 | GET | `/api/onboarding/catalog[?dataset_id=]` | The unified catalog (plus a draft overlay for a dataset under review) |
-| GET / POST | `/api/onboarding/datasets` | List datasets / upload a file (multipart) |
+| GET / POST | `/api/onboarding/datasets` | List datasets / upload a file (multipart); the upload answers `202` + `job_id` |
+| GET | `/api/jobs/{job_id}` | Poll any background job (ingest, enrich, analyze, source reload) |
+| GET | `/api/jobs` | Recent job snapshots, newest first |
 | GET / PUT | `/api/onboarding/datasets/{id}` | Read a dataset / save its description |
 | POST | `/api/onboarding/datasets/{id}/draft` | Draft wording with the catalog model (optional) |
 | POST | `/api/onboarding/datasets/{id}/enrich` | `{"kind": "spatial_tract" \| "geocode"}` |
@@ -1224,10 +1238,16 @@ your real data.
 ```bash
 python run_eval.py                 # full run against your configured model
 python run_eval.py --list          # see what's in the golden set
-python run_eval.py --tags nri,sold_homes    # run a subset
+python run_eval.py --tags nri,sold_homes    # run a subset (reported as partial; exits 2)
 python run_eval.py --mock          # smoke-test the harness itself, no model server needed
-python .\run_eval.py --skip-house-agent     # skip evals on house agent
+python .\run_eval.py --skip-house-agent     # skip evals on house agent (partial; use --allow-partial to exit 0)
 ```
+
+The set has **76 examples**: the original 53, plus 10 typo/paraphrase variants, 5 injection attempts, 5
+multi-turn follow-ups (their history is part of the example) and 3 deliberately too-broad questions whose
+correct answer is an honest bound. A full run covers all of them or exits non-zero; a filtered run is
+labelled partial in the report and exits 2 unless `--allow-partial` is passed, because a subset that passes
+says nothing about the examples it skipped.
 
 Each golden example is one of:
 - **structured** — has a definite right answer (a count, a ranking, a set of
@@ -1240,9 +1260,12 @@ Each golden example is one of:
   defaults to the same server as the agent under test, but an independent or
   stronger judge is stronger evidence than a model grading itself.
 
-Reports land in `eval/reports/` as both JSON (for tooling) and Markdown (for
-reading). Exit code is non-zero if anything failed or errored, so this is
-safe to wire into CI. `eval/tests/test_scoring.py` tests the assert-equal
+The judge retries once. If it still cannot produce a parseable verdict the example is recorded as
+**INCONCLUSIVE**, not ERROR: the answer was never judged, so calling it a failure of the agent would be
+wrong. Reports land in `eval/reports/` as both JSON (for tooling, UTF-8) and Markdown (for reading), and
+record the command, the ids that actually ran, the agent model and the judge model - plus a warning when
+the judge is the same model that answered. Exit codes: `1` for FAIL/ERROR, `2` for INCONCLUSIVE or a
+partial run - 0 only when every example in a complete run passed, so this is safe to wire into CI. `eval/tests/test_scoring.py` tests the assert-equal
 scorer itself against hand-crafted replies — run it directly any time you
 change `eval/scoring.py`.
 
