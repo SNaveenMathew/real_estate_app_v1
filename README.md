@@ -1241,7 +1241,15 @@ python run_eval.py --list          # see what's in the golden set
 python run_eval.py --tags nri,sold_homes    # run a subset (reported as partial; exits 2)
 python run_eval.py --mock          # smoke-test the harness itself, no model server needed
 python .\run_eval.py --skip-house-agent     # skip evals on house agent (partial; use --allow-partial to exit 0)
+python run_eval.py --calibrate     # score known-verdict answers and exit (catches an always-pass scorer or judge)
 ```
+
+A run refuses to start when the judge is the agent's own model: a model scoring its own answers is not
+independent evidence. Point `JUDGE_LLAMA_SERVER_MODEL` / `JUDGE_LLAMA_SERVER_BASE_URL` at a different model,
+or pass `--allow-self-judge` to record the run knowing what it is. `--calibrate` exists for the same reason:
+`eval/calibration.py` holds ten replies with known verdicts (correct, missing, distractor, wrong order,
+tolerance, percentage, empty) plus two free-text rubric answers, so a scorer or judge that has drifted to
+always-pass fails a check instead of quietly inflating every score.
 
 The set has **88 examples**: the original 53, plus 10 typo/paraphrase variants, 5 injection attempts, 5
 multi-turn follow-ups (their history is part of the example), 3 deliberately too-broad questions whose
@@ -1416,11 +1424,17 @@ representative loaded data rather than invented expected values.
 Keep the golden set as the deterministic fixture regression suite and maintain a
 separate integration suite for:
 
-1. Successful, no-route, and crime-avoidance BikePGH routing cases (the golden
-   set covers route counts and city filters, not the router itself)
-2. Multiple price/status observations in `house_snapshots`
-3. Several house documents and document types
-4. A non-favorite fixture house so inventory scope is genuinely tested
+1. Multiple price/status observations in `house_snapshots`
+2. Several house documents and document types
+3. A non-favorite fixture house so inventory scope is genuinely tested
+
+Routing correctness no longer needs a populated database: `tests/test_bike_routing_graph.py` builds a
+four-node graph with known weights and pins the shortest path, the no-path error, crime avoidance
+(blocks the hot segment, reroutes around it, can disconnect the network) and endpoint snapping.
+
+The other half of that gap is closed by `eval/real_data.py`: ten questions whose ground truth is a
+checked-in SELECT executed read-only against `data/real_estate.duckdb`, not a number derived from the
+fixture. Those cases are marked `integration` (see "Running the tests" above).
 
 ---
 
@@ -1498,13 +1512,18 @@ Like bike routing, endpoints are human-readable place strings geocoded via Nomin
 
 ## Developer scripts & tests
 
-These utility scripts and tests are intended for debugging, data validation, evaluation, and regression testing. Run them from the repository root:
+These utility scripts and tests are intended for debugging, data validation, evaluation, and regression testing. Run them from the repository root.
+
+`pytest` excludes anything marked `integration` (`pytest.ini`): those tests assert against the loaded
+`data/real_estate.duckdb` and the live catalog, so they cannot pass on a clean checkout or while the app
+holds the database open. Run them deliberately with `pytest -m integration`.
 
 - `tests/test_guardrails.py`: Full test suite for multi-layer guardrails (Input prompt injection defense, Code AST sandboxing, read-only SQL validation, output grounding) plus microsecond latency benchmark. Usage: `python tests/test_guardrails.py`
 - `tests/test_bikepg_h_visualization.py`: Regression checks verifying BikePGH visualization specs and styling matches ground truth. Usage: `python tests/test_bikepg_h_visualization.py`
-- `tests/test_transit_integration.py`: End-to-end unit and integration tests for FTA dataset loading, DuckDB schemas, catalog seed definitions, metadata, routing engine, and API endpoints. Usage: `pytest tests/test_transit_integration.py`
+- `tests/test_transit_integration.py`: End-to-end unit and integration tests for FTA dataset loading, DuckDB schemas, catalog seed definitions, metadata, routing engine, and API endpoints. Usage: `pytest -m integration tests/test_transit_integration.py`
 - `tests/test_playwright_transit.py`: Browser end-to-end verification using Playwright, verifying the Transit Routes map layer rendering, General Chat query handling with the local LLM, and route card artifact visualization. Usage: `pytest tests/test_playwright_transit.py`
-- `run_eval.py`: Agent evaluation pipeline. Runs the golden set examples against real agents or mock fixture DB, scores them, and writes timestamped reports to `eval/reports/`. Usage: `python run_eval.py [--mock]`
+- `run_eval.py`: Agent evaluation pipeline. Runs the golden set examples against real agents or mock fixture DB, scores them, and writes timestamped reports to `eval/reports/`. Usage: `python run_eval.py [--mock] [--calibrate]`
+- `eval/real_data.py`: Ten-question tier scored against checked-in SQL on the real database (integration). Usage: `pytest -m integration tests/test_real_data_eval.py`
 - `debug_bike_route.py`: Lightweight checks for BikePGH city-key normalization and routing helpers. Usage: `python debug_bike_route.py`
 - `debug_flood_query.py`: Step-by-step SQL debugger for the flood-risk query; runs CTEs, prints table counts, join diagnostics, and sample rows to pinpoint where the chain breaks. Usage: `python debug_flood_query.py`
 - `debug_nri_columns.py`: Inspect the NRI shapefile's DBF column names and show NULL counts for hazard columns in `nri_tracts`. Usage: `python debug_nri_columns.py`

@@ -161,16 +161,20 @@ is conditional:
 ```python
 if step == 0:
     step_failed = any(
-        isinstance(result, str) and (
+        isinstance(result, str)
+        and (
             "Query returned 0 rows" in result
             or "Code Agent error:" in result
             or "does not match" in result.lower()
             or ("join" in result.lower() and "likely" in result.lower())
-            or answer_status.is_retryable(result)       # NOT_ANSWERED[unplannable | place_missing], see §11.5
+            or answer_status.is_retryable(result)  # NOT_ANSWERED[unplannable | place_missing], see §11.5
         )
         for _, result in calls
     )
-    if not any(name in {"query_database", "find_bike_route", "search_all_house_descriptions"} for name in names) or step_failed:
+    if (
+        not any(name in {"query_database", "find_bike_route", "search_all_house_descriptions"} for name in names)
+        or step_failed
+    ):
         continue
 break
 ```

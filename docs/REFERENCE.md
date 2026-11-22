@@ -42,7 +42,7 @@ are the facts — add a route, a setting or an approved function and re-run the 
 | POST | `/api/house/{house_id}/favorite` | Toggle the favorite status of a house. | sync |
 | POST | `/api/house/{house_id}/photo` | Upload a photo for a house. Stores the file and a reference in the vector DB. | sync |
 | GET | `/api/house/{house_id}` |  | sync |
-| GET | `/api/houses` | Return all houses as GeoJSON FeatureCollection. | sync |
+| GET | `/api/houses` | Return houses as a GeoJSON FeatureCollection. | sync |
 | GET | `/api/jobs/{job_id}` |  | sync |
 | GET | `/api/jobs` |  | sync |
 | GET | `/api/layers/{name}` |  | sync |
@@ -92,8 +92,8 @@ Every field of `config.Settings` with its default and the comment that documents
 | `agent_max_tokens` | `2048` | ReAct agent turn: reasoning + tool call + final answer |
 | `code_agent_max_tokens` | `1500` | SQL Code Agent: raised from 700 — see "Round 2" above |
 | `llm_request_timeout` | `120.0` | seconds, per HTTP request to llama-server |
-| `phoenix_batch_export` | `True` | False = export each span synchronously: blocks every request while the collector is down |
-| `llm_max_retries` | `1` | client-level retries; the library default (2) multiplies the worst-case wait to ~3x the timeout |
+| `phoenix_batch_export` | `True` |  |
+| `llm_max_retries` | `1` |  |
 | `llm_breaker_threshold` | `3` | consecutive transient failures before the model is treated as down |
 | `llm_breaker_cooldown_s` | `30.0` | then calls fail instantly until this passes; one probe call is let through |
 | `agent_max_concurrent_turns` | `2` | local model servers cannot parallelize much; extra turns queue |
@@ -106,6 +106,7 @@ Every field of `config.Settings` with its default and the comment that documents
 | `semantic_fallback_enabled` | `True` |  |
 | `semantic_fallback_timeout_s` | `20.0` |  |
 | `session_memory_max_turns` | `20` |  |
+| `session_memory_retention_days` | `30` |  |
 | `relationship_llm_suggestions_enabled` | `False` |  |
 | `relationship_llm_timeout_s` | `20.0` |  |
 | `presentation_table_max_rows` | `200` |  |
