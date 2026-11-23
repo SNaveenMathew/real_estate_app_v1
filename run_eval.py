@@ -89,6 +89,14 @@ def run_example(example: GoldenExample, judge, mock: bool):
                 from agents.house_agent import run_house_chat
 
                 reply, _, _ = run_house_chat(example.house_id, example.question, history=list(example.history))
+                # run_house_chat emits spans but returns no metadata, so read the trace the local capture
+                # already holds; without this every house-agent example shipped an empty trace file.
+                try:
+                    from observability import latest_local_trace_id
+
+                    trace_id = latest_local_trace_id()
+                except Exception:
+                    trace_id = None
         except Exception as e:
             trace_id = None
             try:
@@ -313,7 +321,9 @@ def main():
             except Exception as exc:
                 result.extra["trace_export_error"] = str(exc)
         dt = time.time() - t0
-        icon = {"PASS": "\u2713", "FAIL": "\u2717", "ERROR": "!"}[result.verdict]
+        # INCONCLUSIVE is a real verdict (the judge could not decide), so a run that hits it must keep
+        # printing rather than dying on a KeyError and losing the report for every earlier example.
+        icon = {"PASS": "\u2713", "FAIL": "\u2717", "ERROR": "!", "INCONCLUSIVE": "?"}[result.verdict]
         print(f"  [{icon}] {ex.id:<42s} {result.verdict:<6s} ({result.method}, {dt:.1f}s)")
         if result.verdict != "PASS":
             print(f"        {result.reason}")
