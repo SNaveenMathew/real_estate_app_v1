@@ -282,9 +282,11 @@ def test_the_cache_api_serves_stats_graph_entries_and_clear(reference_data):
     assert client.get("/api/cache").json()["total_entries"] == 0
 
 
-def test_the_cache_page_is_served(reference_data):
+def test_the_cache_page_url_is_served(reference_data):
+    """Issue #16's page; it now draws the ontology (tests/test_ontology.py covers that binding), and
+    ``/cache`` is kept as the historical URL so existing links keep working."""
     import main
 
     page = TestClient(main.app).get("/cache")
     assert page.status_code == 200
-    assert "What the assistant has reused" in page.text
+    assert "/static/cache.js" in page.text
