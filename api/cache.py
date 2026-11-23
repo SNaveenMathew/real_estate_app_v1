@@ -1,7 +1,8 @@
 """HTTP API behind the Cache page (``/cache``).
 
     GET  /api/cache                 counters: prompt / semantic / SQL entries, hits, fingerprint
-    GET  /api/cache/graph           the node/edge model the page draws (abstractions -> questions -> tables)
+    GET  /api/cache/graph           the reuse view: abstractions -> cached questions -> tables
+                                    (the /ontology page draws db/ontology.py instead)
     GET  /api/cache/entries         raw rows for the inspector (``kind``, ``q``, ``limit``)
     POST /api/cache/clear           forget everything, or one kind (``{"kind": "prompt|semantic|sql"}``)
 

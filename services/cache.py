@@ -44,10 +44,11 @@ reloaded, rows added or replaced, a catalog edit); they would not catch an in-pl
 preserved a table's row count, which is why entries also expire on ``cache_ttl_s`` and the Cache
 page has a Clear button.
 
-The Cache page (``static/cache.html``) reads ``graph()`` below: abstractions (the live catalog's
-semantic concepts — walkability, transit connectivity, and whatever else the catalog holds) on the
-left, cached questions in the middle, the tables/CTEs they read on the right, so the connectedness
-is visible at the abstraction level and clickable down to the individual statement.
+``graph()`` below still serves the reuse view at ``/api/cache/graph``: abstractions (the live
+catalog's semantic concepts — walkability, transit connectivity, and whatever else the catalog
+holds), the cached questions routed to them, and the tables/CTEs those questions read.  The page at
+``/cache`` now draws the ontology instead (``db/ontology.py``, mounted at ``/api/ontology``), because
+the connectedness it has to show is the data model's, not the cache's.
 """
 
 from __future__ import annotations

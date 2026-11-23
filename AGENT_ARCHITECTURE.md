@@ -1453,15 +1453,28 @@ count is not detected; TTL and Clear are the answer, and every write path in the
 changes a count. This is documented rather than papered over because it is the one assumption the
 whole design rests on.
 
-### 13.5 The graph on the Cache page
+### 13.5 The ontology and graph page
 
-`cache.graph()` returns abstractions → questions → tables. The abstractions are the live catalog's
-semantic concepts (`describe_catalog()["concepts"]`), not a hardcoded list, which is why "walkability"
-and "transit connectivity" appear with no cache-specific code, and why a concept you add on the Data
-page appears too. Concepts with zero cached questions are still returned: the page's job is to show
-what the assistant *can* reason about next to what it has actually reused. Edges are `asks`
-(concept → question) and `reads` (question → table), plus a separate role → call family for the prompt
-cache.
+`/ontology` (served from `static/cache.html`, and still reachable as `/cache` because issue #16 named
+it that way) draws the document `db/ontology.py` derives from the live catalog: classes (subject
+areas, datasets, tables, semantic concepts, entity types), properties (every column, with role and
+unit) and typed relations (`in_domain`, `in_dataset`, `in_table`, `uses_table`, `measures`, `about`,
+`requires_entity`, `subclass_of`, `overrides`, `joins`, `identified_by`, `derived_from`).
+
+Three granularities are three projections of the same document, so they cannot disagree: **overview**
+(areas, datasets, concepts, entity types — the higher-level abstractions), **model** (+ tables and
+the approved joins), **full** (+ every column and the measure/identity edges). Every endpoint of
+every edge is a class or property in the same document; `issues` reports dangling endpoints,
+duplicate identifiers, `broader` cycles and stale column notes instead of hiding them.
+
+The catalog is the only source. A dataset approved on the Data page registers its table, columns,
+concepts, entity domain and links in one transaction, so the next request includes it with no code
+change and no migration (`tests/test_ontology.py` proves this with an approved upload). The one
+declared hierarchy is the optional `broader` concept knob, validated for unknown targets and cycles by
+`db/catalog_lint.py`; nothing else is inferred.
+
+`cache.graph()` still serves `/api/cache/graph` (abstractions → cached questions → tables) for clients
+that want the reuse view; the page no longer binds to it.
 
 ### 13.6 Tests
 
