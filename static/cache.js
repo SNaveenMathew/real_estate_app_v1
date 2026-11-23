@@ -1,7 +1,8 @@
 'use strict';
-/* Cache page: what the assistant has reused, and how it connects to the data model.
-   Vanilla JS, no dependencies. Everything that comes from the cache or the catalog is rendered with
-   textContent / DOM nodes (never innerHTML): cached answers and user questions are untrusted text. */
+/* Ontology page: the data model's classes, properties and relations, drawn as a graph.
+   Vanilla JS, no dependencies. Data comes from GET /api/ontology/graph?detail=..., which is derived
+   server-side from the live catalog, so an approved dataset appears here with no page change.
+   Every string from the API is rendered with textContent / DOM nodes, never innerHTML. */
 
 /* ---------------------------------------------------------------- tiny DOM helpers */
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -35,48 +36,32 @@ function s(tag, attrs, ...kids) {
 }
 const fmt = n => (n == null || n === '' ? '–' : Number(n).toLocaleString('en-US'));
 const clip = (t, n) => { const v = String(t == null ? '' : t); return v.length > n ? v.slice(0, n - 1) + '…' : v; };
-const timeAgo = iso => {
-  if (!iso) return 'never';
-  const ms = Date.now() - new Date(iso).getTime();
-  const mins = Math.round(ms / 60000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins} min ago`;
-  const hrs = Math.round(mins / 60);
-  if (hrs < 24) return `${hrs} hr${hrs === 1 ? '' : 's'} ago`;
-  const days = Math.round(hrs / 24);
-  return `${days} day${days === 1 ? '' : 's'} ago`;
+
+/* ---------------------------------------------------------------- vocabulary */
+const LANES = ['domain', 'dataset', 'concept', 'entity_type', 'table', 'column'];
+const LANE_LABEL = {
+  domain: 'subject area', dataset: 'dataset', concept: 'concept',
+  entity_type: 'entity type', table: 'table', column: 'column (property)',
 };
-
-/* ---------------------------------------------------------------- API */
-async function api(path, opts = {}) {
-  const res = await fetch('/api/cache' + path, opts);
-  if (!res.ok) {
-    let msg = `${res.status} ${res.statusText}`;
-    try { const j = await res.json(); if (j && j.detail) msg = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail); } catch (_) { /* keep default */ }
-    throw new Error(msg);
-  }
-  return res.json();
-}
-const JSON_HDR = { 'Content-Type': 'application/json' };
-
-/* ---------------------------------------------------------------- state */
+const LANE_WIDTH = { domain: 176, dataset: 208, concept: 286, entity_type: 178, table: 190, column: 236 };
+const KIND_COLOR = {
+  domain: '#0f9d8a', dataset: '#6d4fc4', concept: '#3d7be8',
+  entity_type: '#e0742f', table: '#7b8598', column: '#9aa5b8',
+};
 const DOMAIN_ORDER = ['housing', 'geography', 'risk', 'sales', 'safety', 'mobility', 'environment',
   'demographics', 'other', 'system'];
-const DOMAIN_COLOR = { housing: '#3d7be8', geography: '#0f9d8a', risk: '#e0742f', sales: '#b08a1e',
-  safety: '#c2415c', mobility: '#5a67d8', environment: '#3f9a5b', demographics: '#8d6e63',
-  other: '#7b8598', system: '#9aa5b8' };
-
-const S = {
-  graph: null, view: 'questions', sel: null, zoom: 1, showEmpty: true, q: '',
-  entry: null, entryKey: null, loadingEntry: false,
+const DOMAIN_COLOR = {
+  housing: '#3d7be8', geography: '#0f9d8a', risk: '#e0742f', sales: '#b08a1e', safety: '#c2415c',
+  mobility: '#5a67d8', environment: '#3f9a5b', demographics: '#8d6e63', other: '#7b8598', system: '#9aa5b8',
 };
+const EDGE_COLOR = {
+  in_domain: '#dfe5ef', in_dataset: '#e2daf6', in_table: '#e8edf5', uses_table: '#a8bad2',
+  measures: '#c99a2e', about: '#e0a06a', requires_entity: '#c9770f', subclass_of: '#0f9d8a',
+  overrides: '#5a67d8', joins: '#c2415c', identified_by: '#8d6e63', derived_from: '#b08a1e',
+};
+const ROW = 32, HEAD = 48, LANE_GAP = 86;
 
-function toast(msg, kind = '') {
-  const el = h('div', { class: 'toast ' + kind }, msg);
-  $('#toasts').append(el);
-  setTimeout(() => el.classList.add('out'), 4200);
-  setTimeout(() => el.remove(), 4800);
-}
+const S = { graph: null, detail: 'standard', sel: null, zoom: 1, q: '' };
 
 const rankOf = d => { const i = DOMAIN_ORDER.indexOf(d || 'other'); return i < 0 ? DOMAIN_ORDER.length : i; };
 
@@ -85,161 +70,114 @@ function renderStats() {
   const box = $('#stats');
   box.replaceChildren();
   const g = S.graph;
-  if (!g || !g.stats) { box.append(h('p', { class: 'muted pad' }, 'The cache is unavailable.')); return; }
+  if (!g || !g.stats) { box.append(h('p', { class: 'muted pad' }, 'The ontology is unavailable.')); return; }
   const st = g.stats;
-  const card = (label, data, on, note) => {
-    const entries = data ? data.entries : 0;
-    const hits = data ? data.hits : 0;
-    const reused = entries ? Math.round((hits / (entries + hits || 1)) * 100) : 0;
-    return h('div', { class: 'stat' + (on ? '' : ' off'), title: note || '' },
-      h('div', { class: 'k' }, label),
-      h('div', { class: 'v' }, fmt(entries)),
-      h('div', { class: 'sub' }, on ? `${fmt(hits)} reuse${hits === 1 ? '' : 's'} · ${reused}% of lookups` : 'turned off'),
-      h('div', { class: 'bar' }, h('i', { style: { width: `${Math.max(0, Math.min(100, reused))}%` } })));
-  };
+  const issues = g.issues || [];
+  const errors = issues.filter(i => i.severity === 'error').length;
+  const warnings = issues.filter(i => i.severity === 'warning').length;
+  const card = (label, value, sub, title) => h('div', { class: 'stat', title: title || '' },
+    h('div', { class: 'k' }, label), h('div', { class: 'v' }, value), h('div', { class: 'sub' }, sub));
   box.append(
-    card('Prompt / context', st.prompt, st.prompt && st.prompt.enabled,
-      'Temperature-0 model calls replayed verbatim for an unchanged prompt.'),
-    card('Semantic answers', st.semantic, st.semantic && st.semantic.enabled,
-      'Questions the planner routed to the same concepts, tables, operation and scope.'),
-    card('SQL / CTE results', st.sql, st.sql && st.sql.enabled,
-      'Identical statements, including CTEs, shared by both chats.'),
-    h('div', { class: 'stat' },
-      h('div', { class: 'k' }, 'Data fingerprint'),
-      h('div', { class: 'v mono', style: { fontSize: '13px' } }, st.data_version || 'unavailable'),
-      h('div', { class: 'sub' }, 'A reloaded dataset changes this, and every entry stops matching.')),
+    card('Subject areas', fmt(st.domains), 'top-level grouping of the model'),
+    card('Concepts', fmt(st.concepts), 'what the assistant can reason about'),
+    card('Tables', fmt(st.tables), 'physical tables the planner may read'),
+    card('Columns', fmt(st.columns), 'properties, with role and unit'),
+    card('Relations', fmt(st.relationships), 'approved join paths'),
+    card('Entity types', fmt(st.entity_types), 'named values a request can anchor to'),
+    card('Datasets', fmt(st.datasets), 'built-in model plus uploads'),
+    card('Model checks', `${errors} err · ${warnings} warn`,
+      issues.length ? 'structural checks on the catalog' : 'no structural problems found',
+      issues.slice(0, 6).map(i => `${i.severity}: ${i.subject} — ${i.message}`).join('\n')),
   );
-  const total = st.total_entries || 0;
-  $('#cache-summary').textContent = total
-    ? `${fmt(total)} stored ${total === 1 ? 'entry' : 'entries'} · semantic match needs ${Math.round((st.thresholds && st.thresholds.semantic || 0.85) * 100)}% token overlap after the same plan`
-    : 'Nothing cached yet — ask a question in either chat, then come back.';
+  $('#ontology-summary').textContent =
+    `${fmt(g.counts ? g.counts.nodes : g.nodes.length)} classes/properties and `
+    + `${fmt(g.edges.length)} relations shown at “${g.detail}” granularity · catalog ${g.version}`;
 }
 
-/* ---------------------------------------------------------------- graph model */
-const COLS = {
-  concept: { x: 16, w: 252 }, question: { x: 412, w: 336 }, table: { x: 880, w: 224 },
-  role: { x: 16, w: 252 }, prompt: { x: 412, w: 336 },
-};
-const ROW = 34, HEAD = 46;
+/* ---------------------------------------------------------------- model + layout */
+function matches(n, q) {
+  if (!q) return true;
+  const hay = [n.label, n.description, n.key, n.domain, n.table, n.column, n.iri, n.grain,
+    ...(n.aliases || []), ...(n.tables || []), ...(n.entity_types || []), ...(n.domains || [])];
+  return hay.some(v => String(v == null ? '' : v).toLowerCase().includes(q));
+}
 
-function buildQuestions() {
+function buildModel() {
   const g = S.graph;
   const q = S.q.trim().toLowerCase();
-  const has = (node, extra) => !q || [node.label, node.request_text, node.description, extra, ...(node.tables || [])]
-    .some(v => String(v || '').toLowerCase().includes(q));
-
-  let cons = g.abstractions.filter(c => S.showEmpty || c.questions > 0);
-  let qs = g.questions.slice();
-  let tabs = g.tables.slice();
-
-  let conIds = new Set(cons.map(c => c.id));
+  let nodes = g.nodes.filter(n => matches(n, q));
+  let keep = new Set(nodes.map(n => n.id));
   if (q) {
-    qs = qs.filter(n => has(n, n.operation));
-    const usedCon = new Set();
-    qs.forEach(n => n.concepts.forEach(k => usedCon.add('c:' + k)));
-    cons = cons.filter(c => usedCon.has(c.id) || String(c.label || '').toLowerCase().includes(q)
-      || String(c.description || '').toLowerCase().includes(q));
-    conIds = new Set(cons.map(c => c.id));
-    qs = qs.filter(n => n.concepts.length === 0 || n.concepts.some(k => conIds.has('c:' + k)));
-    const usedTab = new Set();
-    qs.forEach(n => n.tables.forEach(t => usedTab.add('t:' + t)));
-    tabs = tabs.filter(t => usedTab.has(t.id) || String(t.label || '').toLowerCase().includes(q));
-  } else {
-    qs = qs.filter(n => n.concepts.some(k => conIds.has('c:' + k)) || n.concepts.length === 0);
-  }
-
-  /* order: concepts by area lane, then by label; questions follow the order of their first
-     concept so links between the two columns stay short. */
-  const conOrder = cons.slice().sort((a, b) =>
-    (rankOf(a.domain) - rankOf(b.domain)) || String(a.label).localeCompare(String(b.label)));
-  const conIndex = new Map(conOrder.map((c, i) => [c.id, i]));
-  const qOrder = qs.slice().sort((a, b) => {
-    const ai = a.concepts.length ? Math.min(...a.concepts.map(k => conIndex.has('c:' + k) ? conIndex.get('c:' + k) : 1e6)) : 1e6;
-    const bi = b.concepts.length ? Math.min(...b.concepts.map(k => conIndex.has('c:' + k) ? conIndex.get('c:' + k) : 1e6)) : 1e6;
-    return (ai - bi) || String(a.label).localeCompare(String(b.label));
-  });
-  const tabOrder = tabs.slice().sort((a, b) =>
-    (rankOf(a.domain) - rankOf(b.domain)) || String(a.label).localeCompare(String(b.label)));
-
-  /* positions */
-  const nodes = [];
-  const conY = new Map();
-  let y = HEAD, lastDomain = null;
-  for (const c of conOrder) {
-    if (c.domain !== lastDomain) { if (lastDomain !== null) y += 22; lastDomain = c.domain; }
-    conY.set(c.id, y);
-    nodes.push({ ...c, x: COLS.concept.x, y, w: COLS.concept.w, h: 30 });
-    y += ROW;
-  }
-  /* domain bands drawn once, at the first node of each lane */
-  const bands = [];
-  const seen = new Set();
-  for (const c of conOrder) {
-    if (seen.has(c.domain)) continue;
-    seen.add(c.domain);
-    bands.push({ domain: c.domain, y: conY.get(c.id) - 3 });
-  }
-
-  qOrder.forEach((n, i) => {
-    nodes.push({ ...n, x: COLS.question.x, y: HEAD + i * ROW, w: COLS.question.w, h: 28 });
-  });
-  tabOrder.forEach((n, i) => {
-    nodes.push({ ...n, x: COLS.table.x, y: HEAD + i * ROW, w: COLS.table.w, h: 26 });
-  });
-
-  const byId = new Map(nodes.map(n => [n.id, n]));
-  const edges = [];
-  for (const n of qOrder.concat(tabOrder)) {
+    /* Keep one hop of context, so a matched table still shows the concepts that read it. */
     for (const e of g.edges) {
-      if (e.target === n.id && byId.has(e.source)) edges.push(e);
+      if (keep.has(e.source)) keep.add(e.target);
+      else if (keep.has(e.target)) keep.add(e.source);
+    }
+    nodes = g.nodes.filter(n => keep.has(n.id));
+  }
+  keep = new Set(nodes.map(n => n.id));
+  const edges = g.edges.filter(e => keep.has(e.source) && keep.has(e.target));
+
+  const lanes = LANES.filter(k => nodes.some(n => n.kind === k));
+  const laneX = {};
+  let x = 16;
+  for (const k of lanes) { laneX[k] = x; x += LANE_WIDTH[k] + LANE_GAP; }
+
+  const out = [];
+  for (const kind of lanes) {
+    const list = nodes.filter(n => n.kind === kind).sort((a, b) =>
+      (rankOf(a.domain || a.key) - rankOf(b.domain || b.key)) || String(a.label).localeCompare(String(b.label)));
+    let y = HEAD, lastDomain = null;
+    for (const n of list) {
+      const dom = n.domain || null;
+      if (dom && lastDomain !== null && dom !== lastDomain) y += 14;
+      if (dom) lastDomain = dom;
+      out.push({ ...n, x: laneX[kind], y, w: LANE_WIDTH[kind], h: kind === 'column' ? 26 : 30 });
+      y += ROW;
     }
   }
-  return { nodes, edges, bands, kind: 'questions' };
+  return { nodes: out, edges, lanes, laneX };
 }
 
-function buildPrompts() {
-  const g = S.graph;
-  const q = S.q.trim().toLowerCase();
-  const match = n => !q || String(n.label || '').toLowerCase().includes(q);
-  const roles = (g.roles || []).slice();
-  const calls = (g.prompt_calls || []).filter(match);
-  const roleIds = new Set(roles.map(r => r.id));
-  const nodes = [];
-  roles.forEach((r, i) => nodes.push({ ...r, x: COLS.role.x, y: HEAD + i * ROW, w: COLS.role.w, h: 28 }));
-  calls.forEach((c, i) => nodes.push({ ...c, x: COLS.prompt.x, y: HEAD + i * ROW, w: COLS.prompt.w, h: 26 }));
-  const byId = new Map(nodes.map(n => [n.id, n]));
-  const edges = calls.filter(c => roleIds.has('r:' + c.role)).map(c => ({ source: 'r:' + c.role, target: c.id }));
-  return { nodes, edges: edges.filter(e => byId.has(e.source) && byId.has(e.target)), bands: [], kind: 'prompts' };
+function subLine(n) {
+  if (n.kind === 'domain') return `${fmt(n.degree)} link${n.degree === 1 ? '' : 's'}`;
+  if (n.kind === 'dataset') {
+    const tables = (n.tables || []).length;
+    return `${tables} table${tables === 1 ? '' : 's'}${n.synthetic ? ' · built in' : ''}`;
+  }
+  if (n.kind === 'concept') {
+    if (n.gap) return 'topic not loaded in this model';
+    const reads = (n.tables || []).join(', ');
+    return reads ? `reads ${reads}` : `${(n.operations || []).length} operation(s)`;
+  }
+  if (n.kind === 'entity_type') {
+    const cols = (n.columns || []).length;
+    return n.individuals == null ? `${cols} source column${cols === 1 ? '' : 's'}`
+      : `${fmt(n.individuals)} values · ${cols} source column${cols === 1 ? '' : 's'}`;
+  }
+  if (n.kind === 'table') return `${fmt(n.rows)} rows · ${n.domain || 'other'}`;
+  const bits = [n.role || 'column'];
+  if (n.unit) bits.push(n.unit);
+  if (n.hidden) bits.push('hidden');
+  return bits.join(' · ');
 }
 
 /* ---------------------------------------------------------------- rendering */
 function fillFor(node) {
-  if (node.kind === 'concept') return DOMAIN_COLOR[node.domain] || DOMAIN_COLOR.other;
-  if (node.kind === 'question') return node.hits > 0 ? '#2f6fe0' : '#8fa6c9';
-  if (node.kind === 'table') return '#7b8598';
-  if (node.kind === 'role') return '#6d4fc4';
-  return '#8fa6c9';
-}
-
-function subLine(node) {
-  if (node.kind === 'concept') return node.questions ? `${fmt(node.questions)} cached · ${fmt(node.hits)} reuses` : 'no reuse yet';
-  if (node.kind === 'question') return [node.operation || 'answer', node.scope && node.scope !== 'query_database' ? node.scope : null,
-    `${fmt(node.hits)} reuse${node.hits === 1 ? '' : 's'}`].filter(Boolean).join(' · ');
-  if (node.kind === 'table') return `${fmt(node.questions)} cached queries · ${fmt(node.hits)} reuses`;
-  if (node.kind === 'role') return `${fmt(node.calls)} cached call${node.calls === 1 ? '' : 's'} · ${fmt(node.hits)} reuses`;
-  return `${fmt(node.hits)} reuse${node.hits === 1 ? '' : 's'} · ${timeAgo(node.created_at)}`;
+  if (node.kind === 'concept' && node.domain) return DOMAIN_COLOR[node.domain] || KIND_COLOR.concept;
+  return KIND_COLOR[node.kind] || '#8fa6c9';
 }
 
 function renderMap() {
   const canvas = $('#canvas');
   canvas.replaceChildren();
   if (!S.graph) return;
-  const model = S.view === 'prompts' ? buildPrompts() : buildQuestions();
+  const model = buildModel();
   const nodes = model.nodes;
   if (!nodes.length) {
     canvas.append(h('p', { class: 'muted pad' }, S.q
-      ? 'Nothing cached matches that search.'
-      : 'Nothing cached yet. Ask a question in either chat and it will appear here.'));
+      ? 'Nothing in the ontology matches that search.'
+      : 'The catalog has no classes yet.'));
     renderLegend(model);
     return;
   }
@@ -250,24 +188,32 @@ function renderMap() {
   const root = s('g', { transform: `scale(${S.zoom})` });
   svg.append(root);
 
+  for (const kind of model.lanes) {
+    root.append(s('text', { class: 'band', x: model.laneX[kind], y: 26 }, LANE_LABEL[kind] || kind));
+  }
+
   /* edges first, so nodes sit on top */
   const byId = new Map(nodes.map(n => [n.id, n]));
   for (const e of model.edges) {
     const a = byId.get(e.source), b = byId.get(e.target);
     if (!a || !b) continue;
-    const x1 = a.x + a.w, y1 = a.y + a.h / 2, x2 = b.x, y2 = b.y + b.h / 2;
-    const dx = Math.max(28, (x2 - x1) * 0.45);
     const hot = S.sel && (e.source === S.sel || e.target === S.sel);
+    let d;
+    if (b.x >= a.x + a.w) {
+      const x1 = a.x + a.w, y1 = a.y + a.h / 2, x2 = b.x, y2 = b.y + b.h / 2;
+      const dx = Math.max(26, (x2 - x1) * 0.42);
+      d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+    } else {
+      /* same lane (a join or a concept hierarchy): loop out to the right */
+      const x1 = a.x + a.w, y1 = a.y + a.h / 2, x2 = b.x + b.w, y2 = b.y + b.h / 2;
+      const dx = 30 + Math.abs(y2 - y1) * 0.22;
+      d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 + dx} ${y2}, ${x2} ${y2}`;
+    }
     root.append(s('path', {
       class: 'gedge' + (hot ? ' hot' : ''),
-      d: `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`,
+      d,
+      stroke: hot ? null : (EDGE_COLOR[e.predicate] || '#c8d1e0'),
     }));
-  }
-
-  /* area lane labels above the abstraction column */
-  for (const band of model.bands) {
-    const label = (S.graph.domains.find(d => d.key === band.domain) || {}).label || band.domain;
-    root.append(s('text', { class: 'band', x: COLS.concept.x, y: band.y }, label));
   }
 
   for (const node of nodes) {
@@ -278,14 +224,15 @@ function renderMap() {
     });
     group.append(s('rect', {
       x: node.x, y: node.y, width: node.w, height: node.h, rx: 7,
-      fill: '#fff', stroke: fillFor(node),
+      fill: '#fff', stroke: KIND_COLOR[node.kind] || '#8fa6c9',
     }));
     group.append(s('rect', {
       x: node.x, y: node.y, width: 4, height: node.h, rx: 2, fill: fillFor(node), stroke: 'none',
     }));
-    group.append(s('text', { class: 'nlabel', x: node.x + 12, y: node.y + 13 }, clip(node.label || node.id, 42)));
+    group.append(s('text', { class: 'nlabel', x: node.x + 12, y: node.y + 13 },
+      clip(node.label || node.id, node.kind === 'column' ? 34 : 40)));
     group.append(s('text', { class: 'nsub', x: node.x + 12, y: node.y + 23 }, clip(subLine(node), 62)));
-    const activate = () => select(node);
+    const activate = () => showNode(node);
     group.addEventListener('click', activate);
     group.addEventListener('keydown', ev => {
       if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); activate(); }
@@ -300,109 +247,131 @@ function renderMap() {
 function renderLegend(model) {
   const box = $('#legend');
   box.replaceChildren();
-  if (model.kind === 'prompts') {
-    box.append(h('span', null, h('i', { style: { background: '#6d4fc4' } }), 'model role'),
-      h('span', null, h('i', { style: { background: '#8fa6c9' } }), 'cached call'));
-    return;
+  for (const kind of model.lanes) {
+    box.append(h('span', null, h('i', { style: { background: KIND_COLOR[kind] } }), LANE_LABEL[kind] || kind));
   }
   box.append(
-    h('span', null, h('i', { style: { background: '#3d7be8' } }), 'abstraction (a catalog concept)'),
-    h('span', null, h('i', { style: { background: '#2f6fe0' } }), 'cached question, already reused'),
-    h('span', null, h('i', { style: { background: '#8fa6c9' } }), 'cached question, not reused yet'),
-    h('span', null, h('i', { style: { background: '#7b8598' } }), 'table or CTE it reads'));
+    h('span', null, h('i', { class: 'edge', style: { background: EDGE_COLOR.joins } }), 'approved join'),
+    h('span', null, h('i', { class: 'edge', style: { background: EDGE_COLOR.uses_table } }), 'reads / measures'),
+    h('span', null, h('i', { class: 'edge', style: { background: EDGE_COLOR.subclass_of } }), 'narrower concept'),
+  );
 }
 
 /* ---------------------------------------------------------------- inspector */
 function kv(pairs) {
   const dl = h('dl', { class: 'kv' });
-  for (const [k, v] of pairs) { dl.append(h('dt', null, k), h('dd', null, v == null || v === '' ? '—' : v)); }
+  for (const [k, v] of pairs) dl.append(h('dt', null, k), h('dd', null, v == null || v === '' ? '—' : v));
   return dl;
 }
 
-async function select(node) {
+function connections(node) {
+  const byId = new Map(S.graph.nodes.map(n => [n.id, n]));
+  const rows = S.graph.edges.filter(e => e.source === node.id || e.target === node.id).slice(0, 40);
+  if (!rows.length) return h('p', { class: 'muted' }, 'No relations at this granularity.');
+  const list = h('ul', { class: 'links' });
+  for (const e of rows) {
+    const outgoing = e.source === node.id;
+    const other = byId.get(outgoing ? e.target : e.source);
+    const label = (S.graph.predicates || {})[e.predicate] || e.predicate;
+    const attrs = [e.cardinality, e.confidence ? `${e.confidence} confidence` : null, e.match_mode]
+      .filter(Boolean).join(' · ');
+    list.append(h('li', null,
+      h('span', { class: 'mono' }, outgoing ? '→' : '←'), ' ', label, ' ',
+      h('span', { class: 'mono' }, other ? (other.label || other.id) : '?'),
+      attrs ? h('span', { class: 'muted' }, ` (${attrs})`) : null));
+  }
+  return list;
+}
+
+function showNode(node) {
   S.sel = node.id;
   $('#panel').classList.add('open');
   $('#btn-toggle-panel').classList.add('active');
   $('#btn-toggle-panel').setAttribute('aria-expanded', 'true');
   $('#ins-title').textContent = node.label || node.id;
   const body = $('#ins-body');
-  body.replaceChildren(h('p', { class: 'muted' }, 'Loading…'));
-  renderMap();
+  const pairs = [['Kind', node.kind], ['IRI', h('span', { class: 'mono' }, node.iri || '—')]];
+  if (node.description) pairs.push(['About', node.description]);
 
-  const pairs = [['Kind', node.kind]];
   if (node.kind === 'concept') {
-    pairs.push(['Area', node.domain], ['Catalog key', h('span', { class: 'mono' }, node.key)],
-      ['Reads', (node.tables || []).join(', ') || '—'], ['Origin', node.origin],
-      ['Cached questions', fmt(node.questions)], ['Reuses', fmt(node.hits)]);
+    pairs.push(
+      ['Area', node.domain || '—'],
+      ['Catalog key', h('span', { class: 'mono' }, node.key)],
+      ['Reads', (node.tables || []).join(', ') || '—'],
+      ['Measures', (node.columns || []).join(', ') || '—'],
+      ['Entity types', (node.entity_types || []).join(', ') || '—'],
+      ['Grain', node.grain || '—'],
+      ['Null policy', node.null_policy || '—'],
+      ['Narrower than', (node.broader || []).join(', ') || '—'],
+      ['Takes precedence over', (node.overrides || []).join(', ') || '—'],
+      ['Origin', node.origin || 'builtin'],
+      ['Dataset', node.dataset_id || '—'],
+    );
+    if ((node.aliases || []).length) {
+      pairs.push(['Synonyms', (node.aliases || []).slice(0, 18).join(', ')]);
+    }
+    const ops = (node.operations || []).map(o => `${o.op}(${o.expr})${o.group_by ? ` by ${o.group_by}` : ''}`);
     body.replaceChildren(
-      h('p', { class: 'muted', style: { marginBottom: '12px' } },
-        node.description || 'A semantic concept from the live catalog.'),
       kv(pairs),
-      h('div', { class: 'card' },
-        h('h3', null, 'What this shows'),
-        h('p', { class: 'muted' },
-          'The catalog concepts are the higher-level abstractions the assistant reasons in — walkability, '
-          + 'transit connectivity, risk, price and anything else the catalog or an uploaded dataset declares. '
-          + 'A concept with no cached questions is still listed: it is something the assistant can answer, '
-          + 'it just has not been asked twice yet.')));
+      ops.length ? h('div', { class: 'card' },
+        h('h3', null, 'Operations the planner can select'),
+        h('ul', { class: 'links' }, ops.slice(0, 20).map(o => h('li', { class: 'mono' }, o)))) : null,
+      h('div', { class: 'card' }, h('h3', null, 'Relations'), connections(node)),
+    );
+    renderMap();
     return;
   }
   if (node.kind === 'table') {
-    pairs.push(['Area', node.domain], ['Rows', fmt(node.rows)],
-      ['Cached questions reading it', fmt(node.questions)], ['Reuses', fmt(node.hits)]);
-    body.replaceChildren(kv(pairs));
+    pairs.push(['Area', node.domain || '—'], ['Grain', node.grain || '—'],
+      ['Rows', fmt(node.rows)], ['Visible to the agents', node.agent_visible ? 'yes' : 'no'],
+      ['Default filter', h('span', { class: 'mono' }, node.default_filter || '—')],
+      ['Origin', node.origin || 'builtin'], ['Dataset', node.dataset_id || '—']);
+    body.replaceChildren(kv(pairs), h('div', { class: 'card' }, h('h3', null, 'Relations'), connections(node)));
+    renderMap();
     return;
   }
-  if (node.kind === 'question') {
-    pairs.push(['Asked', node.request_text], ['Operation', node.operation || '—'],
-      ['Scope', node.scope || '—'], ['Concepts', (node.concepts || []).join(', ') || '—'],
-      ['Tables', (node.tables || []).join(', ') || '—'],
-      ['Reuses', fmt(node.hits)], ['Cached', timeAgo(node.created_at)]);
-    body.replaceChildren(kv(pairs));
-    const key = node.cache_key;
-    await loadEntry(key, body);
+  if (node.kind === 'column') {
+    pairs.push(['Table', node.table], ['Type', node.type || '—'], ['Role', node.role || '—'],
+      ['Unit', node.unit || '—'], ['Derived from', node.derived_from || '—'],
+      ['Hidden from prompts', node.hidden ? 'yes' : 'no'], ['Origin', node.origin || 'builtin']);
+    body.replaceChildren(kv(pairs), h('div', { class: 'card' }, h('h3', null, 'Relations'), connections(node)));
+    renderMap();
     return;
   }
-  if (node.kind === 'role') {
-    pairs.push(['Cached calls', fmt(node.calls)], ['Reuses', fmt(node.hits)]);
-    body.replaceChildren(kv(pairs), h('p', { class: 'muted' },
-      'Every cached model call for this role. The chart on the right shows them; click one to read the stored reply.'));
+  if (node.kind === 'entity_type') {
+    const cols = node.columns || [];
+    pairs.push(['Live values', node.individuals == null ? 'not counted' : fmt(node.individuals)],
+      ['Domains', (node.domains || []).join(', ') || '—']);
+    body.replaceChildren(kv(pairs),
+      h('div', { class: 'card' }, h('h3', null, 'Identification sources'),
+        cols.length ? kv(cols.map(c => [`${c.table}.${c.column}`, `${c.match_mode}${c.domain ? ' · ' + c.domain : ''}`]))
+          : h('p', { class: 'muted' }, 'None.')),
+      h('div', { class: 'card' }, h('h3', null, 'Relations'), connections(node)));
+    renderMap();
     return;
   }
-  /* a prompt call */
-  pairs.push(['Role', node.role], ['Reuses', fmt(node.hits)], ['Cached', timeAgo(node.created_at)],
-    ['Reply length', `${fmt(node.response_length)} characters`]);
-  body.replaceChildren(kv(pairs));
-  await loadEntry(node.cache_key, body);
-}
-
-async function loadEntry(cacheKey, body) {
-  if (!cacheKey) return;
-  S.entryKey = cacheKey;
-  S.loadingEntry = true;
-  try {
-    const data = await api('/entry/' + encodeURIComponent(cacheKey));
-    if (S.entryKey !== cacheKey) return;
-    const card = h('div', { class: 'card' });
-    if (data.sql) {
-      card.append(h('h3', null, 'Cached statement'), h('pre', { class: 'blob' }, data.sql));
-      if (data.meta && data.meta.tables && data.meta.tables.length) {
-        card.append(h('p', { class: 'muted', style: { marginTop: '8px' } },
-          `Tables: ${data.meta.tables.join(', ')} · ${fmt(data.meta.row_count)} rows`
-          + (data.meta.truncated ? ' (truncated)' : '')));
-      }
-    }
-    if (data.response) {
-      card.append(h('h3', { style: { marginTop: data.sql ? '14px' : 0 } }, 'Cached answer'),
-        h('pre', { class: 'blob' }, data.response));
-    }
-    if (!card.childNodes.length) card.append(h('p', { class: 'muted' }, 'Nothing stored to preview.'));
-    body.append(card);
-  } catch (e) {
-    body.append(h('p', { class: 'muted' }, `Could not read that entry: ${e.message}`));
-  } finally {
-    S.loadingEntry = false;
+  if (node.kind === 'dataset') {
+    pairs.push(['Status', node.status || '—'], ['Area', node.domain || '—'], ['Grain', node.grain || '—'],
+      ['Tables', (node.tables || []).join(', ') || '—'], ['Rows', fmt(node.rows)],
+      ['Source file', node.source || '—']);
+    body.replaceChildren(kv(pairs),
+      node.synthetic ? h('p', { class: 'muted' },
+        'A grouping for the tables the application ships with, not a catalogue row of its own.') : null,
+      h('div', { class: 'card' }, h('h3', null, 'Relations'), connections(node)));
+    renderMap();
+    return;
   }
+  /* subject area */
+  const members = S.graph.nodes.filter(n => n.domain === node.key && n.kind !== 'domain');
+  pairs.push(['Members at this granularity', fmt(members.length)]);
+  body.replaceChildren(kv(pairs),
+    h('div', { class: 'card' }, h('h3', null, 'Members'),
+      members.length
+        ? h('ul', { class: 'links' }, members.slice(0, 60).map(n => h('li', null,
+          h('span', { class: 'mono' }, n.kind), ' ', n.label || n.id)))
+        : h('p', { class: 'muted' }, 'Nothing in this area at this granularity.')),
+    h('div', { class: 'card' }, h('h3', null, 'Relations'), connections(node)));
+  renderMap();
 }
 
 /* ---------------------------------------------------------------- actions */
@@ -415,32 +384,35 @@ function setZoom(z) {
 function fitZoom() {
   const canvas = $('#canvas');
   if (!S.graph) return;
-  const model = S.view === 'prompts' ? buildPrompts() : buildQuestions();
+  const model = buildModel();
   if (!model.nodes.length) return;
   const width = Math.max(...model.nodes.map(n => n.x + n.w)) + 24;
   const available = Math.max(240, canvas.clientWidth - 34);
   setZoom(available / width);
 }
 
+function setDetail(detail) {
+  if (S.detail === detail) return;
+  S.detail = detail;
+  for (const [id, key] of [['#view-overview', 'overview'], ['#view-standard', 'standard'], ['#view-full', 'full']]) {
+    const el = $(id);
+    const on = key === detail;
+    el.classList.toggle('on', on);
+    el.setAttribute('aria-pressed', String(on));
+  }
+  load();
+}
+
 async function load() {
   try {
-    S.graph = await api('/graph?include_empty=true');
+    const res = await fetch(`/api/ontology/graph?detail=${encodeURIComponent(S.detail)}`);
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    S.graph = await res.json();
+    S.sel = null;
     renderStats();
     renderMap();
   } catch (e) {
-    $('#canvas').replaceChildren(h('p', { class: 'muted pad' }, `Could not load the cache: ${e.message}`));
-  }
-}
-
-async function clearCache() {
-  try {
-    const out = await api('/clear', { method: 'POST', headers: JSON_HDR, body: JSON.stringify({}) });
-    if (!out.ok) throw new Error(out.error || 'Clear failed.');
-    toast('Cache cleared. The next questions will be computed again.', 'ok');
-    S.sel = null;
-    await load();
-  } catch (e) {
-    toast(e.message || String(e), 'err');
+    $('#canvas').replaceChildren(h('p', { class: 'muted pad' }, `Could not load the ontology: ${e.message}`));
   }
 }
 
@@ -455,30 +427,19 @@ document.addEventListener('DOMContentLoaded', () => {
   $('#btn-toggle-panel').addEventListener('click', toggle);
   $('#btn-close-panel').addEventListener('click', toggle);
 
-  $('#view-questions').addEventListener('click', () => {
-    S.view = 'questions';
-    $('#view-questions').classList.add('on'); $('#view-questions').setAttribute('aria-pressed', 'true');
-    $('#view-prompts').classList.remove('on'); $('#view-prompts').setAttribute('aria-pressed', 'false');
-    renderMap();
-  });
-  $('#view-prompts').addEventListener('click', () => {
-    S.view = 'prompts';
-    $('#view-prompts').classList.add('on'); $('#view-prompts').setAttribute('aria-pressed', 'true');
-    $('#view-questions').classList.remove('on'); $('#view-questions').setAttribute('aria-pressed', 'false');
-    renderMap();
-  });
+  $('#view-overview').addEventListener('click', () => setDetail('overview'));
+  $('#view-standard').addEventListener('click', () => setDetail('standard'));
+  $('#view-full').addEventListener('click', () => setDetail('full'));
 
   let searchTimer = null;
-  $('#cache-search').addEventListener('input', ev => {
+  $('#ontology-search').addEventListener('input', ev => {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => { S.q = ev.target.value; renderMap(); }, 140);
   });
-  $('#opt-empty').addEventListener('change', ev => { S.showEmpty = ev.target.checked; renderMap(); });
   $('#btn-zoom-in').addEventListener('click', () => setZoom(S.zoom + 0.1));
   $('#btn-zoom-out').addEventListener('click', () => setZoom(S.zoom - 0.1));
   $('#btn-zoom-reset').addEventListener('click', () => setZoom(1));
   $('#btn-zoom-fit').addEventListener('click', fitZoom);
-  $('#btn-clear').addEventListener('click', clearCache);
 
   load();
 });

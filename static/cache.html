@@ -4,14 +4,14 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src 'none'">
-  <title>Cache · Real Estate Intelligence</title>
+  <title>Ontology · Real Estate Intelligence</title>
   <link rel="stylesheet" href="/static/cache.css?v=1">
 </head>
 <body>
   <header class="topbar">
     <div class="topbar-left">
       <a class="brand" href="/">🏠 Real Estate Intelligence</a>
-      <span class="crumb">Cache</span>
+      <span class="crumb">Ontology</span>
     </div>
     <nav class="topbar-right" aria-label="Site">
       <button class="btn-panel-toggle" id="btn-toggle-panel" type="button" aria-expanded="false"
@@ -22,30 +22,30 @@
   </header>
 
   <main class="cm">
-    <section class="cm-map" aria-labelledby="cache-title">
+    <section class="cm-map" aria-labelledby="ontology-title">
       <div class="cm-stats" id="stats" aria-live="polite">
-        <p class="muted pad">Loading the cache…</p>
+        <p class="muted pad">Loading the ontology…</p>
       </div>
 
       <div class="cm-head">
         <div class="cm-title">
-          <h1 id="cache-title">What the assistant has reused</h1>
-          <p class="muted" id="cache-summary">Each box is a piece of work that did not have to be redone.</p>
+          <h1 id="ontology-title">What the data model means, and how it connects</h1>
+          <p class="muted" id="ontology-summary">Classes, properties and relations derived from the live catalog.</p>
         </div>
         <div class="cm-tools">
-          <div class="seg" role="group" aria-label="Graph level">
-            <button type="button" id="view-questions" class="on" aria-pressed="true">Questions</button>
-            <button type="button" id="view-prompts" aria-pressed="false">Model calls</button>
+          <div class="seg" role="group" aria-label="Granularity">
+            <button type="button" id="view-overview" aria-pressed="false">Overview</button>
+            <button type="button" id="view-standard" class="on" aria-pressed="true">Model</button>
+            <button type="button" id="view-full" aria-pressed="false">Full detail</button>
           </div>
-          <input type="search" id="cache-search" placeholder="Find a question, concept or table" aria-label="Find a question, concept or table">
-          <label class="check"><input type="checkbox" id="opt-empty" checked> Show concepts with no reuse yet</label>
+          <input type="search" id="ontology-search" placeholder="Find a concept, table, column or area"
+                 aria-label="Find a concept, table, column or area">
           <div class="zoom-toolbar" role="toolbar" aria-label="Zoom controls">
             <button class="btn-zoom" id="btn-zoom-out" type="button" title="Zoom out (−)" aria-label="Zoom out">−</button>
             <button class="btn-zoom-level" id="btn-zoom-reset" type="button" title="Reset zoom to 100%"><span id="zoom-level">100%</span></button>
             <button class="btn-zoom" id="btn-zoom-in" type="button" title="Zoom in (+)" aria-label="Zoom in">+</button>
             <button class="btn-zoom-fit" id="btn-zoom-fit" type="button" title="Fit graph to width">Fit</button>
           </div>
-          <button class="btn danger" id="btn-clear" type="button">Clear cache</button>
         </div>
       </div>
 
@@ -58,11 +58,10 @@
         <div class="ins-title" id="ins-title">Details</div>
         <button class="btn-close-panel" id="btn-close-panel" type="button" aria-label="Close inspector">✕</button>
       </div>
-      <div id="ins-body"><p class="muted">Select a node in the graph to see what it holds.</p></div>
+      <div id="ins-body"><p class="muted">Select a class or property to see how it is defined and what it connects to.</p></div>
     </aside>
   </main>
 
-  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
   <script src="/static/cache.js?v=1"></script>
 </body>
 </html>
