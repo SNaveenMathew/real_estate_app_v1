@@ -97,6 +97,9 @@ class EntityDomain:
 CONCEPT_KNOBS = {
     "overrides": "list[str] - concepts whose phrase sits inside one of this concept's longer phrases; they are dropped "
     "when every phrase they matched lies inside a phrase this concept matched (semantic_matches).",
+    "broader": "list[str] - concept keys this concept is a strictly narrower version of (e.g. a 'walkability "
+    "index' concept declaring broader=['house_walk_score']). This is the only source of subClassOf edges in "
+    "db/ontology.py: nothing is inferred, and db/catalog_lint.py rejects unknown targets and cycles.",
     "scope_guard": "False - the concept's columns are legitimately filterable; keep them out of the unplanned-filter "
     "guard in agents/tools.py.",
     "requires_entity": "list[str] - entity types (see EntityDomain.entity_type). The concept applies only when the request "

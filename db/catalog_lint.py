@@ -272,6 +272,23 @@ def lint_catalog(include_info: bool = True) -> list[Issue]:
         for other in item.get("overrides", []):
             if other not in keys:
                 add("warning", "unknown_override", key, f"overrides {other!r}, which is not an active concept")
+        # ``broader`` is the only declared subsumption in the model; a typo would silently draw an
+        # unparented ontology class, so an unknown target is an error for a built-in concept.
+        broader = item.get("broader")
+        if broader is not None:
+            if not isinstance(broader, list) or not all(isinstance(x, str) and x for x in broader):
+                add("error", "bad_knob", key, "broader must be a list of concept keys")
+            else:
+                for broad in broader:
+                    if broad == key:
+                        add("error", "self_broader", key, "broader names the concept itself")
+                    elif broad not in keys:
+                        add(
+                            "error" if builtin else "warning",
+                            "unknown_broader",
+                            key,
+                            f"broader names {broad!r}, which is not an active concept, so the class has no parent",
+                        )
         for op in item.get("operations", []):
             if op.get("op") == "lookup" and not any(
                 re.search(rf"\b{re.escape(t)}\.", op.get("expr", "")) for t in item.get("tables", [])
