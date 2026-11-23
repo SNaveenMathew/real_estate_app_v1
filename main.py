@@ -41,6 +41,7 @@ from api import (
     map_layers_router,
     onboarding_router,
     cache_router,
+    ontology_router,
     jobs_router,
 )
 from api.common import (
@@ -114,6 +115,7 @@ app.include_router(data_sources_router)
 app.include_router(map_layers_router)
 app.include_router(onboarding_router)
 app.include_router(cache_router)
+app.include_router(ontology_router)
 app.include_router(jobs_router)
 
 # Prometheus metrics endpoint
@@ -147,13 +149,21 @@ if static_dir.exists() and static_dir.is_dir():
         html = re.sub(r"(/static/[\w./-]+\.(?:js|css))(\?v=\w+)?", lambda m: f"{m.group(1)}?v={ver}", html)
         return HTMLResponse(content=html, headers={"Cache-Control": "no-cache"})
 
-    @app.get("/cache", response_class=HTMLResponse)
-    def cache_page():
-        """The Cache page: what has been reused, and how it connects to the data model."""
+    def _render_graph_page() -> HTMLResponse:
+        """The ontology page: the data model's classes and relations, drawn as a graph."""
         html = (static_dir / "cache.html").read_text(encoding="utf-8")
         ver = hashlib.sha1(b"".join((static_dir / n).read_bytes() for n in ("cache.js", "cache.css"))).hexdigest()[:10]
         html = re.sub(r"(/static/[\w./-]+\.(?:js|css))(\?v=\w+)?", lambda m: f"{m.group(1)}?v={ver}", html)
         return HTMLResponse(content=html, headers={"Cache-Control": "no-cache"})
+
+    @app.get("/ontology", response_class=HTMLResponse)
+    def ontology_page():
+        return _render_graph_page()
+
+    @app.get("/cache", response_class=HTMLResponse)
+    def cache_page():
+        """Historical URL for the same page; the issue called it the cache/connectedness page."""
+        return _render_graph_page()
 
     @app.get("/", response_class=HTMLResponse)
     def root():

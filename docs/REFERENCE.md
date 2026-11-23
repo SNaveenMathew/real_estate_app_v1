@@ -8,7 +8,7 @@ are the facts — add a route, a setting or an approved function and re-run the 
 
 ## HTTP endpoints
 
-53 routes, from `main.app`.
+56 routes, from `main.app`.
 
 | Method | Path | Summary (first docstring line) | Handler |
 |---|---|---|---|
@@ -61,10 +61,13 @@ are the facts — add a route, a setting or an approved function and re-run the 
 | GET | `/api/onboarding/llm/status` |  | async |
 | POST | `/api/onboarding/proposals/{proposal_id}/decision` |  | async |
 | POST | `/api/onboarding/relationships/revoke` |  | async |
+| GET | `/api/ontology/graph` | The page's model: only the node kinds the level includes, and only edges between them. | sync |
+| GET | `/api/ontology` |  | sync |
 | GET | `/api/stats` |  | sync |
 | POST | `/api/transit/route` | Find a public transit route between place names or addresses. | async |
-| GET | `/cache` | The Cache page: what has been reused, and how it connects to the data model. | sync |
+| GET | `/cache` | Historical URL for the same page; the issue called it the cache/connectedness page. | sync |
 | GET | `/data` | The Data page: schema map, dataset upload, and review of proposed catalog changes. | sync |
+| GET | `/ontology` |  | sync |
 
 ## Approved functions the agents may call
 

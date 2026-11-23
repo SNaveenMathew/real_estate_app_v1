@@ -8,6 +8,7 @@ from api.data_sources import router as data_sources_router
 from api.map_layers import router as map_layers_router
 from api.onboarding import router as onboarding_router
 from api.cache import router as cache_router
+from api.ontology import router as ontology_router
 from api.jobs import router as jobs_router
 
 __all__ = [
@@ -21,5 +22,6 @@ __all__ = [
     "map_layers_router",
     "onboarding_router",
     "cache_router",
+    "ontology_router",
     "jobs_router",
 ]
