@@ -54,14 +54,24 @@ _AGGREGATE_CALL_RE = re.compile(r"\b(?:AVG|SUM|COUNT|MEDIAN|MIN|MAX)\s*\(", re.I
 def _envelope(text: str) -> tool_result.ToolResult:
     """Wrap query_database's rendered evidence with the facts downstream code needs.
 
-    The text is unchanged. The envelope stops the response validator (and anything else) from deciding what the
-    output *means* by counting digits or looking for the word "Error" in it.
+    The text is unchanged. The code comes from ``answer_status.classify_text`` - the single table every layer shares -
+    so the envelope never re-derives meaning from digits or from the word "Error" on its own.
     """
+    code = answer_status.classify_text(text)
+    if code is None:
+        return tool_result.ToolResult(text, kind="data", status=answer_status.OK)
     if answer_status.is_not_answered(text):
-        return tool_result.not_answered(text, answer_status.status_code(text) or "not_answered")
-    if text.startswith(("Code Agent error", "ERROR:")) or "SQL Error" in text:
-        return tool_result.failure(text)
-    return tool_result.ToolResult(text, kind="data")
+        return tool_result.not_answered(text, code)
+    return tool_result.failure(text, status=code)
+
+
+#: The routing tools' own ``kind`` strings, mapped once onto the shared vocabulary (agents/answer_status.py).
+_ROUTE_CODES = {
+    "no_route": answer_status.ROUTE_NOT_FOUND,
+    "no_data": answer_status.ROUTE_NO_DATA,
+    "input": answer_status.ROUTE_INPUT,
+    "routing_service": answer_status.ROUTE_UNAVAILABLE,
+}
 
 
 def _typed_tool(kind: str):
@@ -85,13 +95,10 @@ def _typed_tool(kind: str):
             except (TypeError, ValueError):
                 return tool_result.ToolResult(str(out), kind=kind)
             status = str(payload.get("status") or "").lower()
-            ok = status not in ("error", "analysis") and payload.get("kind") != "no_route"
-            return tool_result.ToolResult(
-                out,
-                kind=kind if ok else "not_answered",
-                ok=ok,
-                status=None if ok else (payload.get("kind") or status or None),
-            )
+            route_kind = str(payload.get("kind") or "").lower()
+            ok = status not in ("error", "analysis") and route_kind != "no_route"
+            code = None if ok else _ROUTE_CODES.get(route_kind or status, answer_status.INTERNAL_ERROR)
+            return tool_result.ToolResult(out, kind=kind if ok else "not_answered", ok=ok, status=code)
 
         return wrapper
 
@@ -434,6 +441,14 @@ def _group_equality_predicates(filters: list[str]) -> list[str]:
     return out
 
 
+class QueryFailure(RuntimeError):
+    """A planning/compilation failure that names its own status code (agents/answer_status.py)."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
 def _compile_sql_from_plan(query_plan) -> str:
     """Compile a minimal read-only SQL query from the declarative plan.
 
@@ -444,11 +459,14 @@ def _compile_sql_from_plan(query_plan) -> str:
     """
     tables = set(query_plan.required_tables)
     if not tables:
-        raise ValueError("Cannot compile SQL: plan selected no tables.")
+        raise QueryFailure(answer_status.PLAN_INCOMPLETE, "Cannot compile SQL: plan selected no tables.")
 
     rels = schema.relationship_path(tables)
     if len(tables) > 1 and len(rels) < len(tables) - 1:
-        raise ValueError("Cannot compile SQL: selected tables are not fully connected by catalog relationships.")
+        raise QueryFailure(
+            answer_status.PLAN_UNCONNECTED,
+            "Cannot compile SQL: selected tables are not fully connected by catalog relationships.",
+        )
 
     def table_of(expr: str | None) -> str | None:
         if not expr:
@@ -483,7 +501,9 @@ def _compile_sql_from_plan(query_plan) -> str:
                 picked = (rel, left)
                 break
         if not picked:
-            raise ValueError("Cannot compile SQL: no catalog join path from current tables.")
+            raise QueryFailure(
+                answer_status.PLAN_UNCONNECTED, "Cannot compile SQL: no catalog join path from current tables."
+            )
         rel, new_table = picked
         left_qualified = _qualify_join_expr(rel.left_table, rel.left_expr)
         right_qualified = _qualify_join_expr(rel.right_table, rel.right_expr)
@@ -494,7 +514,7 @@ def _compile_sql_from_plan(query_plan) -> str:
     op = query_plan.operation
     expr = query_plan.select_expression
     if not op:
-        raise ValueError("Cannot compile SQL: plan has no operation.")
+        raise QueryFailure(answer_status.PLAN_INCOMPLETE, "Cannot compile SQL: plan has no operation.")
 
     select_sql = expr or "*"
     group_sql = list(query_plan.grouping)
@@ -826,6 +846,10 @@ def _answer(request: str, requirements: str, presentation: str, structured_plan=
                 "estimated; ask again in a minute.",
             ),
         )
+    except QueryFailure as exc:
+        # The plan cannot become a query: name the reason (and a user-safe sentence) instead of echoing a compiler
+        # message at the user.
+        sql, result = "", answer_status.limitation(exc.code, str(exc))
     except Exception as exc:
         sql, result = "", f"Code Agent error: {exc}"
     result += answer_policy.caveats_after_sql(structured_plan)

@@ -1198,8 +1198,8 @@
   "shortest bike commute": [
    "question_type: analytical",
    "semantic_keys: house_commute_bike",
-   "required_tables: house_commute",
-   "required_relationships: none",
+   "required_tables: house_commute, houses",
+   "required_relationships: house_commute.house_id = houses.house_id [many-to-one ; confidence=high ; preferred=True ; bridge=False] Note: Commute estimate for the current work location, one row per house. Grain: house -> house (current work location)",
    "metrics: house_commute.bike_miles, house_commute.bike_min",
    "aggregation: none",
    "ordering: house_commute.bike_min ASC",

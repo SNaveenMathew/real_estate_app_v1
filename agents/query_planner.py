@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 import re
 import db.schema_catalog as schema
-from agents import query_scope
+from agents import plan_status, query_scope
 
 
 @dataclass
@@ -227,6 +227,24 @@ def build_query_plan(request: str, requirements: str = "", plan: str = "", scope
     if any(c.get("rollup") for c in concepts) and any(e["entity_type"] == "MSA" for e in resolved):
         tables.update({"census_msa", "cbsa_counties", "nri_tracts"})
 
+    # A projection or ordering expression can name a table that no concept selected (e.g. the commute concept's
+    # "houses.address, house_commute.bike_min").  Left alone, the compiler emits FROM house_commute and the database
+    # fails with "Referenced table houses" - a database error describing a planning bug (agents/plan_status.py).  Add
+    # such a table only when the catalog has a relationship path to what is already planned, so the repair can never
+    # introduce an unjoinable table; anything that cannot be repaired is reported by plan_status.report().
+    referenced = plan_status.referenced_tables(qp)
+    if referenced:
+        known = {t.lower() for t in schema.list_table_names(agent_visible_only=True)}
+        for candidate in sorted(referenced - {t.lower() for t in tables}):
+            if candidate not in known:
+                continue
+            try:
+                if len(schema.relationship_path(tables | {candidate})) < len(tables):
+                    continue  # no catalog path: leave it out, and let the plan report say so
+            except Exception:
+                continue
+            tables.add(candidate)
+
     tables.update(f.table.lower() for f in scope)  # the scoped table must be in the plan (and joined to the rest)
     tables = set(schema.expand_required_tables(tables))
     qp.required_tables = sorted(tables)
@@ -243,3 +261,9 @@ def build_query_plan(request: str, requirements: str = "", plan: str = "", scope
     if top_n is not None:
         qp.result_limit = top_n  # honour the number the user actually asked for
     return qp
+
+
+def plan_report(request_or_plan):
+    """The typed ``agents/plan_status.PlanReport`` for a request or an already-built plan."""
+    plan = request_or_plan if isinstance(request_or_plan, QueryPlan) else build_query_plan(str(request_or_plan))
+    return plan_status.report(plan, relationship_path=schema.relationship_path)

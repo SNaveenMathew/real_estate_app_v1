@@ -56,7 +56,15 @@ def test_unknown_codes_are_rejected_at_creation():
 
 
 def test_only_requests_a_rewording_could_fix_are_retryable():
-    assert {c for c in st.CODES if st.is_retryable(st.not_answered(c, "x"))} == {st.UNPLANNABLE, st.PLACE_MISSING}
+    # A retry inside the turn can fix an unmatched request, a missing place, and a rejected/failed/empty statement
+    # (the SQL repair loop). Everything else needs the user or an operator, so retrying would repeat the same answer.
+    assert {c for c in st.CODES if st.is_retryable(st.not_answered(c, "x"))} == {
+        st.UNPLANNABLE,
+        st.PLACE_MISSING,
+        st.SQL_INVALID,
+        st.SQL_EXECUTION_ERROR,
+        st.RESULT_EMPTY,
+    }
     assert not st.is_retryable("Code Agent error: boom")
 
 

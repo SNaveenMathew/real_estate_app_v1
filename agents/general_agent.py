@@ -35,7 +35,7 @@ from agents.tools import (
     search_all_house_descriptions,
 )
 from agents.response_validator import validate_response
-from agents import answer_status, llm_resilience
+from agents import answer_status, clarification, llm_resilience, tool_result
 import db.schema_catalog as schema
 from agents.query_planner import build_query_plan
 
@@ -700,16 +700,39 @@ def run_general_chat(
         record_general_chat_error(perf_counter() - started_at)
         raise
 
+    early_reply = ""
+    early_meta: dict[str, Any] = {}
     if not input_guard.passed:
-        blocked_reply = (
-            "I'm sorry, but I cannot process this request because it violates "
-            "safety guidelines or attempts to override system instructions."
+        early_reply = (
+            "I can't do that. I only read this database - I can't drop, alter or delete tables - and I won't "
+            "take instructions that try to override how I work. I can still answer questions about the houses, "
+            "sold homes, census, crime, bike and transit data."
         )
+        early_meta = {
+            "guardrail": input_guard.to_dict(),
+            "answer_status": answer_status.REFUSED_UNSAFE,
+            "outcome": answer_status.outcome(answer_status.REFUSED_UNSAFE),
+        }
+    else:
+        # a request for personal fields the catalogue does not hold is answered from the catalogue: naming the
+        # columns that do not exist beats letting the answer model narrate an internal failure as the cause
+        from agents.privacy import personal_field_limitation
+
+        limitation = personal_field_limitation(message)
+        if limitation:
+            early_reply = limitation.text
+            early_meta = {
+                "privacy": limitation.to_dict(),
+                "answer_status": answer_status.REFUSED_PII,
+                "outcome": answer_status.outcome(answer_status.REFUSED_PII),
+            }
+
+    if early_reply:
         updated_history = list(history or []) + [
             {"role": "user", "content": message},
             {
                 "role": "assistant",
-                "content": blocked_reply,
+                "content": early_reply,
                 "trace_id": trace_id,
                 "trace_url": trace_url,
             },
@@ -718,22 +741,22 @@ def run_general_chat(
             root_span,
             root_context=root_context,
             trace_id=trace_id,
-            reply=blocked_reply,
+            reply=early_reply,
             started_at=started_at,
             tool_call_count=0,
         )
         if include_metadata:
             return (
-                blocked_reply,
+                early_reply,
                 updated_history,
                 [],
                 {
                     "trace_id": trace_id,
                     "trace_url": trace_url,
-                    "guardrail": input_guard.to_dict(),
+                    **early_meta,
                 },
             )
-        return blocked_reply, updated_history
+        return early_reply, updated_history
 
     all_tool_messages: list[ToolMessage] = []
     all_calls: list[tuple[str, Any]] = []
@@ -840,18 +863,9 @@ def run_general_chat(
                 # the Code Agent architecture instead of hard-coding intent
                 # or SQL fixes in application code.
                 names = [name for name, _ in calls]
-                step_failed = any(
-                    isinstance(result, str)
-                    and (
-                        "Query returned 0 rows" in result
-                        or "Code Agent error:" in result
-                        or "does not match" in result.lower()
-                        or "join" in result.lower()
-                        and "likely" in result.lower()
-                        or answer_status.is_retryable(result)
-                    )  # NOT_ANSWERED a reworded request could fix
-                    for _, result in calls
-                )
+                # One shared predicate (agents/tool_result.py::result_failed): a typed result answers from its own
+                # status, a plain string from the shared vocabulary.  No agent keeps its own substring list.
+                step_failed = any(tool_result.result_failed(result) for _, result in calls)
                 if (
                     not any(
                         name
@@ -864,27 +878,58 @@ def run_general_chat(
             break
 
         evidence = _render_evidence(all_calls)
-        if tracker:
-            tracker.start_step("response_synthesis", "Answer Synthesis")
-        with trace_span(
-            "general_chat.response",
-            attributes={"openinference.span.kind": "LLM"},
-        ) as response_span:
-            set_span_input(
-                response_span, {"message": message, "evidence": evidence[:12000]}, mime_type="application/json"
+        # The turn's CONCLUSION is its last call, not any earlier one: a step that failed and was recovered in the next
+        # step must not still look like a non-answer.
+        final_result = next((result for _, result in reversed(all_calls) if isinstance(result, str)), "")
+        evidence_status = answer_status.status_code(final_result)
+        if evidence_status is None:
+            # No status line (a plain string from a tool that speaks no vocabulary, or real data): take the last typed
+            # non-ok code, so the turn's conclusion is always a finite state rather than None-by-accident.
+            evidence_status = next(
+                (
+                    facts["status"]
+                    for _, result in reversed(all_calls)
+                    if (facts := tool_result.facts(result))
+                    and facts.get("status") not in (None, answer_status.OK)
+                ),
+                None,
             )
-            raw_reply = _write_final_answer(message, history, evidence)
-            set_span_output(response_span, {"reply": raw_reply}, mime_type="application/json")
+        # A place is known and the measure is not: ask instead of guessing (agents/clarification.py).  The trigger is
+        # the status code above, so a turn that produced real evidence is never interrogated.
+        ask = clarification.question_for(message, final_result) if settings.clarification_enabled else None
+        if ask:
+            if tracker:
+                tracker.start_step("clarification", "Clarifying Question")
+            with trace_span(
+                "general_chat.clarification",
+                attributes={"openinference.span.kind": "CHAIN"},
+            ) as ask_span:
+                set_span_input(ask_span, {"request": message, "status": ask.code}, mime_type="application/json")
+                set_span_output(ask_span, ask.to_dict(), mime_type="application/json")
+            # Deterministic text: the validator must not rewrite a question into an answer.
+            reply = raw_reply = ask.text
+        else:
+            if tracker:
+                tracker.start_step("response_synthesis", "Answer Synthesis")
+            with trace_span(
+                "general_chat.response",
+                attributes={"openinference.span.kind": "LLM"},
+            ) as response_span:
+                set_span_input(
+                    response_span, {"message": message, "evidence": evidence[:12000]}, mime_type="application/json"
+                )
+                raw_reply = _write_final_answer(message, history, evidence)
+                set_span_output(response_span, {"reply": raw_reply}, mime_type="application/json")
+
+            all_messages: list[BaseMessage] = [
+                HumanMessage(content=message),
+                *all_tool_messages,
+                AIMessage(content=raw_reply),
+            ]
+            reply = validate_response(raw_reply, all_messages, strict=True, tool_results=all_calls)
 
         if tracker:
             tracker.set_result_running()
-
-        all_messages: list[BaseMessage] = [
-            HumanMessage(content=message),
-            *all_tool_messages,
-            AIMessage(content=raw_reply),
-        ]
-        reply = validate_response(raw_reply, all_messages, strict=True, tool_results=all_calls)
 
         updated_history = list(history or []) + [
             {"role": "user", "content": message},
@@ -923,6 +968,12 @@ def run_general_chat(
                     "trace_id": trace_id,
                     "trace_url": trace_url,
                     "generated_code": generated_programs,
+                    # What the turn actually concluded, so a caller (eval harness, HTTP layer) can react to it
+                    # without parsing prose: a clarification is a question, not a failed answer.
+                    "answer_status": ask.code if ask else evidence_status,
+                    "outcome": answer_status.outcome(ask.code if ask else evidence_status),
+                    "tool_outcomes": [facts for _, result in all_calls if (facts := tool_result.facts(result))],
+                    "clarification": ask.to_dict() if ask else None,
                 },
             )
         return reply, updated_history

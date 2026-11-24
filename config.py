@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     # When no catalog alias matches, a short model call may PROPOSE concept keys (never SQL); see agents/semantic_fallback.py.
     semantic_fallback_enabled: bool = True
     semantic_fallback_timeout_s: float = 20.0
+    # When a turn cannot be planned but a place IS recognized, the orchestrator asks one clarifying question
+    # instead of guessing the measure (agents/clarification.py).  Never triggered by model uncertainty, only
+    # by an answer status plus an entity the catalog actually recognizes.
+    clarification_enabled: bool = True
     # Server-side chat memory (services/session_memory.py): turns kept per session_id, so a reload or a second
     # tab continues the conversation. The client's own history, when it sends one, still takes precedence.
     session_memory_max_turns: int = 20

@@ -30,7 +30,7 @@ from langchain_openai import ChatOpenAI
 from config import settings, LLM_STOP_SEQUENCES
 from agents.response_validator import validate_response
 from agents.artifacts import classify_dataframe, emit_artifact, reset_artifacts, collect_artifacts
-from agents import llm_resilience
+from agents import answer_status, llm_resilience, tool_result
 
 
 # -- Constants ----------------------------------------------------------------
@@ -248,7 +248,9 @@ def make_house_approved_functions(house_id: str) -> dict:
         """Search stored descriptions and documents for this house."""
         docs = vs.search_house(house_id, query, n_results=4)
         if not docs:
-            return "No documents found for this house yet."
+            return tool_result.status_result(
+                "No documents found for this house yet.", answer_status.RESULT_EMPTY
+            )
         return "\n\n".join(f"[{d['metadata'].get('doc_type', 'text')}]\n{d['text']}" for d in docs)
 
     def query_database(request: str, presentation: str = "auto", scope: str = "this_house") -> str:
@@ -816,10 +818,12 @@ def run_house_chat(
     house_id: str,
     message: str,
     history: list | None = None,
+    include_metadata: bool = False,
 ) -> tuple:
     """
     Run one turn of house-specific chat using the Code Agent architecture.
-    Returns (response_text, updated_history, artifacts).
+    Returns (response_text, updated_history, artifacts), plus the turn's typed metadata when ``include_metadata`` is
+    set - the same shape ``run_general_chat`` uses, so both agents report a finite ``answer_status`` to their caller.
     history is a list of {"role": "user"|"assistant", "content": "..."}.
     artifacts is a list of table/chart/map dicts (agents/artifacts.py) --
     usually empty; see run_general_chat for the same contract.
@@ -965,16 +969,9 @@ def run_house_chat(
 
             # Only loop if the first step produced no substantive data
             if step == 0:
-                step_failed = any(
-                    isinstance(result, str)
-                    and (
-                        "not found" in result.lower()
-                        or "no documents" in result.lower()
-                        or "no data" in result.lower()
-                        or "code agent error" in result.lower()
-                    )
-                    for _, result in calls
-                )
+                # The same shared predicate the general agent uses (agents/tool_result.py::result_failed): a typed
+                # status decides whether another step is worth a model call, not a phrase in the text.
+                step_failed = any(tool_result.result_failed(result) for _, result in calls)
                 if step_failed:
                     continue
             break
@@ -1051,6 +1048,29 @@ def run_house_chat(
             reply_chars=len(reply),
             validation_changed=(reply != raw_reply),
         )
+        if include_metadata:
+            # The turn's conclusion as a finite state (agents/answer_status.py), never parsed out of prose.
+            turn_status = next(
+                (
+                    facts["status"]
+                    for _, result in reversed(all_calls)
+                    if (facts := tool_result.facts(result))
+                    and facts.get("status") not in (None, answer_status.OK)
+                ),
+                None,
+            )
+            return (
+                reply,
+                updated_history,
+                artifacts,
+                {
+                    "trace_id": trace_id,
+                    "trace_url": trace_url,
+                    "answer_status": turn_status,
+                    "outcome": answer_status.outcome(turn_status),
+                    "tool_outcomes": [facts for _, result in all_calls if (facts := tool_result.facts(result))],
+                },
+            )
         return reply, updated_history, artifacts
 
     except Exception as exc:

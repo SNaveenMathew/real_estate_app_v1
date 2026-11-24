@@ -100,5 +100,30 @@ def not_answered(text: str, status: str) -> ToolResult:
     return ToolResult(text, ok=False, kind="not_answered", status=status)
 
 
-def failure(text: str) -> ToolResult:
-    return ToolResult(text, ok=False, kind="error")
+def failure(text: str, status: str | None = None) -> ToolResult:
+    """A call that did not do what it was asked, named by ``status`` when the caller knows the code."""
+    return ToolResult(text, ok=False, kind="error", status=status)
+
+
+def status_result(text: str, status: str, *, ok: bool = True, **kwargs) -> ToolResult:
+    """A non-evidence report (a zero-row answer, a refusal, a diagnostic) carrying its code."""
+    return ToolResult(text, ok=ok, kind="status", status=status, **kwargs)
+
+
+def result_failed(value: Any) -> bool:
+    """Did this tool result fail in a way a second step could plausibly fix?
+
+    The single retry predicate shared by both orchestrators (``general_agent`` and ``house_agent``).  Typed results
+    answer it from their own facts; plain strings fall back to the shared vocabulary in ``agents/answer_status.py``,
+    so neither agent keeps its own list of substrings to look for.
+    """
+    from agents import answer_status
+
+    data = facts(value)
+    if data is not None:
+        if data["ok"] and data["kind"] not in NON_EVIDENCE_KINDS:
+            return False
+        code = data.get("status")
+        return bool(code) and code in answer_status.RETRYABLE
+    code = answer_status.classify_text(value)
+    return bool(code) and code in answer_status.RETRYABLE
