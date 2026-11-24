@@ -90,6 +90,13 @@ class GoldenExample:
     # free_text
     rubric: str | None = None
 
+    # Round trip, when the turn legitimately ends in a question (agents/clarification.py):
+    # clarifications = the user's replies, in order; expect_clarification = asking IS the expected behaviour, so an
+    # answer produced without asking fails.  Replies are self-contained ("How many houses do I have in Denver?"):
+    # the planner has no cross-turn memory by design, so a bare "houses" would simply be unplannable again.
+    clarifications: tuple[str, ...] = ()
+    expect_clarification: bool = False
+
     def __post_init__(self):
         if self.agent == "house" and not self.house_id:
             raise ValueError(f"{self.id}: agent='house' requires house_id")
@@ -872,6 +879,11 @@ GOLDEN_SET: list[GoldenExample] = [
             {"role": "assistant", "content": "You have 2 houses in Pittsburgh."},
         ],
         question="And how many do I have in Denver?",
+        # The referent ("houses") lives only in the history, so the honest turn is a question - which must be asked
+        # rather than guessed.  The scripted user reply is a self-contained restatement, because planning is
+        # single-turn by design; the case therefore measures "asks, then answers what was asked".
+        clarifications=("How many houses do I have in Denver?",),
+        expect_clarification=True,
         answer_type="structured",
         expected=[HOUSE_COUNT_BY_CITY["Denver"]],
         value_type="number",

@@ -57,6 +57,10 @@ def run_example(example: GoldenExample, judge, mock: bool):
     """Get the agent's reply, then dispatch to the right scorer."""
     trace_id = None
     trace_url = None
+    metadata: dict = {}
+    asked = 0
+    scripted_used = 0
+    ended_with_question = False
     if not mock:
         try:
             from observability import initialize_observability, clear_local_trace_capture
@@ -80,11 +84,34 @@ def run_example(example: GoldenExample, judge, mock: bool):
             if example.agent == "general":
                 from agents.general_agent import run_general_chat
 
-                reply, _, _, metadata = run_general_chat(
-                    example.question, history=list(example.history), include_metadata=True
-                )
-                trace_id = metadata.get("trace_id") if metadata else None
-                trace_url = metadata.get("trace_url") if metadata else None
+                # A turn may legitimately end in a QUESTION (agents/clarification.py).  If the example scripts the
+                # user's reply, continue the conversation with it; otherwise the question is the result and is rated
+                # as such.  Each scripted reply is self-contained on purpose - planning is single-turn by design.
+                pending = list(example.clarifications)
+                turns = list(example.history)
+                question = example.question
+                while True:
+                    reply, _, _, metadata = run_general_chat(question, history=turns, include_metadata=True) or (
+                        "",
+                        [],
+                        [],
+                        {},
+                    )
+                    metadata = metadata or {}
+                    trace_id = metadata.get("trace_id") or trace_id
+                    trace_url = metadata.get("trace_url") or trace_url
+                    ended_with_question = bool(metadata.get("clarification"))
+                    if not ended_with_question:
+                        break
+                    asked += 1
+                    if not pending:
+                        break
+                    turns = turns + [
+                        {"role": "user", "content": question},
+                        {"role": "assistant", "content": reply},
+                    ]
+                    question = pending.pop(0)
+                    scripted_used += 1
             else:
                 from agents.house_agent import run_house_chat
 
@@ -110,10 +137,34 @@ def run_example(example: GoldenExample, judge, mock: bool):
                 extra["trace_id"] = trace_id
             return ScoreResult(example.id, "ERROR", "n/a", f"agent call failed: {e}", extra=extra)
 
-    if example.answer_type == "structured":
+    # Scoring rule for the round trip: a scripted reply turns a question into an answer, which counts as a PASS but
+    # is reported as assisted, so a conversational pass is never confused with a single-shot one.  Asking when the
+    # example expects a question is the correct behaviour; answering without asking is not.
+    if example.expect_clarification and not asked:
+        result = ScoreResult(
+            example.id,
+            "FAIL",
+            "assert_equal",
+            "answered without asking for the missing measure, which this example expects to be asked",
+            reply,
+        )
+    elif ended_with_question and not example.expect_clarification:
+        result = ScoreResult(
+            example.id,
+            "FAIL",
+            "assert_equal",
+            "asked a clarifying question and no user reply was scripted for this example",
+            reply,
+        )
+    elif example.answer_type == "structured":
         result = score_structured(example, reply)
     else:
         result = judge.judge(example, reply)
+    if ended_with_question and example.expect_clarification and not scripted_used:
+        result = ScoreResult(example.id, "PASS", "assert_equal", "asked the expected clarifying question", reply)
+    result.extra["clarification_rounds"] = scripted_used
+    result.extra["assisted"] = scripted_used > 0
+    result.extra["asked"] = asked
     if trace_id:
         result.extra["trace_id"] = trace_id
         result.extra["trace_url"] = trace_url
@@ -351,6 +402,12 @@ def _print_summary(results: list[tuple[GoldenExample, ScoreResult]]):
     print(f"\n{'=' * 60}")
     print(f"{passed}/{n} passed, {failed} failed, {errored} errored, {unknown} inconclusive")
 
+    assisted = [r for _, r in results if r.extra.get("assisted")]
+    if assisted:
+        print(f"  assisted (needed a clarifying round trip): {len(assisted)}/{n}")
+        for r in assisted:
+            print(f"    - {r.example_id}: {r.verdict} after {r.extra['clarification_rounds']} round(s)")
+
     for label, method_prefix in [("assert-equal (structured)", "assert_equal"), ("LLM judge (free-text)", "llm_judge")]:
         subset = [(e, r) for e, r in results if r.method.startswith(method_prefix)]
         if subset:
@@ -396,6 +453,9 @@ def _write_report(results: list[tuple[GoldenExample, ScoreResult]], mock: bool, 
                 "trace_url": r.extra.get("trace_url"),
                 "trace_file": r.extra.get("trace_file"),
                 "trace_export_error": r.extra.get("trace_export_error"),
+                "clarification_rounds": r.extra.get("clarification_rounds", 0),
+                "assisted": r.extra.get("assisted", False),
+                "asked": r.extra.get("asked", 0),
             }
             for ex, r in results
         ],
