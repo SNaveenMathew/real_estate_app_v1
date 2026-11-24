@@ -1432,6 +1432,49 @@ SEMANTIC_GLOSSARY.update(
     }
 )
 
+# Crime incidents and bike routes were agent-visible, but neither table had a concept and neither city
+# column had an entity domain.  A city-scoped question ("How many crime incidents are in Pittsburgh?")
+# therefore planned a table with no operation: the deterministic compiler refused it ("plan has no
+# operation") and the model's own correct WHERE city = '...' was then rejected as an unplanned filter.
+# One concept per table is the whole fix.  Like house_inventory / sold_price these declare no
+# entity_types: the planner then resolves the city from the concept's own tables (query_planner's
+# preferred_tables branch) instead of pulling every city domain into the plan.
+SEMANTIC_GLOSSARY.update(
+    {
+        "crime_incidents": _concept(
+            "crime_incidents",
+            ["crime_incidents"],
+            ["crime incidents", "crime incident", "reported crimes", "crime reports", "crime records", "crimes"],
+            "Standardized crime incidents, one row per incident, each with a severity weight.",
+            columns=("crime_incidents.incident_id", "crime_incidents.severity_weight", "crime_incidents.city"),
+            operations=(
+                COUNT("crime_incidents.incident_id"),
+                AVG("crime_incidents.severity_weight"),
+                SUM("crime_incidents.severity_weight"),
+                # "how many cities have crime incidents" counts DISTINCT cities; this alias is longer than
+                # COUNT's bare "how many", so _select_operation prefers it and it compiles to
+                # COUNT(DISTINCT crime_incidents.city).
+                _op("count", ["how many cities", "number of cities"], "DISTINCT crime_incidents.city"),
+            ),
+            grain="incident",
+            groupings=("crime_incidents.city",),
+        ),
+        "bike_routes": _concept(
+            "bike_routes",
+            ["bike_routes"],
+            ["bike routes", "bike lanes", "bike trails", "cycling routes"],
+            "BikePGH-style bike route line features, one row per route segment.",
+            columns=("bike_routes.route_id", "bike_routes.city"),
+            operations=(
+                COUNT("bike_routes.route_id"),
+                _op("distinct", ["which cities", "cities", "list of cities"], "bike_routes.city"),
+            ),
+            grain="route",
+            groupings=("bike_routes.city",),
+        ),
+    }
+)
+
 ENTITY_DOMAINS = (
     EntityDomain(
         "house_city",
@@ -1521,6 +1564,24 @@ ENTITY_DOMAINS = (
         "Transit mode codes (MB, LR, HR, CR, DR, FB)",
         match_mode="exact",
         preferred_for=("transit_ridership", "transit_safety_events"),
+    ),
+    EntityDomain(
+        "crime_city",
+        "crime_incidents",
+        "city",
+        "city",
+        "Crime-incident city labels",
+        match_mode="exact_or_prefix",
+        preferred_for=("crime_incidents",),
+    ),
+    EntityDomain(
+        "bike_route_city",
+        "bike_routes",
+        "city",
+        "city",
+        "Bike-route city labels",
+        match_mode="exact_or_prefix",
+        preferred_for=("bike_routes",),
     ),
 )
 
