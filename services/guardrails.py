@@ -87,7 +87,17 @@ class InputGuardrail:
         re.compile(r"(?i)\b(?:output|print)\s+(?:your\s+)?(?:initial|system)\s+instructions\b"),
         re.compile(r"(?i)\bdo\s+anything\s+now\b"),
         re.compile(r"(?i)\bpretend\s+(?:you\s+have|to\s+have)\s+no\s+(?:rules|guidelines|safety|restrictions)\b"),
-        re.compile(r"(?i)\b(?:drop\s+database|delete\s+from\s+houses|truncate\s+table)\b|\bexec\s*\(\s*['\"]"),
+        # A request to MUTATE the database is refused on its action, whatever the framing.  The narrow list this
+        # replaced (``drop database``/``delete from houses``/``truncate table``) missed the plainest spelling of the
+        # same request - "DROP TABLE houses" - so that turn fell through to the model and was answered with a table
+        # dump on some runs and refused on others.
+        re.compile(
+            r"(?i)\b(?:drop|truncate|alter|rename)\s+(?:table|database|schema|view)\b"
+            r"|\bdelete\s+from\s+\w+"
+            r"|\bupdate\s+\w+\s+set\b"
+            r"|\binsert\s+into\s+\w+"
+            r"|\bexec\s*\(\s*['\"]"
+        ),
     ]
 
     MAX_INPUT_CHARS = 25000
