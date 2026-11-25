@@ -352,6 +352,35 @@ _HOUSES_COLS = [
     "raw_json",
     "is_favorite",
 ]
+#: Tables whose ``zip`` column is a US ZIP.  Only these are normalized at the storage boundary: an
+#: uploaded dataset may call a postal-code column ``zip`` and hold non-US values, which must survive
+#: untouched.
+_US_ZIP_TABLES = frozenset({"houses", "sold_homes"})
+
+
+def _normalize_zip_frame(df: pd.DataFrame, table: str):
+    """Rewrite a US ``zip`` column with the one canonical normalizer, at the storage boundary.
+
+    The loaders already normalize what they parse, but a zip that arrives as ``1851`` (a leading zero
+    eaten upstream by a spreadsheet or a numeric CSV read) is stored as-is unless every future writer
+    remembers to clean it.  Normalizing here means an append, an upsert and a brand-new loader all get
+    the same treatment, and ``house_id`` (address|city|zip) stays stable because the loaders normalize
+    before it is computed.  The normalizer itself is ``services/zillow_sources.normalize_zip5`` - one
+    implementation, imported lazily so the db layer keeps no import edge on the services package.
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or table not in _US_ZIP_TABLES or "zip" not in df.columns:
+        return df
+    from services.zillow_sources import normalize_zip5
+
+    out = df.copy()
+    # A list (not ``Series.map``) so a value that is not a ZIP stays a real None: pandas would coerce it
+    # to float NaN, and a NaN registered into a VARCHAR column is not the NULL the schema expects.
+    out["zip"] = pd.Series(
+        [normalize_zip5(value) for value in out["zip"]], index=out.index, dtype=object
+    )
+    return out
+
+
 _HOUSES_INSERT = (
     f"INSERT OR REPLACE INTO houses ({', '.join(_HOUSES_COLS)}) SELECT {', '.join(_HOUSES_COLS)} FROM __tmp_houses"
 )
@@ -403,7 +432,7 @@ def upsert_houses(df: pd.DataFrame):
     for col in _HOUSES_COLS:
         if col not in df.columns:
             df[col] = None
-    houses_df = df[_HOUSES_COLS].copy()
+    houses_df = _normalize_zip_frame(df[_HOUSES_COLS].copy(), "houses")
     conn.register("__tmp_houses", houses_df)
     conn.execute(_HOUSES_INSERT)
     conn.unregister("__tmp_houses")
@@ -651,7 +680,7 @@ def upsert_houses_with_snapshots(latest_df: pd.DataFrame, all_rows_df: pd.DataFr
     for col in _HOUSES_COLS:
         if col not in latest_df.columns:
             latest_df[col] = None
-    houses_df = latest_df[_HOUSES_COLS].copy()
+    houses_df = _normalize_zip_frame(latest_df[_HOUSES_COLS].copy(), "houses")
     conn.register("__tmp_houses", houses_df)
     conn.execute(_HOUSES_INSERT)
     conn.unregister("__tmp_houses")
@@ -729,6 +758,7 @@ def upsert_df(table: str, df: pd.DataFrame):
     # Check whether this table has a primary key
     has_pk = _table_has_pk(conn, table)
 
+    df = _normalize_zip_frame(df, table)
     conn.register("__tmp", df)
     if has_pk:
         conn.execute(f"INSERT OR REPLACE INTO {table} SELECT * FROM __tmp")

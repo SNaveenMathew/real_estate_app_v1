@@ -1,5 +1,7 @@
 import duckdb
+import pandas as pd
 
+from db import schema_ddl
 from services import data_loader
 
 
@@ -106,4 +108,42 @@ def test_load_census_tracts_stores_join_key_in_schema_column_and_replaces_old_ro
         ("01001020100", "1400000US01001020100", 1775),
         ("42003140100", "1400000US42003140100", 3456),
     ]
+    conn.close()
+
+
+def test_zip_frame_normalization_pads_and_cleans():
+    from db.duckdb_store import _normalize_zip_frame
+
+    df = pd.DataFrame({"zip": ["1851", "15213-2622", "15213", None, "not-a-zip"]})
+    out = _normalize_zip_frame(df, "houses")
+
+    assert list(out["zip"]) == ["01851", "15213", "15213", None, None]
+    assert df["zip"].iloc[0] == "1851", "the caller's frame must not be mutated"
+
+
+def test_zip_frame_normalization_leaves_non_us_tables_alone():
+    from db.duckdb_store import _normalize_zip_frame
+
+    df = pd.DataFrame({"zip": ["SW1A 1AA"]})
+    assert _normalize_zip_frame(df, "uploaded_dataset").equals(df)
+
+
+def test_repair_zip_codes_pads_legacy_rows_exactly_once():
+    conn = duckdb.connect(":memory:")
+    conn.execute("CREATE TABLE app_settings (key VARCHAR PRIMARY KEY, value_json VARCHAR)")
+    conn.execute("CREATE TABLE houses (zip VARCHAR)")
+    conn.execute("CREATE TABLE sold_homes (zip VARCHAR)")
+    conn.execute("INSERT INTO houses VALUES ('1851'), ('15213'), (NULL), ('15213-2622')")
+    conn.execute("INSERT INTO sold_homes VALUES ('2119')")
+
+    assert schema_ddl.repair_zip_codes(conn) == 2
+    assert conn.execute("SELECT zip FROM houses ORDER BY zip NULLS LAST").fetchall() == [
+        ("01851",),
+        ("15213",),
+        ("15213-2622",),
+        (None,),
+    ]
+    assert conn.execute("SELECT zip FROM sold_homes").fetchall() == [("02119",)]
+    # The marker makes the second pass a no-op, so a reconnect never rescans the tables.
+    assert schema_ddl.repair_zip_codes(conn) == 0
     conn.close()

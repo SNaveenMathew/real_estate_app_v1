@@ -183,7 +183,7 @@ class AlleghenyParser(CountyParserBase):
         street = df.apply(_build_street, axis=1)
         city = col("PROPERTYCITY").apply(_clean).str.title()
         state = col("PROPERTYSTATE").apply(lambda v: _clean(v) or "PA").str.upper()
-        zip_ = col("PROPERTYZIP").apply(_clean).str[:5]
+        zip_ = _zip5(col("PROPERTYZIP").apply(_clean).str[:5])
 
         # Drop rows where the street came out entirely empty
         valid_street = street.str.strip().ne("")
@@ -304,7 +304,8 @@ class GenericSoldParser(CountyParserBase):
             df["address"] = ""
         city = df.get("city", pd.Series([""] * len(df)))
         state = df.get("state", pd.Series([""] * len(df)))
-        zip_ = df.get("zip", pd.Series([""] * len(df)))
+        zip_ = _zip5(df.get("zip", pd.Series([""] * len(df))))
+        df["zip"] = zip_
 
         df["full_address"] = (
             df["address"].astype(str) + ", " + city.astype(str) + ", " + state.astype(str) + " " + zip_.astype(str)
@@ -392,6 +393,18 @@ class GenericSoldParser(CountyParserBase):
 
 # Registry: listed in priority order; GenericSoldParser must be last
 _COUNTY_PARSERS = [AlleghenyParser, GenericSoldParser]
+
+
+def _zip5(series):
+    """Canonical 5-digit US ZIPs for a sold-home frame.
+
+    County exports routinely lose a leading zero (Cambridge's ``01851`` arrives as ``1851``); the one
+    normalizer is reused here rather than reimplemented, and ``db.duckdb_store`` applies it again at the
+    storage boundary so a future parser cannot bypass it.
+    """
+    from services.zillow_sources import normalize_zip5
+
+    return series.apply(normalize_zip5)
 
 
 def _detect_parser(columns: list[str]) -> type:
@@ -500,6 +513,8 @@ def load_sold_homes(run_geocoding: bool = True, geo_utils=None) -> int:
 
     combined = pd.concat(all_rows, ignore_index=True)
     combined = combined.drop_duplicates(subset=["sale_id"])
+    # Belt for parsers added later: whatever they produced, the stored column is canonical 5-digit ZIPs.
+    combined["zip"] = _zip5(combined["zip"])
 
     # ── Geocoding ─────────────────────────────────────────────────────────
     needs_geo = combined["lat"].isna() | combined["lon"].isna()

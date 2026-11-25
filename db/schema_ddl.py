@@ -551,6 +551,53 @@ def create_indexes(conn: duckdb.DuckDBPyConnection) -> None:
         conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_{column} ON {table}({column})")
 
 
+_ZIP_REPAIR_KEY = "zip_repair_v1"
+
+
+def repair_zip_codes(conn: duckdb.DuckDBPyConnection, *, force: bool = False) -> int:
+    """Zero-pad stored US ZIPs that lost a leading zero before they reached the database.
+
+    A 4-digit ZIP is never valid in the US: ``1851`` is Cambridge's ``01851`` after a spreadsheet or a
+    numeric CSV read dropped the zero.  Rows loaded before the loaders normalized on ingest keep the
+    damaged form, and a re-created database restored from an older file inherits them, so the repair
+    lives here rather than in a one-off script.
+
+    Idempotent and conservative: it only rewrites values that are exactly four digits (leaving ZIP+4,
+    already-clean values, NULLs and anything non-numeric untouched, because turning garbage into a
+    plausible-looking ZIP is worse than leaving it visible).  A marker in ``app_settings`` stops the
+    scan repeating on every connection; the storage boundary``_normalize_zip_frame`` is what keeps new
+    writes clean, so the repair never has to run twice.
+    """
+    if not force:
+        try:
+            if conn.execute("SELECT 1 FROM app_settings WHERE key = ?", [_ZIP_REPAIR_KEY]).fetchone():
+                return 0
+        except Exception:
+            pass  # app_settings not created yet: fall through and just repair
+    changed = 0
+    for table in ("houses", "sold_homes"):
+        try:
+            before = conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE regexp_matches(CAST(zip AS VARCHAR), '^[0-9]{{4}}$')"
+            ).fetchone()[0]
+            if before:
+                conn.execute(
+                    f"UPDATE {table} SET zip = lpad(CAST(zip AS VARCHAR), 5, '0') "
+                    "WHERE regexp_matches(CAST(zip AS VARCHAR), '^[0-9]{4}$')"
+                )
+            changed += int(before or 0)
+        except Exception:
+            continue  # table absent in this build: nothing to repair
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value_json) VALUES (?, ?)",
+            [_ZIP_REPAIR_KEY, '"done"'],
+        )
+    except Exception:
+        pass
+    return changed
+
+
 def initialize(conn: duckdb.DuckDBPyConnection) -> None:
     """Create every table this app owns, in dependency-free order."""
     drop_legacy_views(conn)
@@ -562,3 +609,4 @@ def initialize(conn: duckdb.DuckDBPyConnection) -> None:
     create_sales_tables(conn)
     create_app_tables(conn)
     create_indexes(conn)  # last: chat_session_turns is created inside create_app_tables
+    repair_zip_codes(conn)  # after app_settings exists: it records its marker there
