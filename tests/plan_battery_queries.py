@@ -10,6 +10,8 @@ near_miss     questions that merely CONTAIN census-sounding words ("population",
 msa_context   existing metro / NRI / census questions.  They may improve (more places recognised) but only on purpose:
               a change shows up as a reviewable diff.
 census        the questions this hardening was written for.
+zhvi_levels   one question per ZHVI geography level, so the planned join is checked against the grain: houses.zip
+              for zip rows, houses.msa_code for metro rows, and no houses join for a neighborhood name.
 
 Adding a dataset?  Add two or three representative questions to a group, run ``python scripts/plan_battery.py --update``
 and review the diff of ``tests/golden/plan_battery.json``: every changed plan outside your own dataset is a collision.
@@ -76,6 +78,12 @@ GROUPS = {
         "average hurricane risk for the Miami metro area",
         "largest metro by population",
         "smallest MSA",
+    ],
+    "zhvi_levels": [
+        "typical home value by zip",
+        "home value by metro",
+        "metro home value in Pittsburgh",
+        "home value by neighborhood",
     ],
     "census": [
         "Verify the land areas of Pittsburgh and Indianapolis",

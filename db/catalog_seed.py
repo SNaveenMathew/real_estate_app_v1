@@ -155,8 +155,8 @@ TABLES = {
     "bike_routes": TableMeta("bike_routes", "BikePGH-style line features.", grain="one row per line feature"),
     "zhvi": TableMeta(
         "zhvi",
-        "Zillow Home Value Index (ZHVI) — smoothed, seasonally-adjusted typical home value, by region and month.",
-        grain="one row per region per month",
+        "Zillow Home Value Index (ZHVI) — smoothed, seasonally-adjusted typical home value, by region and month. Several geography levels share this table (region_type), so a query must name its level; the catalog concepts do.",
+        grain="one row per region per month (region = region_id at one region_type)",
         column_notes=(
             ColumnNote(
                 "region_id",
@@ -164,11 +164,11 @@ TABLES = {
             ),
             ColumnNote(
                 "region_type",
-                "Geography level of this row: country, state, metro, county, city, zip, or neighborhood — a single query may mix levels unless filtered.",
+                "Geography level of this row: country, state, metro, county, city, zip, or neighborhood. Any number of levels can be loaded at the same time (an installation typically has a neighborhood and a zip export), so `AVG(home_value)` over the unfiltered table averages across grains and is not a home value: pin the level (`WHERE region_type = 'zip'`). Each zhvi* concept in SEMANTIC_GLOSSARY pins exactly one level in its filters.",
             ),
             ColumnNote(
                 "region_name",
-                "Display name. For region_type='zip' this is a clean 5-digit zip (normalized at load time — see services/zillow_sources.py::normalize_zip5 — so it always equality-joins cleanly against houses.zip, which is normalized the same way). For metro rows this is Zillow's short 'City, ST' form, e.g. 'New York, NY'.",
+                "Display name. For region_type='zip' this is a clean 5-digit zip (normalized at load time — see services/zillow_sources.py::normalize_zip5 — so it always equality-joins cleanly against houses.zip, which is normalized the same way). For every other level it is a place name (metro rows use Zillow's short 'City, ST' form, e.g. 'New York, NY'), which is why this column is only a zip when region_type='zip' and must never be used as a zip key without that filter.",
             ),
             ColumnNote("home_value", "ZHVI dollar value for that region and month; NULL months are dropped, not zero."),
             ColumnNote("metro", "Containing metro area name; only populated for zip/neighborhood/city-level rows."),
@@ -910,11 +910,15 @@ SEMANTIC_GLOSSARY.update(
             columns=("house_snapshots.snapshot_date", "house_snapshots.price"),
             grain="snapshot",
         ),
+        # ZHVI is one table at several geography levels. Three concepts pin one level each instead of one
+        # level-blind concept, because the table now holds a zip export next to a neighborhood export and
+        # an unfiltered AVG would average across grains. The zip level is the default ("zhvi", "typical
+        # home value") because that is the level houses join to; the others are reachable by name.
         "zhvi": _concept(
             "zhvi",
             ["zhvi"],
             ["zhvi", "home value index", "zillow home value index", "home value trend", "typical home value"],
-            "Zillow Home Value Index (ZHVI): smoothed, seasonally-adjusted typical home value by region and month, at whichever geography level (zip/metro/state/etc.) is loaded — filter region_type for a single level.",
+            "Zillow Home Value Index (ZHVI) for a zip code: smoothed, seasonally-adjusted typical home value per zip and month. Join through houses.zip = zhvi.region_name (and zhvi.region_type = 'zip'); see zhvi_metro and zhvi_neighborhood for the other levels.",
             columns=("zhvi.home_value",),
             operations=(
                 AVG("zhvi.home_value"),
@@ -924,7 +928,43 @@ SEMANTIC_GLOSSARY.update(
                 RANK_DESC("zhvi.home_value"),
                 RANK_ASC("zhvi.home_value"),
             ),
-            grain="region-month",
+            filters=("zhvi.region_type = 'zip'",),
+            grain="zip-month",
+            entity_types=("zip",),
+            join=("houses.zip=zhvi.region_name",),
+        ),
+        "zhvi_metro": _concept(
+            "zhvi_metro",
+            ["zhvi"],
+            ["metro home value", "home value by metro", "metro-level home value", "metro home values"],
+            "ZHVI at metro (CBSA) level — the fallback tier when a house's own zip has no zip-level row. Filter zhvi.region_type = 'metro' and join on the CBSA code: houses.msa_code = zhvi.msa_code (or census_msa.msa_code = zhvi.msa_code). region_name holds the metro's display name at this level, not a zip.",
+            columns=("zhvi.home_value",),
+            operations=(
+                AVG("zhvi.home_value"),
+                MEDIAN("zhvi.home_value"),
+                MIN("zhvi.home_value"),
+                MAX("zhvi.home_value"),
+            ),
+            filters=("zhvi.region_type = 'metro'",),
+            grain="metro-month",
+            entity_types=("MSA",),
+            join=("houses.msa_code=zhvi.msa_code", "census_msa.msa_code=zhvi.msa_code"),
+        ),
+        "zhvi_neighborhood": _concept(
+            "zhvi_neighborhood",
+            ["zhvi"],
+            ["neighborhood home value", "home value by neighborhood", "neighborhood-level home value", "neighborhood home values"],
+            "ZHVI at neighborhood level — Zillow's neighborhood geography, reached by neighborhood name (zhvi.region_name where region_type = 'neighborhood'). No house column holds a neighborhood name (measured: houses.zip = a neighborhood region_name matches 0 rows), so this level is answered on its own, without a houses join.",
+            columns=("zhvi.home_value",),
+            operations=(
+                AVG("zhvi.home_value"),
+                MEDIAN("zhvi.home_value"),
+                MIN("zhvi.home_value"),
+                MAX("zhvi.home_value"),
+            ),
+            filters=("zhvi.region_type = 'neighborhood'",),
+            grain="neighborhood-month",
+            join=(),
         ),
         "market_heat_index": _concept(
             "market_heat_index",

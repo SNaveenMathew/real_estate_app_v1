@@ -56,6 +56,14 @@ class Relationship:
     def key(self) -> str:
         return f"{self.left_table}:{self.left_expr}={self.right_table}:{self.right_expr}"
 
+    def join_key(self) -> str:
+        """The join as plans and a concept's ``join`` knob write it: ``houses.zip=zhvi.region_name``."""
+        return f"{self.left_table}.{self.left_expr}={self.right_table}.{self.right_expr}"
+
+    def join_key(self) -> str:
+        """The join as plans and a concept's ``join`` knob write it: ``houses.zip=zhvi.region_name``."""
+        return f"{self.left_table}.{self.left_expr}={self.right_table}.{self.right_expr}"
+
     def render(self) -> str:
         attrs = [
             self.cardinality,
@@ -110,6 +118,11 @@ CONCEPT_KNOBS = {
     "because they are not expressible as SQL over the stored tables (e.g. polygon-derived land area).",
     "derived_support": "{provider, measures} - this concept's measure can ALSO be supplied by the provider when the "
     "derived path is already running for another concept; ignored otherwise (SQL stays authoritative).",
+    "join": "list[str] - the relationship keys (`left.col=right.col`, see Relationship.join_key) this concept's "
+    "grain is read at. Only those edges may connect the concept's table to another table, so a table holding several "
+    "geography levels never gets another level's join key. An empty list declares a grain nothing joins to (a "
+    "neighborhood name no house column holds), and concepts that live only on tables such a grain excludes are "
+    "dropped from the plan.",
 }
 
 

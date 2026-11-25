@@ -21,6 +21,22 @@ def test_every_plan_matches_the_committed_golden():
     )
 
 
+def test_zhvi_levels_join_on_their_own_grain():
+    """Each ZHVI level's plan joins on the key its grain uses, checked beside the golden so a careless --update
+    cannot freeze a wrong join: a metro plan showing houses.zip = zhvi.region_name returns no rows, and a
+    neighborhood plan that keeps a houses join cannot answer at all (no house column holds a neighborhood name).
+    """
+    plans = plan_battery.run_battery({"zhvi_levels"})["zhvi_levels"]
+    lines = {q: "\n".join(plan) for q, plan in plans.items()}
+
+    assert "houses.zip = zhvi.region_name" in lines["typical home value by zip"]
+    assert "houses.msa_code = zhvi.msa_code" in lines["home value by metro"]
+    for question in ("home value by metro", "metro home value in Pittsburgh"):
+        assert "zhvi.region_name" not in lines[question], question
+    assert "required_tables: zhvi" in lines["home value by neighborhood"]
+    assert "required_relationships: none" in lines["home value by neighborhood"]
+
+
 def test_the_zero_drift_groups_are_present_and_substantial():
     golden = plan_battery.load_golden()
     assert len(golden["unrelated"]) >= 20 and len(golden["near_miss"]) >= 15

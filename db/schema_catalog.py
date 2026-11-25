@@ -929,7 +929,59 @@ def _entity_predicate(entity: dict) -> str:
     return f"{entity['table']}.{entity['column']} = '{value}'"
 
 
-def relationship_path(required_tables: set[str]) -> list[Relationship]:
+def _edge_allowed(rel: Relationship, pins: dict[str, set[str]] | None) -> bool:
+    """Whether an edge may be used when a concept pins its table's join keys (the ``join`` knob).
+
+    Strict on purpose: an edge touching a pinned table is usable only when the concept declared that key, so a
+    table holding several geography levels (zhvi) can never be joined by another level's key.
+    """
+    if not pins or (rel.left_table not in pins and rel.right_table not in pins):
+        return True
+    allowed = pins.get(rel.left_table, set()) | pins.get(rel.right_table, set())
+    return rel.join_key() in allowed
+
+
+def concept_join_pins(concepts: list[dict]) -> dict[str, set[str]]:
+    """The join keys each concept pins for its table, keyed by table (a concept with ``join=[]`` pins none)."""
+    pins: dict[str, set[str]] = {}
+    for c in concepts:
+        if "join" not in c:
+            continue
+        for table in c.get("tables", ()):
+            pins.setdefault(table, set()).update(str(k) for k in c.get("join") or ())
+    return pins
+
+
+def grain_connected_tables(tables: set[str], pins: dict[str, set[str]]) -> set[str]:
+    """The tables that stay at a pinned grain: what is reachable from a concept's own table, nothing else.
+
+    Tables also arrive from entity resolution, text mentions and scope, so the planner applies this to the final
+    table set as well as at concept selection.
+    """
+    seeds = {t for t in tables if t in pins}
+    if not seeds:
+        return set(tables)
+    adjacency: dict[str, set[str]] = {}
+    for rel in relationship_path(tables, pins):
+        adjacency.setdefault(rel.left_table, set()).add(rel.right_table)
+        adjacency.setdefault(rel.right_table, set()).add(rel.left_table)
+    seen, stack = set(seeds), list(seeds)
+    while stack:
+        for nxt in adjacency.get(stack.pop(), ()):
+            if nxt not in seen:
+                seen.add(nxt)
+                stack.append(nxt)
+    return seen
+
+
+def concepts_at_pinned_grain(concepts: list[dict], pins: dict[str, set[str]]) -> list[dict]:
+    """Drop concepts that live entirely on tables a pinned grain excludes (see ``grain_connected_tables``)."""
+    tables = {t for c in concepts for t in c.get("tables", ())}
+    dropped = tables - grain_connected_tables(tables, pins)
+    return [c for c in concepts if not set(c.get("tables", ())) <= dropped]
+
+
+def relationship_path(required_tables: set[str], pins: dict[str, set[str]] | None = None) -> list[Relationship]:
     """Return the minimal high-quality relationship forest connecting required tables.
 
     Intermediate bridge tables are allowed; they come from the declarative
@@ -941,6 +993,8 @@ def relationship_path(required_tables: set[str]) -> list[Relationship]:
 
     graph = {}
     for rel in _relationships():
+        if not _edge_allowed(rel, pins):
+            continue
         weight = (0 if rel.confidence == "high" else 10) + (0 if rel.preferred else 5) + (0 if rel.bridge else 1)
         graph.setdefault(rel.left_table, []).append((rel.right_table, rel, weight))
         graph.setdefault(rel.right_table, []).append((rel.left_table, rel, weight))
@@ -989,9 +1043,9 @@ def relationship_path(required_tables: set[str]) -> list[Relationship]:
     return out
 
 
-def expand_required_tables(tables: set[str]) -> list[str]:
+def expand_required_tables(tables: set[str], pins: dict[str, set[str]] | None = None) -> list[str]:
     # Connect the selected tables using the minimal relationship forest.
-    path = relationship_path(tables)
+    path = relationship_path(tables, pins)
     out = set(tables)
     for rel in path:
         out.add(rel.left_table)
@@ -999,8 +1053,8 @@ def expand_required_tables(tables: set[str]) -> list[str]:
     return sorted(out)
 
 
-def relationships_for_tables(tables: set[str]) -> list[Relationship]:
-    return relationship_path(tables)
+def relationships_for_tables(tables: set[str], pins: dict[str, set[str]] | None = None) -> list[Relationship]:
+    return relationship_path(tables, pins)
 
 
 def _concept_requires_rollup(concepts: list[dict], entity_tables: set[str]) -> bool:
@@ -1016,6 +1070,9 @@ def build_query_context(request: str, requirements: str = "", plan: str = "", fo
             selected.update(x.strip() for x in marker.group(1).split(",") if x.strip() not in {"none", "null"})
         if selected:
             concepts = [c for c in concepts if c.get("key") in selected or c.get("key") == "msa_cbsa_membership"]
+    pins = concept_join_pins(concepts)
+    if pins:
+        concepts = concepts_at_pinned_grain(concepts, pins)
     target_tables = {t for c in concepts for t in c.get("tables", [])}
     target_tables.update(tables_mentioned_in_text(request))
     resolved = resolve_request_entities(request, None)
@@ -1030,7 +1087,7 @@ def build_query_context(request: str, requirements: str = "", plan: str = "", fo
         target_tables.add("census_tracts")
         if any(c.get("rollup") for c in concepts):
             target_tables.add("nri_tracts")
-    target_tables = set(expand_required_tables(target_tables))
+    target_tables = set(expand_required_tables(target_tables, pins))
 
     parts = ["TARGETED DATA MODEL"]
     for table in sorted(target_tables):
@@ -1041,7 +1098,7 @@ def build_query_context(request: str, requirements: str = "", plan: str = "", fo
         for note in meta.column_notes:
             if note.column in cols:
                 parts.append(f"  {table}.{note.column}: {note.note}")
-    rels = relationships_for_tables(target_tables)
+    rels = relationships_for_tables(target_tables, pins)
     if rels:
         parts.append("RELATIONSHIPS")
         parts.extend(f"- {r.render()}" for r in rels)

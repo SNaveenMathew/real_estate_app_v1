@@ -118,6 +118,13 @@ def build_query_plan(request: str, requirements: str = "", plan: str = "", scope
     scope = query_scope.current() if scope is None else tuple(scope)
     text = request.strip()
     concepts = schema.semantic_matches(text)
+    # A concept may pin the join keys its grain is read at (``join``, db/catalog_model.py): ZHVI stores zip and
+    # neighborhood rows in one table, so the table-level default (the house ZIP key) is right only for zip rows, a
+    # metro concept needs the CBSA key, and the neighborhood level has no house key at all. Dropping concepts that
+    # live only outside the pinned grain also keeps their metrics and filters out of the plan.
+    pins = schema.concept_join_pins(concepts)
+    if pins:
+        concepts = schema.concepts_at_pinned_grain(concepts, pins)
     intent = schema.match_request_intents(text)
     qp = QueryPlan(question_type=intent[0]["name"] if intent else "analytical")
     qp.semantic_keys = [c["key"] for c in concepts]
@@ -239,16 +246,18 @@ def build_query_plan(request: str, requirements: str = "", plan: str = "", scope
             if candidate not in known:
                 continue
             try:
-                if len(schema.relationship_path(tables | {candidate})) < len(tables):
+                if len(schema.relationship_path(tables | {candidate}, pins)) < len(tables):
                     continue  # no catalog path: leave it out, and let the plan report say so
             except Exception:
                 continue
             tables.add(candidate)
 
     tables.update(f.table.lower() for f in scope)  # the scoped table must be in the plan (and joined to the rest)
-    tables = set(schema.expand_required_tables(tables))
+    if pins:  # tables added from entities/text/scope must still sit at the same grain as the concept
+        tables = schema.grain_connected_tables(tables, pins)
+    tables = set(schema.expand_required_tables(tables, pins))
     qp.required_tables = sorted(tables)
-    qp.required_relationships = [r.render() for r in schema.relationships_for_tables(tables)]
+    qp.required_relationships = [r.render() for r in schema.relationships_for_tables(tables, pins)]
     qp.entity_filters = [
         f"{e['table']}.{e['column']} = '{e['value'].replace(chr(39), chr(39) * 2)}'"
         for e in resolved

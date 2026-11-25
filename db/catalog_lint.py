@@ -152,6 +152,12 @@ def lint_catalog(include_info: bool = True) -> list[Issue]:
         except Exception as exc:  # pragma: no cover - import problems
             add("error", "provider_import_failed", pid, f"derived provider {pid!r} could not be imported: {exc}")
 
+    # A concept's ``join`` knob names the edges its grain is read at; a key that is not an approved relationship (or
+    # does not touch the concept's own table) is a silent no-op that leaves the table-level default in place.
+    join_edges = {
+        f"{r['left_table']}.{r['left_expr']}={r['right_table']}.{r['right_expr']}": (r["left_table"], r["right_table"])
+        for r in data["relationships"]
+    }
     owners: dict[str, list[str]] = {}
     for row, item in concept_rows:
         key = row["key"]
@@ -201,6 +207,29 @@ def lint_catalog(include_info: bool = True) -> list[Issue]:
                 )
 
         # ---- knobs ------------------------------------------------------------------------------------------------
+        joins = item.get("join")
+        if joins is not None:
+            if not isinstance(joins, list) or not all(isinstance(x, str) for x in joins):
+                add("error", "bad_knob", key, "join must be a list of relationship keys like houses.zip=zhvi.region_name")
+            else:
+                for join_key in joins:
+                    tables_in_edge = join_edges.get(join_key)
+                    if tables_in_edge is None:
+                        add(
+                            "error",
+                            "unknown_join",
+                            key,
+                            f"join names {join_key!r}, which is not an approved relationship, so the planner keeps "
+                            "the table-level default instead",
+                        )
+                    elif not set(tables_in_edge) & set(item.get("tables", [])):
+                        add(
+                            "error",
+                            "join_off_table",
+                            key,
+                            f"join {join_key!r} does not touch this concept's table(s) "
+                            f"{item.get('tables', [])}, so it can never apply",
+                        )
         needs = item.get("requires_entity")
         if needs is not None:
             if not isinstance(needs, list) or not all(isinstance(x, str) for x in needs):

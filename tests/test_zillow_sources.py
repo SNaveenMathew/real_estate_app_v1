@@ -165,6 +165,80 @@ def test_zillow_load_dir_multiple_files(tmp_path):
     assert set(combined["region_type"]) == {"zip", "metro"}
 
 
+def test_zip_level_export_shape_restores_leading_zero_and_keeps_metro(tmp_path):
+    """The real Zip_zhvi_*.csv export: all identifying columns, one row per zip.
+
+    Zillow's zip RegionName is a text zip, but a spreadsheet-edited or numerically re-saved copy loses the
+    leading zero (Cambridge's 01851 arrives as 1851). The zip level is the level houses join to, so the
+    parser has to produce a canonical 5-digit key, and it must leave the other levels' names alone.
+    """
+    csv_content = textwrap.dedent("""\
+        RegionID,SizeRank,RegionName,RegionType,StateName,State,City,Metro,CountyName,2024-01-31,2024-02-29
+        91982,0,2139,zip,MA,MA,Cambridge,"Boston-Cambridge-Newton, MA-NH",Middlesex County,780000,790000
+        92000,1,Maryvale,neighborhood,PA,PA,Pittsburgh,"Pittsburgh, PA",Allegheny County,180000,181000
+    """)
+    path = tmp_path / "Zip_zhvi_uc_sfr_tier_0.33_0.67_sm_sa_month.csv"
+    path.write_text(csv_content, encoding="utf-8")
+
+    df = ZhviParser.load_dir(tmp_path)
+    assert len(df) == 4  # 2 regions x 2 months
+
+    zip_rows = df[df["region_type"] == "zip"]
+    assert set(zip_rows["region_name"]) == {"02139"}
+    assert zip_rows["metro"].iloc[0] == "Boston-Cambridge-Newton, MA-NH"
+
+    neighborhood_rows = df[df["region_type"] == "neighborhood"]
+    assert set(neighborhood_rows["region_name"]) == {"Maryvale"}
+
+
+def test_zhvi_concepts_pin_exactly_one_geography_level():
+    """A level-blind ZHVI concept is the grain bug waiting to happen.
+
+    zhvi holds a zip export next to a neighborhood export, so `AVG(home_value)` without a
+    `region_type` filter averages across grains. Every concept over zhvi.home_value must pin exactly
+    one level, and no two may share it.
+    """
+    concepts = [c for c in seed.SEMANTIC_GLOSSARY.values() if "zhvi.home_value" in c["columns"]]
+    assert {"zhvi", "zhvi_metro", "zhvi_neighborhood"} <= {c["key"] for c in concepts}
+
+    levels = {}
+    for concept in concepts:
+        pinned = [f for f in concept["filters"] if "zhvi.region_type" in f]
+        assert len(pinned) == 1, f"{concept['key']} must pin exactly one region_type, found {concept['filters']}"
+        level = pinned[0].split("'")[1]
+        assert level not in levels, f"{concept['key']} and {levels[level]} both pin region_type={level!r}"
+        levels[level] = concept["key"]
+
+    assert levels == {
+        "zip": "zhvi",
+        "metro": "zhvi_metro",
+        "neighborhood": "zhvi_neighborhood",
+    }
+
+
+def test_zhvi_concepts_pin_the_join_their_level_needs():
+    """A level's join key must match its grain.
+
+    The table-level default (houses.zip = zhvi.region_name) is right only for zip rows: metro rows carry the
+    metro's display name in region_name and a CBSA code in msa_code, and no house column holds a neighborhood
+    name. The planner reads ``join``, so a wrong declaration there is silently the wrong join.
+    """
+    concepts = {c["key"]: c for c in seed.SEMANTIC_GLOSSARY.values()}
+    registered = {r.join_key() for r in seed.RELATIONSHIPS}
+    expected = {
+        "zhvi": {"houses.zip=zhvi.region_name"},
+        "zhvi_metro": {"houses.msa_code=zhvi.msa_code", "census_msa.msa_code=zhvi.msa_code"},
+        "zhvi_neighborhood": set(),
+    }
+    for key, joins in expected.items():
+        assert set(concepts[key]["join"]) == joins, f"{key} pins {concepts[key].get('join')!r}"
+        assert joins <= registered, f"{key} pins a join the catalog does not register"
+
+    # No house column holds a neighborhood name: the zip-key join the table-level default would pick returns no
+    # rows at this level (measured 0 on the loaded export), so "joins to nothing" is the only correct declaration.
+    assert "join" in concepts["zhvi_neighborhood"] and not concepts["zhvi_neighborhood"]["join"]
+
+
 # ─── 4. CBSA / MSA Resolution Tests ──────────────────────────────────────────
 
 
