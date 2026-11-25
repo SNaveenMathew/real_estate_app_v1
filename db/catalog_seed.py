@@ -8,6 +8,8 @@ same tables.  You only need to edit this file to change what a fresh install sta
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from db.catalog_model import (
     ColumnNote,
     TableMeta,
@@ -1475,6 +1477,650 @@ SEMANTIC_GLOSSARY.update(
     }
 )
 
+# ---------------------------------------------------------------------------
+# Column metadata: role and unit in ONE vocabulary map, notes per table.
+#
+# Why an overlay instead of editing every TableMeta above: role and unit are a
+# cross-cutting vocabulary (key | label | measure | dimension | date | geo |
+# other), and keeping them in one place makes a missing or typo'd argument
+# visible at a glance.  The overlay is merged into TABLES immediately below, so
+# the seed still hands the store ordinary ColumnNote objects and nothing at
+# runtime knows this exists.
+#
+# ``sync_seed`` copies role/unit into catalog_columns (it previously wrote only
+# the note, which is why every built-in column reported an empty role/unit), and
+# db/ontology.py projects all three onto the property nodes.
+# ---------------------------------------------------------------------------
+
+COLUMN_ROLES: dict[str, tuple[str, str]] = {
+    # houses
+    "houses.house_id": ("key", ""),
+    "houses.address": ("label", ""),
+    "houses.city": ("label", ""),
+    "houses.state": ("label", ""),
+    "houses.zip": ("geo", ""),
+    "houses.lat": ("geo", "decimal degrees"),
+    "houses.lon": ("geo", "decimal degrees"),
+    "houses.status": ("dimension", ""),
+    "houses.price": ("measure", "USD"),
+    "houses.beds": ("measure", "count"),
+    "houses.baths": ("measure", "count"),
+    "houses.sqft": ("measure", "sqft"),
+    "houses.year_built": ("dimension", "year"),
+    "houses.hoa_fee": ("measure", "USD/month"),
+    "houses.price_per_sq_ft": ("measure", "USD/sqft"),
+    "houses.walk_score": ("measure", "score (0-100)"),
+    "houses.bike_score": ("measure", "score (0-100)"),
+    "houses.transit_score": ("measure", "score (0-100)"),
+    "houses.tract_fips": ("key", ""),
+    "houses.msa_code": ("key", ""),
+    "houses.nearest_big_city": ("label", ""),
+    "houses.crime_city": ("key", ""),
+    "houses.source_file": ("other", ""),
+    "houses.raw_json": ("other", ""),
+    "houses.is_favorite": ("dimension", "boolean"),
+    "houses.created_at": ("date", ""),
+    # house_snapshots
+    "house_snapshots.snapshot_id": ("key", ""),
+    "house_snapshots.house_id": ("key", ""),
+    "house_snapshots.snapshot_date": ("date", ""),
+    "house_snapshots.source_file": ("other", ""),
+    "house_snapshots.source_type": ("dimension", ""),
+    "house_snapshots.status": ("dimension", ""),
+    "house_snapshots.price": ("measure", "USD"),
+    "house_snapshots.beds": ("measure", "count"),
+    "house_snapshots.baths": ("measure", "count"),
+    "house_snapshots.sqft": ("measure", "sqft"),
+    "house_snapshots.hoa_fee": ("measure", "USD/month"),
+    "house_snapshots.year_built": ("dimension", "year"),
+    "house_snapshots.walk_score": ("measure", "score (0-100)"),
+    "house_snapshots.bike_score": ("measure", "score (0-100)"),
+    "house_snapshots.transit_score": ("measure", "score (0-100)"),
+    "house_snapshots.created_at": ("date", ""),
+    # house_commute
+    "house_commute.house_id": ("key", ""),
+    "house_commute.work_key": ("key", ""),
+    "house_commute.work_label": ("label", ""),
+    "house_commute.drive_min": ("measure", "minutes"),
+    "house_commute.drive_miles": ("measure", "miles"),
+    "house_commute.bike_min": ("measure", "minutes"),
+    "house_commute.bike_miles": ("measure", "miles"),
+    "house_commute.walk_min": ("measure", "minutes"),
+    "house_commute.walk_miles": ("measure", "miles"),
+    "house_commute.transit_min": ("measure", "minutes"),
+    "house_commute.transit_transfers": ("measure", "count"),
+    "house_commute.straight_line_miles": ("measure", "miles"),
+    "house_commute.status": ("dimension", ""),
+    "house_commute.source": ("dimension", ""),
+    "house_commute.computed_at": ("date", ""),
+    # market_heat_index
+    "market_heat_index.region_id": ("key", ""),
+    "market_heat_index.region_type": ("dimension", ""),
+    "market_heat_index.region_name": ("label", ""),
+    "market_heat_index.size_rank": ("measure", "rank (0 = largest)"),
+    "market_heat_index.state_name": ("label", ""),
+    "market_heat_index.state": ("label", ""),
+    "market_heat_index.city": ("label", ""),
+    "market_heat_index.metro": ("label", ""),
+    "market_heat_index.county_name": ("label", ""),
+    "market_heat_index.msa_code": ("key", ""),
+    "market_heat_index.date": ("date", ""),
+    "market_heat_index.heat_index": ("measure", "index (~0-100+)"),
+    "market_heat_index.source_file": ("other", ""),
+    # zhvi
+    "zhvi.region_id": ("key", ""),
+    "zhvi.region_type": ("dimension", ""),
+    "zhvi.region_name": ("label", ""),
+    "zhvi.size_rank": ("measure", "rank (0 = largest)"),
+    "zhvi.state_name": ("label", ""),
+    "zhvi.state": ("label", ""),
+    "zhvi.city": ("label", ""),
+    "zhvi.metro": ("label", ""),
+    "zhvi.county_name": ("label", ""),
+    "zhvi.msa_code": ("key", ""),
+    "zhvi.date": ("date", ""),
+    "zhvi.home_value": ("measure", "USD"),
+    "zhvi.source_file": ("other", ""),
+    # nri_tracts
+    "nri_tracts.tract_fips": ("key", ""),
+    "nri_tracts.county_fips": ("key", ""),
+    "nri_tracts.state_fips": ("key", ""),
+    "nri_tracts.state_name": ("label", ""),
+    "nri_tracts.county_name": ("label", ""),
+    "nri_tracts.nri_id": ("key", ""),
+    "nri_tracts.risk_score": ("measure", "percentile (0-100)"),
+    "nri_tracts.risk_ratng": ("dimension", ""),
+    "nri_tracts.risk_npctl": ("measure", "percentile (0-100)"),
+    "nri_tracts.eal_score": ("measure", "percentile (0-100)"),
+    "nri_tracts.eal_ratng": ("dimension", ""),
+    "nri_tracts.eal_valt": ("measure", "USD/year"),
+    "nri_tracts.sovi_score": ("measure", "percentile (0-100)"),
+    "nri_tracts.sovi_ratng": ("dimension", ""),
+    "nri_tracts.resl_score": ("measure", "percentile (0-100)"),
+    "nri_tracts.resl_ratng": ("dimension", ""),
+    "nri_tracts.avln_risks": ("measure", "percentile (0-100)"),
+    "nri_tracts.cfld_risks": ("measure", "percentile (0-100)"),
+    "nri_tracts.cwav_risks": ("measure", "percentile (0-100)"),
+    "nri_tracts.drgt_risks": ("measure", "percentile (0-100)"),
+    "nri_tracts.erqk_risks": ("measure", "percentile (0-100)"),
+    "nri_tracts.hail_risks": ("measure", "percentile (0-100)"),
+    "nri_tracts.hwav_risks": ("measure", "percentile (0-100)"),
+    "nri_tracts.hrcn_risks": ("measure", "percentile (0-100)"),
+    "nri_tracts.istm_risks": ("measure", "percentile (0-100)"),
+    "nri_tracts.lnds_risks": ("measure", "percentile (0-100)"),
+    "nri_tracts.ltng_risks": ("measure", "percentile (0-100)"),
+    "nri_tracts.rfld_risks": ("measure", "percentile (0-100)"),
+    "nri_tracts.swnd_risks": ("measure", "percentile (0-100)"),
+    "nri_tracts.trnd_risks": ("measure", "percentile (0-100)"),
+    "nri_tracts.tsun_risks": ("measure", "percentile (0-100)"),
+    "nri_tracts.vlcn_risks": ("measure", "percentile (0-100)"),
+    "nri_tracts.wfir_risks": ("measure", "percentile (0-100)"),
+    "nri_tracts.wntw_risks": ("measure", "percentile (0-100)"),
+    # sold_homes
+    "sold_homes.sale_id": ("key", ""),
+    "sold_homes.source_county": ("label", ""),
+    "sold_homes.source_file": ("other", ""),
+    "sold_homes.parid": ("key", ""),
+    "sold_homes.address": ("label", ""),
+    "sold_homes.city": ("label", ""),
+    "sold_homes.state": ("label", ""),
+    "sold_homes.zip": ("geo", ""),
+    "sold_homes.full_address": ("label", ""),
+    "sold_homes.lat": ("geo", "decimal degrees"),
+    "sold_homes.lon": ("geo", "decimal degrees"),
+    "sold_homes.geocode_status": ("dimension", ""),
+    "sold_homes.geocode_source": ("dimension", ""),
+    "sold_homes.geocode_accuracy": ("dimension", ""),
+    "sold_homes.sold_price": ("measure", "USD"),
+    "sold_homes.sold_date": ("date", ""),
+    "sold_homes.record_date": ("date", ""),
+    "sold_homes.list_price": ("measure", "USD"),
+    "sold_homes.sqft": ("measure", "sqft"),
+    "sold_homes.beds": ("measure", "count"),
+    "sold_homes.baths": ("measure", "count"),
+    "sold_homes.year_built": ("dimension", "year"),
+    "sold_homes.sale_code": ("dimension", ""),
+    "sold_homes.sale_desc": ("label", ""),
+    "sold_homes.instr_type": ("dimension", ""),
+    "sold_homes.instr_type_desc": ("label", ""),
+    "sold_homes.deed_book": ("key", ""),
+    "sold_homes.deed_page": ("key", ""),
+    "sold_homes.muni_code": ("key", ""),
+    "sold_homes.muni_desc": ("label", ""),
+    "sold_homes.school_code": ("key", ""),
+    "sold_homes.school_desc": ("label", ""),
+    "sold_homes.is_arms_length": ("dimension", "boolean"),
+    "sold_homes.arms_length_flag": ("dimension", ""),
+    "sold_homes.tract_fips": ("key", ""),
+    "sold_homes.county_fips": ("key", ""),
+    # transit_agencies
+    "transit_agencies.ntd_id": ("key", ""),
+    "transit_agencies.legacy_ntd_id": ("key", ""),
+    "transit_agencies.agency": ("label", ""),
+    "transit_agencies.mode": ("dimension", ""),
+    "transit_agencies.tos": ("dimension", ""),
+    "transit_agencies.three_mode": ("dimension", ""),
+    "transit_agencies.mode_status": ("dimension", ""),
+    "transit_agencies.reporter_type": ("dimension", ""),
+    "transit_agencies.organization_type": ("dimension", ""),
+    "transit_agencies.hq_city": ("label", ""),
+    "transit_agencies.hq_state": ("label", ""),
+    "transit_agencies.uace_cd": ("key", ""),
+    "transit_agencies.uza_name": ("label", ""),
+    "transit_agencies.uza_sq_miles": ("measure", "sq miles"),
+    "transit_agencies.uza_population": ("measure", "people"),
+    "transit_agencies.service_area_population": ("measure", "people"),
+    "transit_agencies.service_area_sq_miles": ("measure", "sq miles"),
+    "transit_agencies.operating_expenses": ("measure", "USD"),
+    "transit_agencies.fare_revenues": ("measure", "USD"),
+    "transit_agencies.avg_cost_per_trip": ("measure", "USD/trip"),
+    "transit_agencies.avg_fares_per_trip": ("measure", "USD/trip"),
+    "transit_agencies.msa_code": ("key", ""),
+    # transit_ridership
+    "transit_ridership.ntd_id": ("key", ""),
+    "transit_ridership.agency": ("label", ""),
+    "transit_ridership.mode": ("dimension", ""),
+    "transit_ridership.tos": ("dimension", ""),
+    "transit_ridership.msa_code": ("key", ""),
+    "transit_ridership.date": ("date", ""),
+    "transit_ridership.year": ("dimension", "year"),
+    "transit_ridership.month": ("dimension", "month"),
+    "transit_ridership.upt": ("measure", "trips"),
+    # transit_safety
+    "transit_safety.year": ("dimension", "year"),
+    "transit_safety.ntd_id": ("key", ""),
+    "transit_safety.agency": ("label", ""),
+    "transit_safety.mode": ("dimension", ""),
+    "transit_safety.tos": ("dimension", ""),
+    "transit_safety.city": ("label", ""),
+    "transit_safety.state": ("label", ""),
+    "transit_safety.uace_cd": ("key", ""),
+    "transit_safety.uza_name": ("label", ""),
+    "transit_safety.reporter_type": ("dimension", ""),
+    "transit_safety.msa_code": ("key", ""),
+    "transit_safety.event_total": ("measure", "count"),
+    "transit_safety.collision_total": ("measure", "count"),
+    "transit_safety.derailment_total": ("measure", "count"),
+    "transit_safety.fire_total": ("measure", "count"),
+    "transit_safety.security_total": ("measure", "count"),
+    "transit_safety.transit_worker_assault_events": ("measure", "count"),
+    "transit_safety.total_fatalities": ("measure", "count"),
+    "transit_safety.fatality_passenger": ("measure", "count"),
+    "transit_safety.fatality_employee": ("measure", "count"),
+    "transit_safety.fatality_other": ("measure", "count"),
+    "transit_safety.total_injuries": ("measure", "count"),
+    "transit_safety.injury_passenger": ("measure", "count"),
+    "transit_safety.injury_employee": ("measure", "count"),
+    "transit_safety.injury_other": ("measure", "count"),
+    "transit_safety.serious_injuries": ("measure", "count"),
+    "transit_safety.upt": ("measure", "trips"),
+    "transit_safety.vrm": ("measure", "miles"),
+    "transit_safety.vrh": ("measure", "hours"),
+    "transit_safety.voms": ("measure", "vehicles"),
+    # transit_routes
+    "transit_routes.route_uid": ("key", ""),
+    "transit_routes.route_id": ("key", ""),
+    "transit_routes.ntd_id": ("key", ""),
+    "transit_routes.feed_id": ("key", ""),
+    "transit_routes.shape_id": ("key", ""),
+    "transit_routes.agency_id": ("key", ""),
+    "transit_routes.route_short_name": ("label", ""),
+    "transit_routes.route_long_name": ("label", ""),
+    "transit_routes.route_desc": ("other", ""),
+    "transit_routes.route_type": ("dimension", "GTFS code"),
+    "transit_routes.route_type_name": ("dimension", ""),
+    "transit_routes.route_url": ("other", ""),
+    "transit_routes.route_color": ("other", "hex color"),
+    "transit_routes.route_text_color": ("other", "hex color"),
+    "transit_routes.download_date": ("date", ""),
+    "transit_routes.min_lon": ("geo", "decimal degrees"),
+    "transit_routes.min_lat": ("geo", "decimal degrees"),
+    "transit_routes.max_lon": ("geo", "decimal degrees"),
+    "transit_routes.max_lat": ("geo", "decimal degrees"),
+    "transit_routes.geometry_json": ("other", ""),
+    "transit_routes.properties_json": ("other", ""),
+    # crime_incidents
+    "crime_incidents.incident_id": ("key", ""),
+    "crime_incidents.city": ("label", ""),
+    "crime_incidents.source_file": ("other", ""),
+    "crime_incidents.occurred_at": ("date", ""),
+    "crime_incidents.year": ("dimension", "year"),
+    "crime_incidents.month": ("dimension", "month"),
+    "crime_incidents.year_month": ("dimension", "YYYY-MM"),
+    "crime_incidents.lat": ("geo", "decimal degrees"),
+    "crime_incidents.lon": ("geo", "decimal degrees"),
+    "crime_incidents.category": ("dimension", ""),
+    "crime_incidents.category_label": ("label", ""),
+    "crime_incidents.severity_weight": ("measure", "weight (1-10)"),
+    "crime_incidents.raw_type": ("label", ""),
+    "crime_incidents.location_text": ("label", ""),
+    # bike_routes
+    "bike_routes.route_id": ("key", ""),
+    "bike_routes.city": ("label", ""),
+    "bike_routes.layer_type": ("dimension", ""),
+    "bike_routes.layer_label": ("label", ""),
+    "bike_routes.color": ("other", ""),
+    "bike_routes.source_file": ("other", ""),
+    "bike_routes.min_lon": ("geo", "decimal degrees"),
+    "bike_routes.min_lat": ("geo", "decimal degrees"),
+    "bike_routes.max_lon": ("geo", "decimal degrees"),
+    "bike_routes.max_lat": ("geo", "decimal degrees"),
+    "bike_routes.geometry_json": ("other", ""),
+    "bike_routes.properties_json": ("other", ""),
+    # cbsa_counties
+    "cbsa_counties.cbsa_code": ("key", ""),
+    "cbsa_counties.cbsa_title": ("label", ""),
+    "cbsa_counties.msa_type": ("dimension", ""),
+    "cbsa_counties.state_fips": ("key", ""),
+    "cbsa_counties.county_fips": ("key", ""),
+    "cbsa_counties.county_name": ("label", ""),
+    "cbsa_counties.state_name": ("label", ""),
+    # census_msa / census_tracts
+    "census_msa.msa_code": ("key", ""),
+    "census_msa.name": ("label", ""),
+    "census_msa.geo_id": ("key", ""),
+    "census_msa.population": ("measure", "people"),
+    "census_tracts.tract_fips": ("key", ""),
+    "census_tracts.geo_id": ("key", ""),
+    "census_tracts.name": ("label", ""),
+    "census_tracts.population": ("measure", "people"),
+    # geocode_cache
+    "geocode_cache.address_key": ("key", ""),
+    "geocode_cache.full_address": ("label", ""),
+    "geocode_cache.lat": ("geo", "decimal degrees"),
+    "geocode_cache.lon": ("geo", "decimal degrees"),
+    "geocode_cache.tract_fips": ("key", ""),
+    "geocode_cache.geocode_source": ("dimension", ""),
+    "geocode_cache.geocode_accuracy": ("dimension", ""),
+    "geocode_cache.geocoded_at": ("date", ""),
+    # data_source_log
+    "data_source_log.source_key": ("key", ""),
+    "data_source_log.display_name": ("label", ""),
+    "data_source_log.last_loaded_at": ("date", ""),
+    "data_source_log.row_count": ("measure", "count"),
+    "data_source_log.source_files": ("other", "JSON list"),
+    "data_source_log.message": ("other", ""),
+}
+
+# Notes for columns the seed previously left undocumented.  Semantics are taken
+# from the loader that writes the column, the source's own dictionary (FEMA NRI
+# v1.20, FTA NTD glossary, GTFS reference, WPRDC Allegheny sales, Zillow
+# Research), or the app table's DDL comment - never guessed from the name.
+COLUMN_NOTES: dict[str, dict[str, str]] = {
+    "houses": {
+        "house_id": "Stable house identifier: MD5 of address|city|zip, so a house keeps its id across refreshes and re-uploads.",
+        "address": "Street address as exported by Redfin, without city/state/zip.",
+        "zip": "ZIP code as exported; normalized to 5 digits on load (services/zillow_sources.py::normalize_zip5), so it equality-joins zhvi zip rows.",
+        "lat": "Latitude from the Redfin export; NULL when the export omitted coordinates.",
+        "lon": "Longitude from the Redfin export; NULL when the export omitted coordinates.",
+        "beds": "Bedroom count as listed. Fractional values occur when a source reports a range midpoint.",
+        "baths": "Bathroom count as listed; fractional values encode a half bath.",
+        "sqft": "Interior square footage as listed, not measured.",
+        "year_built": "Year the structure was built, as listed.",
+        "hoa_fee": "Monthly HOA fee as listed; NULL means the export did not state one (no HOA and an unknown HOA are indistinguishable here).",
+        "price_per_sq_ft": "Price divided by square footage; recomputed on load when the export omits it, NULL when sqft is missing.",
+        "nearest_big_city": "Nearest large city label, either supplied in the Redfin export or inferred for a suburb-only listing.",
+        "crime_city": "Normalized key into crime_incidents.city (load_redfin). Set explicitly in the export when one city's crime data should apply to a house in another jurisdiction.",
+        "source_file": "Redfin export file this row came from; several exports may contribute to the same house.",
+        "raw_json": "Every Redfin field not mapped to a column, as JSON. Hidden from the agents.",
+        "created_at": "When this house row was first inserted by a load.",
+    },
+    "house_snapshots": {
+        "snapshot_id": "Hash of house_id + source + status + price, so re-loading the same export cannot duplicate a snapshot.",
+        "source_file": "Export file the snapshot was taken from.",
+        "status": "Listing or sale status at snapshot time (e.g. Active, Pending, Sold).",
+        "beds": "Bedroom count at snapshot time.",
+        "baths": "Bathroom count at snapshot time.",
+        "sqft": "Interior square footage at snapshot time.",
+        "hoa_fee": "Monthly HOA fee at snapshot time.",
+        "year_built": "Year built at snapshot time.",
+        "walk_score": "Walk Score at snapshot time (0-100).",
+        "bike_score": "Bike Score at snapshot time (0-100).",
+        "transit_score": "Transit Score at snapshot time (0-100).",
+        "created_at": "When the snapshot row was written.",
+    },
+    "house_commute": {
+        "house_id": "House this commute row belongs to.",
+        "work_key": "Normalized destination key (the saved work address, hashed/normalized) so re-geocoding the same place reuses its row.",
+        "work_label": "Human-readable destination label shown to the user.",
+        "drive_min": "Free-flow drive time from the routing service, multiplied by commute_drive_factor (1.0 = free flow).",
+        "drive_miles": "Drive distance reported by the routing service.",
+        "bike_min": "Bike time from the bike router; NULL when the origin or destination could not be snapped to the network.",
+        "bike_miles": "Bike distance reported by the bike router.",
+        "walk_min": "Walk time from the foot router.",
+        "walk_miles": "Walk distance reported by the foot router.",
+        "transit_min": "Door-to-door transit time from OpenTripPlanner; only populated when OTP_BASE_URL is configured.",
+        "transit_transfers": "Number of transfers on the chosen transit itinerary.",
+        "straight_line_miles": "Great-circle distance between origin and destination, the fallback when a router is unavailable.",
+        "status": "Outcome of the last commute computation (e.g. ok, partial, failed), so a failed mode is distinguishable from zero minutes.",
+        "source": "Which router(s) produced these values.",
+        "computed_at": "When the commute row was last computed.",
+    },
+    "market_heat_index": {
+        "size_rank": "Zillow's size/popularity rank for the region (0 = largest); use it to prefer big metros when several regions match.",
+        "state_name": "State name for state/county/city/zip rows; NULL for country rows.",
+        "state": "Two-letter state abbreviation; NULL for country rows.",
+        "city": "City name for city-level rows; NULL at other geography levels.",
+        "metro": "Containing metro area name; populated for county/city/zip/neighborhood rows.",
+        "county_name": "County name for county rows; NULL elsewhere.",
+        "date": "Observation month (first of month).",
+        "source_file": "Zillow CSV this row came from.",
+    },
+    "zhvi": {
+        "size_rank": "Zillow's size/popularity rank for the region (0 = largest); use it to prefer big metros when several regions match.",
+        "state_name": "State name for the region; NULL for country rows.",
+        "state": "Two-letter state abbreviation; NULL for country rows.",
+        "city": "City name for city-level rows; NULL at other geography levels.",
+        "county_name": "County name for county rows; NULL elsewhere.",
+        "date": "Observation month (first of month) of the ZHVI value.",
+        "source_file": "Zillow CSV this row came from.",
+    },
+    "nri_tracts": {
+        "state_fips": "2-digit zero-padded state FIPS of the tract.",
+        "state_name": "State name as published with the NRI record.",
+        "county_name": "County name as published with the NRI record.",
+        "nri_id": "FEMA's own National Risk Index identifier for this tract (NRI_ID).",
+        "risk_ratng": "FEMA's composite Risk Index rating band (e.g. 'Relatively Low', 'Very High'), derived from the score's percentile.",
+        "risk_npctl": "Composite Risk Index state percentile (RISK_SPCTL in the 2023+ shapefile; stored under the older RISK_NPCTL name).",
+        "eal_score": "Expected Annual Loss score: national percentile of the tract's EAL value (0-100).",
+        "eal_ratng": "FEMA's Expected Annual Loss rating band.",
+        "eal_valt": "Expected Annual Loss, total: the average dollar loss per year from natural hazards across buildings, population and agriculture.",
+        "sovi_score": "Social Vulnerability score: national percentile of the tract's SOVI value (0-100).",
+        "sovi_ratng": "FEMA's Social Vulnerability rating band.",
+        "resl_score": "Community Resilience score: national percentile of the tract's RESL value (0-100).",
+        "resl_ratng": "FEMA's Community Resilience rating band.",
+        "avln_risks": "Hazard-specific Risk Index score for Avalanche: national percentile (0-100). NULL/'No Rating' where the hazard does not apply to the tract.",
+        "cfld_risks": "Hazard-specific Risk Index score for Coastal Flooding: national percentile (0-100). NULL/'No Rating' where the hazard does not apply.",
+        "cwav_risks": "Hazard-specific Risk Index score for Cold Wave: national percentile (0-100).",
+        "drgt_risks": "Hazard-specific Risk Index score for Drought: national percentile (0-100).",
+        "erqk_risks": "Hazard-specific Risk Index score for Earthquake: national percentile (0-100).",
+        "hail_risks": "Hazard-specific Risk Index score for Hail: national percentile (0-100).",
+        "hwav_risks": "Hazard-specific Risk Index score for Heat Wave: national percentile (0-100).",
+        "istm_risks": "Hazard-specific Risk Index score for Ice Storm: national percentile (0-100).",
+        "lnds_risks": "Hazard-specific Risk Index score for Landslide: national percentile (0-100).",
+        "ltng_risks": "Hazard-specific Risk Index score for Lightning: national percentile (0-100).",
+        "swnd_risks": "Hazard-specific Risk Index score for Strong Wind: national percentile (0-100).",
+        "trnd_risks": "Hazard-specific Risk Index score for Tornado: national percentile (0-100).",
+        "tsun_risks": "Hazard-specific Risk Index score for Tsunami: national percentile (0-100). NULL where inland.",
+        "vlcn_risks": "Hazard-specific Risk Index score for Volcanic Activity: national percentile (0-100).",
+        "wntw_risks": "Hazard-specific Risk Index score for Winter Weather: national percentile (0-100).",
+    },
+    "sold_homes": {
+        "sale_id": "Stable sale identifier: hash of parid+sold_date, or address+sold_date when no parcel id is present.",
+        "source_county": "County this export belongs to, e.g. 'Allegheny, PA'; other counties use a reduced generic parser.",
+        "source_file": "Export file the sale came from.",
+        "parid": "County assessor parcel identifier (PARID); the parcel key, not the sale key.",
+        "address": "Street portion of the property address only (no city/state/zip).",
+        "zip": "5-digit ZIP of the property, normalized on load.",
+        "full_address": "Complete address string used for geocoding; lat/lon are NULL until a geocode succeeds.",
+        "lat": "Latitude from the geocoder; NULL until geocoded.",
+        "lon": "Longitude from the geocoder; NULL until geocoded.",
+        "geocode_source": "Which geocoder produced lat/lon: census_batch, census_single, nominatim, or manual.",
+        "geocode_accuracy": "Geocoder's own accuracy label: Exact, Non_Exact, No_Match, or a Nominatim location type.",
+        "sold_date": "Date of sale as recorded by the county (may differ from the deed recording date).",
+        "record_date": "Date the deed was recorded, which can lag the sale by weeks or months.",
+        "list_price": "Asking price when a listing record was cross-referenced; NULL for county-only data, which carries no listing history.",
+        "sqft": "Interior square footage when cross-referenced; NULL for county-only records.",
+        "beds": "Bedroom count when cross-referenced; NULL for county-only records.",
+        "baths": "Bathroom count when cross-referenced; NULL for county-only records.",
+        "year_built": "Year built when cross-referenced; NULL for county-only records.",
+        "sale_code": "County sales-validation code (SALECODE). Codes mark sales that are not valid market evidence (e.g. 'H' = one deed covering several parcels).",
+        "sale_desc": "Human-readable meaning of sale_code (SALEDESC).",
+        "instr_type": "Recording instrument code (INSTRTYP), e.g. DE for deed, CO for corrective instrument.",
+        "instr_type_desc": "Human-readable instrument type (INSTRTYPDESC).",
+        "deed_book": "Deed book number; deed_book + deed_page identifies the recorded instrument.",
+        "deed_page": "Deed page number within the book.",
+        "muni_code": "Municipality code (MUNICODE) of the parcel.",
+        "muni_desc": "Municipality name (MUNIDESC).",
+        "school_code": "School district code (SCHOOLCODE) of the parcel.",
+        "school_desc": "School district name (SCHOOLDESC).",
+        "arms_length_flag": "Why a sale is not arm's length (the matched code and its reason); NULL when it is a qualifying market sale.",
+        "county_fips": "5-digit state+county FIPS of the parcel.",
+    },
+    "transit_agencies": {
+        "legacy_ntd_id": "The agency's previous NTD ID, kept when FTA renumbers an agency so history can still be matched.",
+        "three_mode": "NTD '3 Mode' grouping (e.g. bus, rail, other), a coarser roll-up than mode.",
+        "mode_status": "NTD mode/type-of-service status (active or inactive) as of the report.",
+        "reporter_type": "NTD reporter category: Full, Rural, Reduced Asset, Small Systems, Building or Separate Service reporter.",
+        "organization_type": "The agency's legal entity type (e.g. city government, transit authority, private operator).",
+        "uace_cd": "Census urbanized area code (UACE) of the agency's primary UZA; stable across census years.",
+        "uza_sq_miles": "Land area of the agency's primary urbanized area in square miles.",
+        "service_area_population": "Population of the agency's service area, as reported to the NTD.",
+        "service_area_sq_miles": "Land area of the agency's service area in square miles.",
+    },
+    "transit_routes": {
+        "feed_id": "Identifier of the GTFS feed these routes were extracted from.",
+        "shape_id": "GTFS shape identifier for the route's path geometry (shapes.txt).",
+        "agency_id": "GTFS agency identifier the route belongs to (routes.txt).",
+        "route_desc": "GTFS route description, supplementary to the short/long name; NULL when the feed omits it.",
+        "route_type": "GTFS numeric route type: 0 tram/light rail, 1 subway, 2 rail, 3 bus, 4 ferry, 5 cable tram, 6 aerial lift, 7 funicular, 11 trolleybus, 12 monorail.",
+        "route_url": "GTFS route_url: a web page about this particular route, when the feed supplies one.",
+        "route_text_color": "GTFS route_text_color: legible text color (hex) to draw over route_color; defaults to black.",
+        "download_date": "Date the GTFS feed was downloaded, stored as text exactly as the feed declared it.",
+        "min_lon": "Western edge of the route geometry's bounding box.",
+        "min_lat": "Southern edge of the route geometry's bounding box.",
+        "max_lon": "Eastern edge of the route geometry's bounding box.",
+        "max_lat": "Northern edge of the route geometry's bounding box.",
+        "geometry_json": "Route path as a GeoJSON LineString (from the shape or the feed's own geometry).",
+        "properties_json": "Remaining GTFS route attributes as JSON, so nothing in the feed is lost.",
+    },
+    "transit_safety": {
+        "uace_cd": "Census urbanized area code (UACE) of the agency's primary UZA.",
+        "reporter_type": "NTD reporter category of the agency for that year.",
+        "fatality_passenger": "Fatalities among passengers in reported safety events.",
+        "fatality_employee": "Fatalities among transit employees in reported safety events.",
+        "fatality_other": "Fatalities among other people (e.g. pedestrians, cyclists) in reported safety events.",
+        "injury_passenger": "Injuries to passengers in reported safety events.",
+        "injury_employee": "Injuries to transit employees in reported safety events.",
+        "injury_other": "Injuries to other people (e.g. pedestrians, cyclists) in reported safety events.",
+        "upt": "Unlinked passenger trips: passengers are counted at every boarding, so a transfer counts twice.",
+        "vrm": "Vehicle revenue miles: miles vehicles travel in revenue service, including layover/recovery; excludes deadheading and training.",
+        "vrh": "Vehicle revenue hours: hours vehicles are in revenue service, including layover/recovery; excludes deadheading and training.",
+        "voms": "Vehicles operated in maximum service: revenue vehicles needed to meet the annual peak service requirement, counted at the busiest day of the peak season.",
+    },
+    "crime_incidents": {
+        "incident_id": "Stable incident id: the source city's own identifier when it has one, else a file+row-position hash generated at load.",
+        "city": "City the incident came from; one folder per city under data/crime/.",
+        "source_file": "Export file the incident was read from.",
+        "occurred_at": "Timestamp of the offence as parsed by the city's reader; NULL when the source only gave a date or an unparseable value.",
+        "year": "Calendar year of occurred_at, duplicated as a column so grouping does not need a date function.",
+        "month": "Calendar month (1-12) of occurred_at.",
+        "year_month": "YYYY-MM label of occurred_at, for month-over-month grouping.",
+        "lat": "Latitude of the incident; rows outside the city's bounding box or with zero coordinates are dropped at load.",
+        "lon": "Longitude of the incident.",
+        "category": "Standardized taxonomy key assigned by services/crime_taxonomy.py from the raw offence text (e.g. violent_assault, property_theft).",
+        "category_label": "Human-readable label for category.",
+        "severity_weight": "Severity weight of category on a 1-10 scale, used to weight incidents so five car break-ins do not outweigh one shooting. A judgment call, not a legal classification.",
+        "raw_type": "The offence text exactly as the source city published it, before classification.",
+        "location_text": "Free-text location (block, street or address) as published; NULL when the source omits it.",
+    },
+    "bike_routes": {
+        "route_id": "Stable feature id: MD5 of city + layer_type + file + row position.",
+        "city": "City the bike network belongs to.",
+        "layer_type": "Stable layer key derived from the source folder (bike_lanes, protected_bike_lanes, sharrows, trails, ...).",
+        "layer_label": "Display name of the layer, matching the source's folder name.",
+        "color": "Layer color preserved from the original BikePGH visualization so the map matches the published style.",
+        "source_file": "Shapefile the feature came from.",
+        "min_lon": "Western edge of the feature's bounding box.",
+        "min_lat": "Southern edge of the feature's bounding box.",
+        "max_lon": "Eastern edge of the feature's bounding box.",
+        "max_lat": "Northern edge of the feature's bounding box.",
+        "geometry_json": "Feature geometry as GeoJSON (stored as text), so viewport queries need no shapefile at runtime.",
+        "properties_json": "All remaining shapefile attributes as JSON.",
+    },
+    "cbsa_counties": {
+        "cbsa_title": "Full CBSA title as published (e.g. 'Pittsburgh, PA Metropolitan Statistical Area').",
+        "msa_type": "Metropolitan or Micropolitan statistical area, as the delineation file declares.",
+        "county_name": "County name as published in the delineation file.",
+        "state_name": "State name of the county.",
+    },
+    "census_msa": {
+        "geo_id": "Census GEO_ID of the metro area, e.g. 310M300US17460; the API's own identifier, used to trace the row back to its source table.",
+    },
+    "census_tracts": {
+        "geo_id": "Census GEO_ID of the tract: '1400000US' followed by the 11-digit tract FIPS.",
+        "name": "Census display name of the tract (e.g. 'Census Tract 101.02, Allegheny County, PA').",
+    },
+    "geocode_cache": {
+        "address_key": "MD5 of the normalized full address; the cache key that prevents re-calling the Census geocoder for a known address.",
+        "full_address": "Normalized address string that was geocoded.",
+        "lat": "Cached latitude.",
+        "lon": "Cached longitude.",
+        "tract_fips": "11-digit tract FIPS returned by the geocoder's geography lookup, when available.",
+        "geocode_source": "Which geocoder produced the cached point: census_batch, census_single, nominatim or manual.",
+        "geocode_accuracy": "Geocoder accuracy label for the cached point (Exact, Non_Exact, or a Nominatim location type).",
+        "geocoded_at": "When this address was geocoded; the cache is re-used indefinitely, so a stale point is possible after boundary changes.",
+    },
+    "data_source_log": {
+        "source_key": "Identifier of the data source as registered in services/data_sources.py (e.g. nri, redfin, sold, zhvi).",
+        "display_name": "Human-readable source name shown on the Data page.",
+        "last_loaded_at": "When the source was last refreshed.",
+        "row_count": "Rows the source held after the last refresh.",
+        "source_files": "JSON list of the files that contributed to the last refresh.",
+        "message": "Refresh outcome, including any warnings the load raised.",
+    },
+}
+
+
+def _with_column_metadata(name: str, meta: TableMeta) -> TableMeta:
+    """Merge the role/unit vocabulary and the added notes into one table's column notes.
+
+    Existing notes always win (they are the reviewed prose); the overlay only fills a blank note, and
+    sets role/unit where the seed did not state them.  A typo'd column name cannot silently vanish: it
+    produces a note for a column the table does not have, which db/catalog_lint.py reports.
+    """
+    merged = {note.column: note for note in meta.column_notes}
+    for column, text in COLUMN_NOTES.get(name, {}).items():
+        current = merged.get(column)
+        merged[column] = (
+            ColumnNote(column, text) if current is None else replace(current, note=current.note or text)
+        )
+    for ref, (role, unit) in COLUMN_ROLES.items():
+        table, _, column = ref.partition(".")
+        if table != name:
+            continue
+        current = merged.get(column)
+        merged[column] = ColumnNote(column, "") if current is None else replace(current, role=role, unit=unit)
+    return replace(meta, column_notes=tuple(merged.values()))
+
+
+TABLES = {name: _with_column_metadata(name, meta) for name, meta in TABLES.items()}
+
+
+# ---------------------------------------------------------------------------
+# Subsumption (the only source of subClassOf edges in db/ontology.py).
+#
+# Two families are genuine narrower-than relations and nothing here is inferred:
+#
+# * NRI hazard-specific risk is FEMA's single-hazard slice of the composite Risk Index, so each of
+#   the 18 hazard concepts is a narrower concept than nri_overall_risk.  It is a slice, not a
+#   component measure: the composite is not the sum of these scores.
+# * A status-filtered house count is a narrower version of house_inventory (same table, same
+#   measure, one extra predicate).
+#
+# Deliberately NOT declared, because it would be a false hierarchy rather than a taxonomy:
+# the commute modes are siblings over one table (no parent exists); house_missing_walk is the
+# complement of house_walk_score, not a subtype; arms_length_sale qualifies sold_price rather
+# than being a narrower price; transit fatalities/injuries are outcomes reported beside event
+# counts, not kinds of event.  A real "commute time" or "safety outcome" parent would have to be
+# a new concept, which changes what the planner can match - a separate change with its own eval.
+# ---------------------------------------------------------------------------
+
+_NRI_HAZARD_CONCEPTS = (
+    "nri_avln_risk",
+    "nri_coastal_flood",
+    "nri_cwav_risk",
+    "nri_drgt_risk",
+    "nri_erqk_risk",
+    "nri_hail_risk",
+    "nri_hrcn_risk",
+    "nri_hwav_risk",
+    "nri_istm_risk",
+    "nri_lnds_risk",
+    "nri_ltng_risk",
+    "nri_riverine_flood",
+    "nri_swnd_risk",
+    "nri_trnd_risk",
+    "nri_tsun_risk",
+    "nri_vlcn_risk",
+    "nri_wfir_risk",
+    "nri_wntw_risk",
+)
+
+_BROADER: dict[str, list[str]] = {key: ["nri_overall_risk"] for key in _NRI_HAZARD_CONCEPTS}
+_BROADER.update(
+    {
+        "house_status_active": ["house_inventory"],
+        "house_status_pending": ["house_inventory"],
+        "house_status_sold": ["house_inventory"],
+    }
+)
+
+for _key, _parents in _BROADER.items():
+    if _key in SEMANTIC_GLOSSARY:
+        SEMANTIC_GLOSSARY[_key] = {**SEMANTIC_GLOSSARY[_key], "broader": list(_parents)}
+
+
 ENTITY_DOMAINS = (
     EntityDomain(
         "house_city",
@@ -1582,6 +2228,27 @@ ENTITY_DOMAINS = (
         "Bike-route city labels",
         match_mode="exact_or_prefix",
         preferred_for=("bike_routes",),
+    ),
+    # Street address and ZIP anchors over the current inventory.  ``exact_or_prefix`` is the mode whose
+    # meaning is "the stored value appears in the request as a phrase": a house number or a street name
+    # on its own does NOT anchor, only the whole address the catalog holds, so these cannot silently turn
+    # into a filter.  (``exact`` is not a live value-match mode - 11-digit tract FIPS goes through its own
+    # literal path - so declaring it here would be a silent no-op.)
+    EntityDomain(
+        "house_address",
+        "houses",
+        "address",
+        "address",
+        "Current-house street addresses, anchored only when the whole address appears in the request",
+        match_mode="exact_or_prefix",
+    ),
+    EntityDomain(
+        "house_zip",
+        "houses",
+        "zip",
+        "zip",
+        "Current-house 5-digit ZIP codes",
+        match_mode="exact_or_prefix",
     ),
 )
 

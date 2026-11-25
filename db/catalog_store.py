@@ -279,7 +279,18 @@ def sync_seed(conn) -> bool:
 
     have = {r["name"]: r for r in _rows(conn, "SELECT name, origin, seed_hash, user_modified FROM catalog_tables")}
     for i, (name, meta) in enumerate(seed.TABLES.items()):
-        notes = [{"column_name": n.column, "note": n.note} for n in meta.column_notes]
+        # role/unit/source_name belong in the hash as well as the row: a seed that only changes a
+        # column's role must re-sync, and db/ontology.py projects all three onto property nodes.
+        notes = [
+            {
+                "column_name": n.column,
+                "note": n.note,
+                "role": n.role,
+                "unit": n.unit,
+                "source_name": n.source_name,
+            }
+            for n in meta.column_notes
+        ]
         row = _table_row(meta, domain=seed.SEED_DOMAINS.get(name, "other"), origin="builtin", dataset_id="", ord_=i)
         h = _hash([row, notes])
         cur = have.get(name)
