@@ -13,13 +13,13 @@ but no fixture rows** is an example that cannot pass until the fixture grows. `p
 | Table | Fixture rows | Golden examples | Status |
 |---|---|---|---|
 | `bike_routes` | 4 | 2 | covered |
-| `cbsa_counties` | 4 | 2 | covered |
-| `census_msa` | 5 | 6 | covered |
-| `census_tracts` | 4 | 2 | covered |
+| `cbsa_counties` | 4 | 15 | covered |
+| `census_msa` | 5 | 19 | covered |
+| `census_tracts` | 4 | 3 | covered |
 | `crime_incidents` | 5 | 4 | covered |
 | `house_commute` | 2 | 2 | covered |
 | `house_snapshots` | 6 | 0 | rows, no examples |
-| `houses` | 6 | 42 | covered |
+| `houses` | 6 | 43 | covered |
 | `market_heat_index` | 0 | 0 | empty |
 | `nri_tracts` | 4 | 14 | covered |
 | `sold_homes` | 6 | 7 | covered |

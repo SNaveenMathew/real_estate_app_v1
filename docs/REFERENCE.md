@@ -108,6 +108,7 @@ Every field of `config.Settings` with its default and the comment that documents
 | `sql_max_rows` | `50000` | rows materialized from one statement (more -> truncated, and said so) |
 | `semantic_fallback_enabled` | `True` |  |
 | `semantic_fallback_timeout_s` | `20.0` |  |
+| `clarification_enabled` | `True` |  |
 | `session_memory_max_turns` | `20` |  |
 | `session_memory_retention_days` | `30` |  |
 | `relationship_llm_suggestions_enabled` | `False` |  |
