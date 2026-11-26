@@ -27,7 +27,16 @@ import db.schema_catalog as schema
 import services.bike_routing as bike_routing
 import services.transit_routing as transit_routing
 from agents.query_planner import build_query_plan
-from agents import answer_policy, answer_status, capabilities, llm_resilience, semantic_fallback, tool_result
+from agents import (
+    answer_policy,
+    answer_status,
+    capabilities,
+    llm_resilience,
+    plan_contract,
+    semantic_fallback,
+    sql_inspector,
+    tool_result,
+)
 from agents.artifacts import classify_dataframe, emit_artifact
 import asyncio
 import threading
@@ -51,7 +60,49 @@ _AGGREGATE_CALL_RE = re.compile(r"\b(?:AVG|SUM|COUNT|MEDIAN|MIN|MAX)\s*\(", re.I
 # ── Typed results and capability bounds (agents/tool_result.py, agents/capabilities.py) ──
 
 
-def _envelope(text: str) -> tool_result.ToolResult:
+def _json_safe_scalar(v: Any) -> Any:
+    """Convert numpy/pandas scalars to JSON-safe Python primitives for ToolResult evidence."""
+    if v is None:
+        return None
+    if isinstance(v, (bool, int, str)):
+        return v
+    if isinstance(v, float):
+        return None if (v != v or v in (float("inf"), float("-inf"))) else v
+    if hasattr(v, "isoformat"):
+        try:
+            return None if pd.isna(v) else v.isoformat()
+        except Exception:
+            return str(v)
+    if hasattr(v, "item"):
+        try:
+            return v.item()
+        except Exception:
+            return str(v)
+    return str(v)
+
+
+def _df_evidence_rows(df: pd.DataFrame, max_rows: int = 50) -> list[dict[str, Any]]:
+    view = df.head(max_rows)
+    return [{str(k): _json_safe_scalar(v) for k, v in row.items()} for row in view.to_dict(orient="records")]
+
+
+def _excluded_notes_for_plan(query_plan) -> list[str]:
+    notes: list[str] = []
+    keys = set(getattr(query_plan, "semantic_keys", ()) or ())
+    if keys & {"sold_price", "arms_length_sale"}:
+        notes.append("Non-arm's-length and <= $1,000 sales excluded by sold_homes filter.")
+    if "exclude NULL" in (getattr(query_plan, "null_policy", ()) or ()):
+        notes.append("NULL metric rows excluded from aggregate calculations.")
+    return notes
+
+
+def _envelope(
+    text: str,
+    *,
+    evidence: dict[str, Any] | None = None,
+    row_count: int | None = None,
+    columns: tuple[str, ...] | list[str] = (),
+) -> tool_result.ToolResult:
     """Wrap query_database's rendered evidence with the facts downstream code needs.
 
     The text is unchanged. The code comes from ``answer_status.classify_text`` - the single table every layer shares -
@@ -59,9 +110,25 @@ def _envelope(text: str) -> tool_result.ToolResult:
     """
     code = answer_status.classify_text(text)
     if code is None:
-        return tool_result.ToolResult(text, kind="data", status=answer_status.OK)
+        return tool_result.ToolResult(
+            text,
+            kind="data",
+            status=answer_status.OK,
+            row_count=row_count,
+            columns=columns,
+            evidence=evidence,
+        )
     if answer_status.is_not_answered(text):
         return tool_result.not_answered(text, code)
+    if code == answer_status.RESULT_EMPTY:
+        return tool_result.status_result(
+            text,
+            answer_status.RESULT_EMPTY,
+            ok=True,
+            row_count=0,
+            columns=columns,
+            evidence=evidence,
+        )
     return tool_result.failure(text, status=code)
 
 
@@ -98,7 +165,31 @@ def _typed_tool(kind: str):
             route_kind = str(payload.get("kind") or "").lower()
             ok = status not in ("error", "analysis") and route_kind != "no_route"
             code = None if ok else _ROUTE_CODES.get(route_kind or status, answer_status.INTERNAL_ERROR)
-            return tool_result.ToolResult(out, kind=kind if ok else "not_answered", ok=ok, status=code)
+            ev: dict[str, Any] = {}
+            if ok and isinstance(payload, dict):
+                scalar_row = {
+                    str(k): _json_safe_scalar(v) for k, v in payload.items() if not isinstance(v, (dict, list))
+                }
+                if scalar_row:
+                    ev = {
+                        "tables_queried": [],
+                        "columns": list(scalar_row.keys()),
+                        "rows": [scalar_row],
+                        "row_count": 1,
+                        "truncated": False,
+                        "applied_filters": [],
+                        "excluded_records": [],
+                        "artifact_refs": [],
+                    }
+            return tool_result.ToolResult(
+                out,
+                kind=kind if ok else "not_answered",
+                ok=ok,
+                status=code,
+                row_count=1 if ev else None,
+                columns=ev.get("columns", ()) if ev else (),
+                evidence=ev,
+            )
 
         return wrapper
 
@@ -186,6 +277,7 @@ def get_code_agent() -> ChatOpenAI:
             max_tokens=settings.code_agent_max_tokens,
             timeout=settings.llm_request_timeout,
             max_retries=settings.llm_max_retries,
+            stop=LLM_STOP_SEQUENCES,
         )
     return _agent
 
@@ -281,6 +373,21 @@ def _where_clause_text(low_sql: str) -> str:
     return " ".join(segments)
 
 
+def _sql_has_filter_atom(atom: str, low_sql: str, planned_tables: set[str], columns_of) -> bool:
+    """Return True if a normalized semantic filter atom appears in SQL (accepting unambiguous unqualified columns)."""
+    if atom in low_sql:
+        return True
+    if "." not in atom:
+        return False
+    table, col = atom.split(".", 1)
+    if not re.search(rf"(?<![A-Za-z0-9_.])\b{re.escape(col)}\b", low_sql) and not re.search(
+        rf"\b[a-z_][a-z0-9_]*\.{re.escape(col)}\b", low_sql
+    ):
+        return False
+    owners = [t for t in planned_tables if col in (columns_of(t) or set())]
+    return len(owners) <= 1 and (not owners or owners[0] == table)
+
+
 def _validate_sql_against_plan(sql: str, query_plan) -> None:
     """Validate generated SQL against the declarative catalog plan and SQL safety guardrail."""
     from services.guardrails import CodeAgentGuardrail
@@ -289,7 +396,15 @@ def _validate_sql_against_plan(sql: str, query_plan) -> None:
     if not guard_res.passed:
         raise ValueError(f"SQL Guardrail violation: {'; '.join(guard_res.reasons)}")
 
-    refs = {m.group(1).lower() for m in _TABLE_REF.finditer(sql)}
+    try:
+        refs = {t.lower() for t in sql_inspector.inspect_sql(sql).tables}
+    except sql_inspector.SqlInspectionError:
+        refs = {m.group(1).lower() for m in _TABLE_REF.finditer(sql)}
+    except sql_inspector.SqlInspectorUnavailable:
+        cte_names = {
+            m.group(1).lower() for m in re.finditer(r"(?:\bWITH\b|,)\s*([A-Za-z_][A-Za-z0-9_]*)\s+AS\s*\(", sql, re.I)
+        }
+        refs = {m.group(1).lower() for m in _TABLE_REF.finditer(sql)} - cte_names
     planned = {t.lower() for t in query_plan.required_tables}
     if not planned:
         raise ValueError("Query plan selected no tables.")
@@ -308,14 +423,16 @@ def _validate_sql_against_plan(sql: str, query_plan) -> None:
                 raise ValueError(f"Generated SQL omitted resolved entity value: {literal}")
 
     # Planned semantic filters must survive generation. We compare normalized
-    # field/value atoms, not a brittle full-string representation.
+    # field/value atoms and accept unambiguous unqualified column names
+    # (e.g. ``is_favorite = TRUE`` for ``houses.is_favorite = TRUE``).
+    view = plan_contract.default_catalog_view()
     for filt in query_plan.filters:
         atoms = [
             a
             for a in re.findall(r"[A-Za-z_][A-Za-z0-9_\.]*|true|false|[0-9]+(?:\.[0-9]+)?", filt.lower())
             if a not in {"and", "or", "is", "null", "where", "not"}
         ]
-        if not all(a in low for a in atoms):
+        if not all(_sql_has_filter_atom(a, low, planned, view.columns_of) for a in atoms):
             raise ValueError(f"Generated SQL omitted planned semantic filter: {filt}")
 
     # Detect scope filters on known semantic columns that the plan did not
@@ -336,9 +453,13 @@ def _validate_sql_against_plan(sql: str, query_plan) -> None:
     for filt in query_plan.entity_filters:
         for m in re.finditer(r"\b(?:[A-Za-z_][A-Za-z0-9_]*\.)?([A-Za-z_][A-Za-z0-9_]*)\s*=", filt):
             entity_filter_columns.add(m.group(1).lower())
+    planned_filter_columns = set(entity_filter_columns)
+    for filt in query_plan.filters:
+        for m in re.finditer(r"\b(?:[A-Za-z_][A-Za-z0-9_]*\.)?([A-Za-z_][A-Za-z0-9_]*)\b", filt):
+            planned_filter_columns.add(m.group(1).lower())
     for col, keys in semantic_filter_columns.items():
         if re.search(rf"\b{re.escape(col)}\b\s*(?:=|is|in|like|ilike|>|<|>=|<=)", where_low):
-            if col in entity_filter_columns:
+            if col in planned_filter_columns:
                 continue
             if not selected.intersection(keys):
                 raise ValueError(f"Generated SQL introduced an unplanned filter on semantic field '{col}'.")
@@ -449,44 +570,23 @@ class QueryFailure(RuntimeError):
         self.code = code
 
 
-def _compile_sql_from_plan(query_plan) -> str:
-    """Compile a minimal read-only SQL query from the declarative plan.
+def _table_of_expr(expr: str | None, tables: set[str]) -> str | None:
+    if not expr:
+        return None
+    for table in sorted(tables):
+        if re.search(rf"\b{re.escape(table)}\.", expr):
+            return table
+    return None
 
-    This is a safety-net only: it runs when the LLM SQL generator returns no SQL.
-    It never changes routing; it uses the tables, relationships, operation,
-    projection, grouping, ordering, filters and live entities already selected
-    by the metadata planner.
-    """
-    tables = set(query_plan.required_tables)
-    if not tables:
-        raise QueryFailure(answer_status.PLAN_INCOMPLETE, "Cannot compile SQL: plan selected no tables.")
 
-    rels = schema.relationship_path(tables)
+def _join_chain_sql(tables: set[str], start: str, pins=None) -> str:
+    """Build a deterministically ordered ``FROM a JOIN b ON ...`` chain across ``tables``."""
+    rels = schema.relationship_path(tables, pins)
     if len(tables) > 1 and len(rels) < len(tables) - 1:
         raise QueryFailure(
             answer_status.PLAN_UNCONNECTED,
             "Cannot compile SQL: selected tables are not fully connected by catalog relationships.",
         )
-
-    def table_of(expr: str | None) -> str | None:
-        if not expr:
-            return None
-        for table in sorted(tables):
-            if re.search(rf"\b{re.escape(table)}\.", expr):
-                return table
-        return None
-
-    start = None
-    if query_plan.rollup_spec:
-        group_key = str(query_plan.rollup_spec.get("group_key", ""))
-        start = table_of(group_key)
-    if not start and query_plan.grouping:
-        start = table_of(query_plan.grouping[0])
-    if not start:
-        start = table_of(query_plan.select_expression)
-    if not start:
-        start = sorted(tables)[0]
-
     from_sql = start
     connected = {start}
     remaining = set(tables) - connected
@@ -514,19 +614,155 @@ def _compile_sql_from_plan(query_plan) -> str:
         from_sql += f" JOIN {new_table} ON {on_sql}"
         connected.add(new_table)
         remaining.remove(new_table)
+    return from_sql
+
+
+def _measure_select_sql(op: str | None, expr: str | None) -> str:
+    """Wrap or pass through a measure projection according to its catalog operation."""
+    if op == "count":
+        return f"COUNT({expr or '*'})"
+    if op == "distinct" and expr and not expr.strip().upper().startswith("DISTINCT "):
+        return f"DISTINCT {expr}"
+    if op in {"avg", "sum", "median", "min", "max"}:
+        return f"{op.upper()}({expr})"
+    return expr or "*"
+
+
+def _relevant_predicates(predicates: list[str], tables: set[str]) -> list[str]:
+    """Keep predicates whose table qualifiers all belong to ``tables`` (plus unqualified predicates)."""
+    kept = []
+    for pred in predicates:
+        refs = {m.group(1).lower() for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\.[A-Za-z_][A-Za-z0-9_]*\b", pred)}
+        if not refs or refs <= tables:
+            kept.append(pred)
+    return kept
+
+
+def _safe_alias(text: str, prefix: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_]+", "_", text).strip("_").lower()
+    return f"{prefix}_{cleaned}"[:48] if cleaned else prefix
+
+
+def _compile_multi_measure_cte_sql(query_plan, base_predicates: list[str]) -> str:
+    """Compile each measure into a separate grain-safe CTE and join on the shared group key."""
+    measures = list(getattr(query_plan, "measures", ()) or ())
+    group_key = ""
+    if query_plan.grouping:
+        group_key = str(query_plan.grouping[0])
+    else:
+        group_keys = [m.group_key for m in measures if m.group_key]
+        if group_keys:
+            group_key = max(dict.fromkeys(group_keys), key=group_keys.count)
+    group_table = group_key.split(".", 1)[0].lower() if "." in group_key else ""
+    group_col_label = re.sub(r"[^A-Za-z0-9_]+", "_", group_key.split(".")[-1]).strip("_") if group_key else "group_key"
+
+    cte_blocks: list[str] = []
+    outer_cols: list[str] = []
+    if group_key:
+        outer_cols.append(f"m_0.group_key AS {group_col_label}")
+    from_outer = ""
+    all_planned = set(query_plan.required_tables)
+
+    for idx, m in enumerate(measures):
+        sub_tables = {t.lower() for t in (m.tables or ())}
+        if group_table and group_table in all_planned:
+            sub_tables.add(group_table)
+        for sf in query_plan.scope_filters:
+            s_tbl = _table_of_expr(sf, all_planned)
+            if s_tbl:
+                sub_tables.add(s_tbl)
+        # Expand along catalog bridge tables so multi-hop rollups (e.g. census_msa -> cbsa_counties -> nri_tracts) connect.
+        if len(sub_tables) > 1:
+            rels = schema.relationship_path(sub_tables)
+            for r in rels:
+                sub_tables.update({r.left_table.lower(), r.right_table.lower()})
+        sub_tables &= all_planned or sub_tables
+        start = group_table if group_table in sub_tables else sorted(sub_tables)[0]
+        join_sql = _join_chain_sql(sub_tables, start)
+
+        m_op = m.operation
+        m_expr = m.expr
+        if m_op == "rank" and not _AGGREGATE_CALL_RE.search(m_expr):
+            # Rank expressions inside a multi-measure comparison must aggregate to 1 row per group_key.
+            select_item = f"AVG({m_expr})"
+        elif m_op == "lookup" and "," in m_expr:
+            # Take the non-group column when a lookup lists `group_col, metric_col`.
+            parts = [p.strip() for p in m_expr.split(",")]
+            metric_part = next((p for p in parts if p != group_key), parts[-1])
+            select_item = f"MAX({metric_part})" if group_key else metric_part
+        elif m_op == "lookup" and group_key and m_expr == group_key:
+            select_item = m_expr
+        elif m_op == "lookup" and group_key:
+            select_item = f"MAX({m_expr})"
+        else:
+            select_item = _measure_select_sql(m_op, m_expr)
+
+        alias_name = _safe_alias(m.concept_key, f"m_{idx}")
+        cte_predicates = _relevant_predicates(base_predicates, sub_tables)
+        for mf in m.filters:
+            if mf not in cte_predicates and (
+                not _table_of_expr(mf, all_planned) or _table_of_expr(mf, all_planned) in sub_tables
+            ):
+                cte_predicates.append(mf)
+        where_sql = f" WHERE {' AND '.join(dict.fromkeys(cte_predicates))}" if cte_predicates else ""
+        if group_key:
+            cte_select = f"{group_key} AS group_key, {select_item} AS {alias_name}"
+            cte_sql = f"m_{idx} AS (SELECT {cte_select} FROM {join_sql}{where_sql} GROUP BY {group_key})"
+        else:
+            cte_sql = f"m_{idx} AS (SELECT {select_item} AS {alias_name} FROM {join_sql}{where_sql})"
+        cte_blocks.append(cte_sql)
+        outer_cols.append(f"m_{idx}.{alias_name}")
+        if idx == 0:
+            from_outer = "m_0"
+        elif group_key:
+            from_outer += f" JOIN m_{idx} ON m_0.group_key = m_{idx}.group_key"
+        else:
+            from_outer += f" CROSS JOIN m_{idx}"
+
+    limit_clause = f" LIMIT {int(query_plan.result_limit)}" if query_plan.result_limit else ""
+    order_clause = f" ORDER BY m_0.group_key" if group_key else ""
+    return f"WITH {', '.join(cte_blocks)} SELECT {', '.join(outer_cols)} FROM {from_outer}{order_clause}{limit_clause}"
+
+
+def _compile_sql_from_plan(query_plan, request: str = "") -> str:
+    """Compile a minimal read-only SQL query from the declarative plan.
+
+    This runs either when the LLM SQL generator returns no SQL or for deterministic
+    single/multi-measure compilation when requested. Uses only the tables,
+    relationships, measures, grouping, ordering, filters and entities selected by
+    the metadata planner.
+    """
+    tables = set(query_plan.required_tables)
+    if not tables:
+        raise QueryFailure(answer_status.PLAN_INCOMPLETE, "Cannot compile SQL: plan selected no tables.")
+
+    predicates: list[str] = []
+    predicates.extend(_group_equality_predicates(query_plan.entity_filters))
+    predicates.extend(query_plan.scope_filters)  # mandatory scope (agents/query_scope.py)
+    predicates.extend(query_plan.filters)
+
+    if len(getattr(query_plan, "measures", ()) or ()) > 1:
+        return _compile_multi_measure_cte_sql(query_plan, predicates)
+
+    start = None
+    if query_plan.rollup_spec:
+        start = _table_of_expr(str(query_plan.rollup_spec.get("group_key", "")), tables)
+    if not start and query_plan.grouping:
+        start = _table_of_expr(query_plan.grouping[0], tables)
+    if not start:
+        start = _table_of_expr(query_plan.select_expression, tables)
+    if not start:
+        start = sorted(tables)[0]
+
+    from_sql = _join_chain_sql(tables, start)
 
     op = query_plan.operation
     expr = query_plan.select_expression
     if not op:
         raise QueryFailure(answer_status.PLAN_INCOMPLETE, "Cannot compile SQL: plan has no operation.")
 
-    select_sql = expr or "*"
-    group_sql = list(query_plan.grouping)
-    if op == "count":
-        select_sql = f"COUNT({expr or '*'})"
-    elif op in {"avg", "sum", "median", "min", "max"}:
-        select_sql = f"{op.upper()}({expr})"
-    elif op == "rank":
+    select_sql = _measure_select_sql(op, expr)
+    if op == "rank":
         # rank plans either already contain an explicit grouped projection
         # (e.g. MSA/NRI: "name, AVG(x)") or a scalar per-row projection
         # (e.g. sold-home ranking: "city, sold_price") — the group_by on
@@ -534,24 +770,31 @@ def _compile_sql_from_plan(query_plan) -> str:
         # necessarily a real aggregation.
         select_sql = expr or query_plan.aggregation or "*"
 
+    group_sql = list(query_plan.grouping)
+    # Multi-entity comparisons ("average flood risk of Pittsburgh and Miami") should return one row per named
+    # entity unless the user explicitly asked for a combined aggregate across them.
+    if (
+        not group_sql
+        and op in {"avg", "sum", "median", "min", "max", "count", "lookup"}
+        and len(query_plan.resolved_entities) >= 2
+        and not any(tok in request.lower() for tok in ("combined", "total across", "all together", "overall"))
+    ):
+        cols = [(e.get("table"), e.get("column")) for e in query_plan.resolved_entities if e.get("table") in tables]
+        if cols and len(set(cols)) == 1 and len(cols) >= 2:
+            ent_col = f"{cols[0][0]}.{cols[0][1]}"
+            group_sql = [ent_col]
+            if op != "lookup":
+                select_sql = f"{ent_col}, {select_sql}"
+
     # GROUP BY is only valid SQL — and only what's actually intended — when
     # every non-grouped projected column is wrapped in an aggregate call.
-    # Some catalog rank operations pair a grouping key with a bare column
-    # rather than an aggregate (see comment above); emitting GROUP BY for
-    # those produces an invalid DuckDB query ("column must appear in the
-    # GROUP BY clause or be part of an aggregate function"), so only keep
-    # the clause when the projection actually aggregates something.
     if group_sql and not _AGGREGATE_CALL_RE.search(select_sql):
         group_sql = []
 
-    predicates = []
-    predicates.extend(_group_equality_predicates(query_plan.entity_filters))
-    predicates.extend(query_plan.scope_filters)  # mandatory scope (agents/query_scope.py)
-    predicates.extend(query_plan.filters)
     if "exclude NULL" in query_plan.null_policy and expr:
         for field in re.findall(r"\b[a-zA-Z_][\w]*\.[a-zA-Z_][\w]*\b", expr):
             predicates.append(f"{field} IS NOT NULL")
-    where_sql = f" WHERE {' AND '.join(predicates)}" if predicates else ""
+    where_sql = f" WHERE {' AND '.join(dict.fromkeys(predicates))}" if predicates else ""
 
     group_clause = f" GROUP BY {', '.join(group_sql)}" if group_sql else ""
     order_clause = f" ORDER BY {query_plan.ordering}" if query_plan.ordering else ""
@@ -565,6 +808,8 @@ def run_code_query(
     requirements: str = "",
     plan: str = "",
     presentation: str = "auto",
+    *,
+    query_plan=None,
 ) -> tuple[str, str]:
     """Generate, validate, execute and generically repair one analytical query.
 
@@ -574,7 +819,7 @@ def run_code_query(
     returned here (the evidence the final-answer LLM reads) is completely
     unaffected by it; only the emitted artifact, if any, changes shape.
     """
-    query_plan = build_query_plan(request)
+    query_plan = query_plan or build_query_plan(request)
     if not query_plan.required_tables:
         # The validator rejects every statement that does not use a planned table, so with an empty plan no SQL a model
         # could write can succeed: asking it - up to three times - only burns time and ends in a misleading error.
@@ -586,6 +831,7 @@ def run_code_query(
         effective_plan = base_plan
         if repair_note:
             effective_plan += "\n\nREPAIR CONTEXT:\n" + repair_note
+        used_compiler = False
         try:
             sql = generate_sql(request, plan=effective_plan, focused=(attempt > 0))
             with trace_span(
@@ -606,7 +852,8 @@ def run_code_query(
                     raise
             last_sql = sql
             if not sql.strip():
-                sql = _compile_sql_from_plan(query_plan)
+                sql = _compile_sql_from_plan(query_plan, request=request)
+                used_compiler = True
         except llm_resilience.TurnCancelled:
             raise  # the deadline passed: never "recover" by doing more work
         except Exception as exc:
@@ -620,10 +867,11 @@ def run_code_query(
             try:
                 # The fallback compiler is intentionally limited to the empty/invalid
                 # SQL case; it never replaces valid LLM-generated SQL.
-                if not last_sql:
-                    sql = _compile_sql_from_plan(query_plan)
+                if not last_sql or attempt == 2:
+                    sql = _compile_sql_from_plan(query_plan, request=request)
                     _validate_sql_against_plan(sql, query_plan)
                     last_sql = sql
+                    used_compiler = True
                     repair_note = "LLM SQL unavailable; executed catalog-compiled SQL."
                 else:
                     raise
@@ -675,32 +923,89 @@ def run_code_query(
             continue
         if df.empty:
             diagnosis = schema.diagnose_empty_or_error(sql) or "No relationship diagnostics available."
-            if attempt == 2:
-                # Every repair attempt is exhausted, and the last SQL was a
-                # validated query that executed without error — it just
-                # matched no rows. That is very often the correct, factual
-                # answer (e.g. "no CBSA match for this MSA"), not a broken
-                # query, so say so plainly instead of returning the raw
-                # repair-hint diagnostics (written for the next
-                # SQL-generation attempt) as if they were the answer.
-                return sql, (
+            # Short-circuit verified 0-row queries so genuine empty sets (e.g. "houses in Seattle")
+            # return cleanly without wasting 2 more LLM SQL retries. Allow at most 1 retry only when
+            # an un-lowercased string equality or nullable Redfin msa_code join could plausibly recover rows.
+            low_sql = sql.lower()
+            case_or_null_retry = (
+                attempt == 0
+                and not used_compiler
+                and not diagnosis.startswith("EMPTY TABLES:")
+                and (
+                    ("houses" in low_sql and "msa_code" in low_sql)
+                    or (
+                        not query_plan.entity_filters
+                        and "lower(" not in low_sql
+                        and "ilike" not in low_sql
+                        and bool(re.search(r"=\s*'[A-Za-z][^']*'", sql))
+                    )
+                )
+            )
+            if not case_or_null_retry:
+                empty_ev = {
+                    "tables_queried": list(query_plan.required_tables),
+                    "columns": [str(c) for c in df.columns],
+                    "rows": [],
+                    "row_count": 0,
+                    "truncated": False,
+                    "applied_filters": (
+                        list(query_plan.entity_filters) + list(query_plan.filters) + list(query_plan.scope_filters)
+                    ),
+                    "excluded_records": [],
+                    "artifact_refs": [],
+                }
+                empty_msg = (
                     "The query executed successfully against the documented schema and "
                     f"returned 0 rows — no matching records were found. {diagnosis}"
                 )
+                return sql, tool_result.status_result(
+                    empty_msg,
+                    answer_status.RESULT_EMPTY,
+                    ok=True,
+                    row_count=0,
+                    columns=[str(c) for c in df.columns],
+                    evidence=empty_ev,
+                )
             repair_note = f"The query returned 0 rows. Diagnostic context: {diagnosis}. Correct join/entity/filter mistakes without changing scope."
             continue
+        artifact_refs: list[str] = []
         try:
-            emit_artifact(classify_dataframe(df, request=request, presentation=presentation))
+            art = classify_dataframe(df, request=request, presentation=presentation)
+            if art:
+                emit_artifact(art)
+                if art.get("title"):
+                    artifact_refs.append(str(art["title"]))
         except Exception:
             pass  # a presentation-layer problem must never break an otherwise-successful query
+        sql_ev = {
+            "tables_queried": list(query_plan.required_tables),
+            "columns": [str(c) for c in df.columns],
+            "rows": _df_evidence_rows(df, max_rows=50),
+            "row_count": int(len(df)),
+            "truncated": bool(truncated or len(df) > 50),
+            "applied_filters": (
+                list(query_plan.entity_filters) + list(query_plan.filters) + list(query_plan.scope_filters)
+            ),
+            "excluded_records": _excluded_notes_for_plan(query_plan),
+            "artifact_refs": artifact_refs,
+        }
         if truncated:
-            return sql, df.head(50).to_string(index=False) + (
+            rendered = df.head(50).to_string(index=False) + (
                 f"\n... (more than {len(df)} rows exist; only the first {len(df)} were loaded and 50 are shown - "
                 "add a filter or a LIMIT for the full picture)"
             )
-        if len(df) > 50:
-            return sql, df.head(50).to_string(index=False) + f"\n... ({len(df)} total rows, showing 50)"
-        return sql, df.to_string(index=False)
+        elif len(df) > 50:
+            rendered = df.head(50).to_string(index=False) + f"\n... ({len(df)} total rows, showing 50)"
+        else:
+            rendered = df.to_string(index=False)
+        return sql, tool_result.ToolResult(
+            rendered,
+            kind="data",
+            status=answer_status.OK,
+            row_count=int(len(df)),
+            columns=[str(c) for c in df.columns],
+            evidence=sql_ev,
+        )
     return last_sql, "Query could not be completed."
 
 
@@ -792,7 +1097,16 @@ def query_database(
         proposed = semantic_fallback.propose_concepts(request)
     if proposed:
         with schema.forcing_concepts(proposed):
-            return _envelope(_annotate_interpretation(_answer(request, requirements, presentation), proposed))
+            out = _answer(request, requirements, presentation)
+            annotated = _annotate_interpretation(out, proposed)
+            ev = tool_result.evidence_of(out)
+            facts = tool_result.facts(out) or {}
+            return _envelope(
+                annotated,
+                evidence=ev,
+                row_count=facts.get("row_count"),
+                columns=facts.get("columns", ()),
+            )
 
     # A dataset level that is not loaded is decided from the catalog BEFORE the semantic cache: cached "empty"
     # evidence must not outlive the data, and the request must never reach SQL generation where an aggregate over an
@@ -810,9 +1124,17 @@ def query_database(
     signature = result_cache.semantic_signature(structured_plan)
     cached = result_cache.lookup_semantic("query_database", request, signature)
     if cached is not None:
-        return _envelope(cached["response"])
+        meta = cached.get("meta") or {}
+        return _envelope(
+            cached["response"],
+            evidence=meta.get("evidence"),
+            row_count=meta.get("row_count"),
+            columns=meta.get("columns") or (),
+        )
 
     out = _answer(request, requirements, presentation, structured_plan)
+    out_facts = tool_result.facts(out) or {}
+    out_ev = tool_result.evidence_of(out)
     if not answer_status.is_not_answered(out) and "Code Agent error" not in out:
         result_cache.store_semantic(
             "query_database",
@@ -824,9 +1146,17 @@ def query_database(
                 "tables": structured_plan.required_tables,
                 "operation": structured_plan.operation or "",
                 "kind": "semantic",
+                "evidence": out_ev,
+                "row_count": out_facts.get("row_count"),
+                "columns": out_facts.get("columns") or [],
             },
         )
-    return _envelope(out)
+    return _envelope(
+        out,
+        evidence=out_ev,
+        row_count=out_facts.get("row_count"),
+        columns=out_facts.get("columns") or (),
+    )
 
 
 def _annotate_interpretation(out: str, keys: list[str]) -> str:
@@ -836,16 +1166,64 @@ def _annotate_interpretation(out: str, keys: list[str]) -> str:
     return out.replace("[RESULT]\n", f"[RESULT]\n(Interpreted as: {semantic_fallback.describe(keys)})\n", 1)
 
 
+def _parse_derived_evidence(routed_text: str, structured_plan) -> dict[str, Any]:
+    """Extract structured table/rows from deterministic derived-provider output (e.g. ``msa_geometry``)."""
+    if answer_status.is_not_answered(routed_text) or "[RESULT]" not in routed_text:
+        return {}
+    body = routed_text.split("[RESULT]", 1)[1].strip()
+    lines = [l for l in body.splitlines() if l.strip()]
+    rows: list[dict[str, Any]] = []
+    cols: list[str] = []
+    # Parse whitespace-separated tabular block emitted by DataFrame.to_string(index=False).
+    for line in lines:
+        if line.startswith(("(", "Provenance:", "Note:")):
+            continue
+        parts = re.split(r"\s{2,}", line.strip())
+        if not cols and len(parts) >= 2:
+            cols = parts
+            continue
+        if cols and len(parts) == len(cols):
+            row: dict[str, Any] = {}
+            for col, val in zip(cols, parts):
+                try:
+                    row[col] = (
+                        int(val.replace(",", "")) if re.fullmatch(r"-?[\d,]+", val) else float(val.replace(",", ""))
+                    )
+                except ValueError:
+                    row[col] = val
+            rows.append(row)
+    return {
+        "tables_queried": list(getattr(structured_plan, "required_tables", ()) or ()),
+        "columns": cols,
+        "rows": rows,
+        "row_count": len(rows),
+        "truncated": False,
+        "applied_filters": list(getattr(structured_plan, "entity_filters", ()) or ()),
+        "excluded_records": [],
+        "artifact_refs": [],
+    }
+
+
 def _answer(request: str, requirements: str, presentation: str, structured_plan=None) -> str:
     structured_plan = structured_plan or build_query_plan(request)
     # Requests that must not reach SQL generation (ambiguous place, polygon-derived measure, known-unloaded topic) are
     # decided from catalog metadata in agents/answer_policy.py - there is no question-specific branch here.
     routed = answer_policy.route_before_sql(structured_plan, request, presentation=presentation)
     if routed is not None:
+        ev = _parse_derived_evidence(routed, structured_plan)
+        if ev and ev.get("rows"):
+            return tool_result.ToolResult(
+                routed,
+                kind="data",
+                status=answer_status.OK,
+                row_count=ev.get("row_count"),
+                columns=ev.get("columns", ()),
+                evidence=ev,
+            )
         return routed
 
     try:
-        sql, result = run_code_query(request, presentation=presentation)
+        sql, result = run_code_query(request, presentation=presentation, query_plan=structured_plan)
     except llm_resilience.TurnCancelled:
         raise
     except llm_resilience.ModelUnavailable:
@@ -863,13 +1241,38 @@ def _answer(request: str, requirements: str, presentation: str, structured_plan=
         sql, result = "", answer_status.limitation(exc.code, str(exc))
     except Exception as exc:
         sql, result = "", f"Code Agent error: {exc}"
-    result += answer_policy.caveats_after_sql(structured_plan)
+    res_facts = tool_result.facts(result) or {}
+    res_ev = tool_result.evidence_of(result)
+    if res_ev:
+        prov = {
+            t: schema.table_provenance(t)
+            for t in res_ev.get("tables_queried") or ()
+            if hasattr(schema, "table_provenance")
+        }
+        res_ev["provenance"] = {k: v for k, v in prov.items() if v}
+    caveat = answer_policy.caveats_after_sql(structured_plan)
+    rendered_result = str(result) + caveat
+    if caveat and res_ev:
+        excluded = list(res_ev.get("excluded_records") or [])
+        excluded.append(caveat.strip())
+        res_ev["excluded_records"] = excluded
 
     # LLM-first architecture: SQL generation and repair are driven entirely by
     # the live schema plus semantic metadata. There are no question-specific
     # canonical SQL recipes in the execution layer.
 
-    return f"[GENERATED SQL]\n{sql}\n[RESULT]\n{result}"
+    full_text = f"[GENERATED SQL]\n{sql}\n[RESULT]\n{rendered_result}"
+    if res_ev or res_facts:
+        return tool_result.ToolResult(
+            full_text,
+            kind=res_facts.get("kind", "data"),
+            ok=res_facts.get("ok", True),
+            status=res_facts.get("status", answer_status.OK),
+            row_count=res_facts.get("row_count"),
+            columns=res_facts.get("columns", ()),
+            evidence=res_ev,
+        )
+    return full_text
 
 
 def _run_async_safely(async_fn, *args, deadline_s: float | None = None, **kwargs):

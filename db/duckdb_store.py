@@ -375,9 +375,7 @@ def _normalize_zip_frame(df: pd.DataFrame, table: str):
     out = df.copy()
     # A list (not ``Series.map``) so a value that is not a ZIP stays a real None: pandas would coerce it
     # to float NaN, and a NaN registered into a VARCHAR column is not the NULL the schema expects.
-    out["zip"] = pd.Series(
-        [normalize_zip5(value) for value in out["zip"]], index=out.index, dtype=object
-    )
+    out["zip"] = pd.Series([normalize_zip5(value) for value in out["zip"]], index=out.index, dtype=object)
     return out
 
 
@@ -967,20 +965,19 @@ def get_price_stats_in_tract(tract_fips: str) -> dict:
     )
     row = df.iloc[0].to_dict() if len(df) > 0 else {}
 
-    # Only use arm's-length sales for sold comps
+    # Compute both arm's-length comp stats and excluded outlier counts over the tract without pre-filtering
+    # non-arm's-length rows away before COUNT(*) FILTER can observe them.
     sold_df = query(
         """
         SELECT
-            COUNT(*) as sold_count,
-            MEDIAN(sold_price) as median_sold,
-            MEDIAN(sold_price / NULLIF(sqft, 0)) as median_sold_per_sqft,
-            MIN(sold_date) as oldest_sale,
-            MAX(sold_date) as newest_sale,
-            COUNT(*) FILTER (WHERE is_arms_length = FALSE) as non_arms_length_excluded
+            COUNT(*) FILTER (WHERE (is_arms_length IS NULL OR is_arms_length = TRUE) AND sold_price > 1000) as sold_count,
+            MEDIAN(sold_price) FILTER (WHERE (is_arms_length IS NULL OR is_arms_length = TRUE) AND sold_price > 1000) as median_sold,
+            MEDIAN(sold_price / NULLIF(sqft, 0)) FILTER (WHERE (is_arms_length IS NULL OR is_arms_length = TRUE) AND sold_price > 1000) as median_sold_per_sqft,
+            MIN(sold_date) FILTER (WHERE (is_arms_length IS NULL OR is_arms_length = TRUE) AND sold_price > 1000) as oldest_sale,
+            MAX(sold_date) FILTER (WHERE (is_arms_length IS NULL OR is_arms_length = TRUE) AND sold_price > 1000) as newest_sale,
+            COUNT(*) FILTER (WHERE is_arms_length = FALSE OR sold_price <= 1000 OR sold_price IS NULL) as non_arms_length_excluded
         FROM sold_homes
         WHERE tract_fips = ?
-          AND (is_arms_length IS NULL OR is_arms_length = TRUE)
-          AND sold_price > 1000
     """,
         [tract_fips],
     )

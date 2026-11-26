@@ -38,7 +38,7 @@ NON_EVIDENCE_KINDS = ("schema", "status", "not_answered", "error")
 class ToolResult(str):
     """A tool's rendered text plus the facts about it (see module docstring)."""
 
-    __slots__ = ("ok", "kind", "status", "row_count", "columns")
+    __slots__ = ("ok", "kind", "status", "row_count", "columns", "evidence")
 
     # Declared for type checkers: __slots__ creates the storage, not the annotations.
     ok: bool
@@ -46,6 +46,7 @@ class ToolResult(str):
     status: str | None
     row_count: int | None
     columns: tuple[str, ...]
+    evidence: dict[str, Any]
 
     def __new__(
         cls,
@@ -56,6 +57,7 @@ class ToolResult(str):
         status: str | None = None,
         row_count: int | None = None,
         columns: Iterable[str] = (),
+        evidence: dict[str, Any] | None = None,
     ) -> "ToolResult":
         obj = super().__new__(cls, text)
         obj.ok = bool(ok)
@@ -63,6 +65,7 @@ class ToolResult(str):
         obj.status = status
         obj.row_count = row_count
         obj.columns = tuple(columns)
+        obj.evidence = dict(evidence) if evidence else {}
         return obj
 
     def facts(self) -> dict[str, Any]:
@@ -73,6 +76,7 @@ class ToolResult(str):
             "status": self.status,
             "row_count": self.row_count,
             "columns": list(self.columns),
+            "evidence": dict(self.evidence),
         }
 
     def is_evidence(self) -> bool:
@@ -87,6 +91,11 @@ class ToolResult(str):
 def facts(value: Any) -> dict[str, Any] | None:
     """Metadata for ``value`` when it is a ToolResult, else ``None``."""
     return value.facts() if isinstance(value, ToolResult) else None
+
+
+def evidence_of(value: Any) -> dict[str, Any]:
+    """Structured tool evidence dict when ``value`` is a ToolResult, else ``{}``."""
+    return dict(value.evidence) if isinstance(value, ToolResult) else {}
 
 
 def as_result(value: Any, *, kind: str = "data") -> ToolResult:
