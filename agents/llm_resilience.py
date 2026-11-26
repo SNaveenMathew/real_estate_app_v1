@@ -248,18 +248,82 @@ def _cache_hooks(client, messages, role: str):
         return None, None
 
 
+def _client_model_name(client, result=None) -> str:
+    """Resolve the best available model name for telemetry without mutating client state."""
+    resp_meta = getattr(result, "response_metadata", None) or {}
+    if isinstance(resp_meta, dict) and resp_meta.get("model_name"):
+        return str(resp_meta["model_name"])
+    return str(getattr(client, "model_name", None) or getattr(client, "model", None) or "")
+
+
+def _extract_token_usage(result) -> tuple[int, int, int, int]:
+    """Return ``(prompt_tokens, completion_tokens, reasoning_tokens, total_tokens)`` from an LLM reply."""
+    prompt_t = completion_t = reasoning_t = total_t = 0
+    usage = getattr(result, "usage_metadata", None)
+    if isinstance(usage, dict):
+        prompt_t = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+        completion_t = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+        total_t = int(usage.get("total_tokens") or 0)
+        details = usage.get("output_token_details") or {}
+        if isinstance(details, dict):
+            reasoning_t = int(details.get("reasoning") or 0)
+    resp_meta = getattr(result, "response_metadata", None)
+    if isinstance(resp_meta, dict) and (prompt_t == 0 and completion_t == 0):
+        tok = resp_meta.get("token_usage") or resp_meta.get("usage") or {}
+        if isinstance(tok, dict):
+            prompt_t = int(tok.get("prompt_tokens") or tok.get("input_tokens") or 0)
+            completion_t = int(tok.get("completion_tokens") or tok.get("output_tokens") or 0)
+            total_t = int(tok.get("total_tokens") or 0)
+            details = tok.get("completion_tokens_details") or {}
+            if isinstance(details, dict):
+                reasoning_t = int(details.get("reasoning_tokens") or 0)
+    if total_t == 0:
+        total_t = prompt_t + completion_t
+    return prompt_t, completion_t, reasoning_t, total_t
+
+
+def _record_usage(
+    role: str,
+    model: str,
+    *,
+    usage: tuple[int, int, int, int],
+    latency_s: float,
+    cache_hit: bool,
+    error: str | None = None,
+) -> None:
+    try:
+        import observability
+
+        observability.record_llm_call(
+            role=role,
+            model=model,
+            prompt_tokens=usage[0],
+            completion_tokens=usage[1],
+            reasoning_tokens=usage[2],
+            total_tokens=usage[3],
+            latency_seconds=latency_s,
+            cache_hit=cache_hit,
+            error=error,
+        )
+    except Exception:
+        logger.debug("LLM telemetry recording skipped", exc_info=True)
+
+
 def invoke(client, messages, *, role: str = "model", breaker_name: str = "chat"):
-    """``client.invoke(messages)`` with classification, the breaker, cancellation and the prompt cache.
+    """``client.invoke(messages)`` with classification, the breaker, cancellation, telemetry and the prompt cache.
 
     Raises ``ModelUnavailable`` for a transient service failure (or an open breaker), ``TurnCancelled`` past the deadline,
     and re-raises anything else (a bad request is not an outage) exactly as before.
     """
     check_cancelled()
 
+    t0 = time.perf_counter()
+    model_name = _client_model_name(client)
     cache_key, result_cache = _cache_hooks(client, messages, role)
     if cache_key:
         stored = result_cache.lookup_prompt(cache_key)
         if stored is not None:
+            _record_usage(role, model_name, usage=(0, 0, 0, 0), latency_s=time.perf_counter() - t0, cache_hit=True)
             return CachedReply(stored)
 
     gate = breaker(breaker_name)
@@ -267,6 +331,14 @@ def invoke(client, messages, *, role: str = "model", breaker_name: str = "chat")
     try:
         result = client.invoke(messages)
     except Exception as exc:
+        _record_usage(
+            role,
+            model_name,
+            usage=(0, 0, 0, 0),
+            latency_s=time.perf_counter() - t0,
+            cache_hit=False,
+            error=type(exc).__name__,
+        )
         if is_transient(exc):
             gate.record_failure()
             raise ModelUnavailable(
@@ -275,6 +347,15 @@ def invoke(client, messages, *, role: str = "model", breaker_name: str = "chat")
         gate.record_success()  # the service answered (with an error about the request): it is up
         raise
     gate.record_success()
+
+    usage = _extract_token_usage(result)
+    _record_usage(
+        role,
+        _client_model_name(client, result),
+        usage=usage,
+        latency_s=time.perf_counter() - t0,
+        cache_hit=False,
+    )
 
     if cache_key:
         text = _reply_text(result)

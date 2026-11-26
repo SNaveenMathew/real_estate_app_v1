@@ -16,7 +16,9 @@ import socket
 import subprocess
 import sys
 from urllib.parse import urlparse
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import Any, Iterator
 
 from config import settings
@@ -96,6 +98,233 @@ HOUSE_CHAT_REPLY_CHARS = Histogram(
     "Characters in final House Chat responses.",
     buckets=(100, 250, 500, 1000, 2000, 4000, 8000, 16000),
 )
+
+LLM_CALLS_TOTAL = Counter(
+    "llm_calls_total",
+    "Total LLM invocations recorded by role and cache status.",
+    ["role", "cache_hit"],
+)
+LLM_TOKENS_TOTAL = Counter(
+    "llm_tokens_total",
+    "LLM tokens processed by role and kind (prompt, completion, reasoning).",
+    ["role", "kind"],
+)
+LLM_COST_USD_TOTAL = Counter(
+    "llm_cost_usd_total",
+    "Estimated LLM inference cost in USD based on configured rates.",
+    ["role"],
+)
+LLM_CALL_LATENCY = Histogram(
+    "llm_call_duration_seconds",
+    "Wall latency per LLM call in seconds.",
+    ["role"],
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120),
+)
+
+
+@dataclass
+class UsageLedger:
+    """Thread-safe per-turn accumulator for LLM tokens, latency, cache hits, and estimated cost."""
+
+    llm_calls: int = 0
+    cache_hits: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    reasoning_tokens: int = 0
+    total_tokens: int = 0
+    llm_latency_seconds: float = 0.0
+    estimated_cost_usd: float = 0.0
+    by_role: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def add(
+        self,
+        *,
+        role: str,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        reasoning_tokens: int,
+        total_tokens: int,
+        latency_seconds: float,
+        cache_hit: bool,
+        estimated_cost_usd: float,
+    ) -> None:
+        with self._lock:
+            self.llm_calls += 1
+            if cache_hit:
+                self.cache_hits += 1
+            self.prompt_tokens += prompt_tokens
+            self.completion_tokens += completion_tokens
+            self.reasoning_tokens += reasoning_tokens
+            self.total_tokens += total_tokens
+            self.llm_latency_seconds += latency_seconds
+            self.estimated_cost_usd += estimated_cost_usd
+            bucket = self.by_role.setdefault(
+                role or "model",
+                {
+                    "calls": 0,
+                    "cache_hits": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "total_tokens": 0,
+                    "latency_seconds": 0.0,
+                    "estimated_cost_usd": 0.0,
+                    "models": [],
+                },
+            )
+            bucket["calls"] += 1
+            if cache_hit:
+                bucket["cache_hits"] += 1
+            bucket["prompt_tokens"] += prompt_tokens
+            bucket["completion_tokens"] += completion_tokens
+            bucket["reasoning_tokens"] += reasoning_tokens
+            bucket["total_tokens"] += total_tokens
+            bucket["latency_seconds"] += latency_seconds
+            bucket["estimated_cost_usd"] += estimated_cost_usd
+            if model and model not in bucket["models"]:
+                bucket["models"].append(model)
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "llm_calls": self.llm_calls,
+                "cache_hits": self.cache_hits,
+                "prompt_tokens": self.prompt_tokens,
+                "completion_tokens": self.completion_tokens,
+                "reasoning_tokens": self.reasoning_tokens,
+                "total_tokens": self.total_tokens,
+                "llm_latency_seconds": round(self.llm_latency_seconds, 4),
+                "estimated_cost_usd": round(self.estimated_cost_usd, 6),
+                "by_role": {
+                    role: {
+                        **stats,
+                        "latency_seconds": round(stats["latency_seconds"], 4),
+                        "estimated_cost_usd": round(stats["estimated_cost_usd"], 6),
+                        "models": list(stats["models"]),
+                    }
+                    for role, stats in self.by_role.items()
+                },
+            }
+
+
+_USAGE_LEDGER: ContextVar[UsageLedger | None] = ContextVar("usage_ledger", default=None)
+
+
+def enter_usage_scope():
+    """Start a fresh per-turn UsageLedger in the current ContextVar scope and return its reset token."""
+    return _USAGE_LEDGER.set(UsageLedger())
+
+
+def exit_usage_scope(token) -> None:
+    """Restore the previous UsageLedger scope."""
+    _USAGE_LEDGER.reset(token)
+
+
+@contextmanager
+def usage_scope() -> Iterator[UsageLedger]:
+    """Context manager collecting LLM token, latency, and cost usage for a single turn or eval call."""
+    ledger = UsageLedger()
+    token = _USAGE_LEDGER.set(ledger)
+    try:
+        yield ledger
+    finally:
+        _USAGE_LEDGER.reset(token)
+
+
+def current_usage_snapshot() -> dict[str, Any]:
+    """Return the active turn's aggregated LLM token/latency/cost dictionary (empty defaults if outside a scope)."""
+    ledger = _USAGE_LEDGER.get()
+    return ledger.snapshot() if ledger is not None else UsageLedger().snapshot()
+
+
+def _estimate_call_cost_usd(prompt_tokens: int, completion_tokens: int) -> float:
+    p_rate = float(getattr(settings, "llm_prompt_cost_per_1m_usd", 0.0) or 0.0)
+    c_rate = float(getattr(settings, "llm_completion_cost_per_1m_usd", 0.0) or 0.0)
+    return (prompt_tokens * p_rate + completion_tokens * c_rate) / 1_000_000.0
+
+
+def record_llm_call(
+    *,
+    role: str,
+    model: str = "",
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    reasoning_tokens: int = 0,
+    total_tokens: int = 0,
+    latency_seconds: float = 0.0,
+    cache_hit: bool = False,
+    error: str | None = None,
+) -> None:
+    """Record per-call LLM telemetry into the active turn ledger, Prometheus metrics, and active OTEL span."""
+    role_key = role or "model"
+    p_tok = max(0, int(prompt_tokens or 0))
+    c_tok = max(0, int(completion_tokens or 0))
+    r_tok = max(0, int(reasoning_tokens or 0))
+    t_tok = max(0, int(total_tokens or (p_tok + c_tok)))
+    lat = max(0.0, float(latency_seconds or 0.0))
+    cost = 0.0 if cache_hit else _estimate_call_cost_usd(p_tok, c_tok)
+
+    ledger = _USAGE_LEDGER.get()
+    if ledger is not None:
+        ledger.add(
+            role=role_key,
+            model=model,
+            prompt_tokens=p_tok,
+            completion_tokens=c_tok,
+            reasoning_tokens=r_tok,
+            total_tokens=t_tok,
+            latency_seconds=lat,
+            cache_hit=cache_hit,
+            estimated_cost_usd=cost,
+        )
+
+    try:
+        LLM_CALLS_TOTAL.labels(role=role_key, cache_hit="true" if cache_hit else "false").inc()
+        LLM_CALL_LATENCY.labels(role=role_key).observe(lat)
+        if p_tok:
+            LLM_TOKENS_TOTAL.labels(role=role_key, kind="prompt").inc(p_tok)
+        if c_tok:
+            LLM_TOKENS_TOTAL.labels(role=role_key, kind="completion").inc(c_tok)
+        if r_tok:
+            LLM_TOKENS_TOTAL.labels(role=role_key, kind="reasoning").inc(r_tok)
+        if cost:
+            LLM_COST_USD_TOTAL.labels(role=role_key).inc(cost)
+    except Exception:
+        logger.debug("Unable to update LLM Prometheus counters", exc_info=True)
+
+    try:
+        from opentelemetry import trace as trace_api
+
+        span = trace_api.get_current_span()
+        if span is not None and span.is_recording():
+            if model:
+                span.set_attribute("llm.model_name", model)
+            span.set_attribute("llm.role", role_key)
+            span.set_attribute("llm.token_count.prompt", p_tok)
+            span.set_attribute("llm.token_count.completion", c_tok)
+            span.set_attribute("llm.token_count.reasoning", r_tok)
+            span.set_attribute("llm.token_count.total", t_tok)
+            span.set_attribute("llm.cache_hit", bool(cache_hit))
+            span.set_attribute("llm.latency_ms", round(lat * 1000.0, 2))
+            if cost:
+                span.set_attribute("llm.cost_usd", round(cost, 6))
+            attrs: dict[str, Any] = {
+                "role": role_key,
+                "model": model,
+                "prompt_tokens": p_tok,
+                "completion_tokens": c_tok,
+                "reasoning_tokens": r_tok,
+                "total_tokens": t_tok,
+                "latency_ms": round(lat * 1000.0, 2),
+                "cache_hit": bool(cache_hit),
+            }
+            if error:
+                attrs["error"] = error
+            span.add_event("llm.usage", attributes=attrs)
+    except Exception:
+        logger.debug("Unable to annotate OTEL span with LLM usage", exc_info=True)
 
 
 class EvaluationTraceExporter:
@@ -382,6 +611,8 @@ def local_trace_span_count(trace_id: str) -> int:
 
 
 def tracer():
+    if _tracer and _tracer is not False:
+        return _tracer
     initialize_observability()
     return _tracer if _tracer and _tracer is not False else None
 
@@ -514,6 +745,22 @@ def _finish_root_span_context(
         logger.debug("Unable to close Phoenix %s span context", chat_type, exc_info=True)
 
 
+def _attach_usage_attributes(span, usage: dict[str, Any] | None) -> None:
+    if span is None or not usage:
+        return
+    try:
+        span.set_attribute("llm.call_count", int(usage.get("llm_calls", 0)))
+        span.set_attribute("llm.cache_hits", int(usage.get("cache_hits", 0)))
+        span.set_attribute("llm.token_count.prompt", int(usage.get("prompt_tokens", 0)))
+        span.set_attribute("llm.token_count.completion", int(usage.get("completion_tokens", 0)))
+        span.set_attribute("llm.token_count.reasoning", int(usage.get("reasoning_tokens", 0)))
+        span.set_attribute("llm.token_count.total", int(usage.get("total_tokens", 0)))
+        if usage.get("estimated_cost_usd"):
+            span.set_attribute("llm.estimated_cost_usd", float(usage["estimated_cost_usd"]))
+    except Exception:
+        logger.debug("Unable to attach usage attributes to span", exc_info=True)
+
+
 def end_general_chat(
     root_span: Any,
     *,
@@ -522,6 +769,7 @@ def end_general_chat(
     reply: str | None = None,
     started_at: float | None = None,
     tool_call_count: int = 0,
+    token_usage: dict[str, Any] | None = None,
     error: BaseException | None = None,
 ) -> None:
     """Finalize a General Chat trace.
@@ -530,9 +778,11 @@ def end_general_chat(
     that explicitly finalizes the root span. The newer implementation can
     still manage the context itself; calling this function is safe either way.
     """
+    usage = token_usage if token_usage is not None else current_usage_snapshot()
     if root_span is not None:
         try:
             root_span.set_attribute("general_chat.tool_call_count", tool_call_count)
+            _attach_usage_attributes(root_span, usage)
             if trace_id:
                 root_span.set_attribute("general_chat.trace_id", trace_id)
             if started_at is not None:
@@ -605,12 +855,15 @@ def end_house_chat(
     reply: str | None = None,
     started_at: float | None = None,
     tool_call_count: int = 0,
+    token_usage: dict[str, Any] | None = None,
     error: BaseException | None = None,
 ) -> None:
     """Finalize a House Chat trace."""
+    usage = token_usage if token_usage is not None else current_usage_snapshot()
     if root_span is not None:
         try:
             root_span.set_attribute("house_chat.tool_call_count", tool_call_count)
+            _attach_usage_attributes(root_span, usage)
             if trace_id:
                 root_span.set_attribute("house_chat.trace_id", trace_id)
             if started_at is not None:
