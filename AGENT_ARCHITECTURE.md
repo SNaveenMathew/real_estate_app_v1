@@ -509,6 +509,47 @@ and Pydantic:
      disclaimers.
    - Microsecond latency ($\sim 9\ \mu\text{s}$).
 
+5. **Scope Policy Guardrail (`ScopePolicyGuardrail`)**:
+   - Rejects scope-widening requests (bulk table dumps, SQL injection bypasses,
+     out-of-domain general-knowledge questions) with a typed `SCOPE_REFUSED`
+     status and a mandatory clarifying question — never executes a table-wide
+     fallback.
+   - Deterministic: no model call required.
+
+6. **Structured Generation via `OutlinesStructuredClient`** (HTTP-compatible):
+   - `OutlinesStructuredClient` wraps `outlines.from_openai` (`OpenAITypeAdapter`) +
+     `outlines.Generator` with `outlines.types.JsonSchema(inline_json_schema(schema))`
+     for constrained JSON output over any OpenAI-compatible HTTP endpoint (e.g.
+     `llama-server` at `:8080` for the agent and `:8081` for the judge).
+   - **HTTP boundary note**: `OpenAITypeAdapter` supports `JsonSchema` constraints
+     only. `Regex`, `CFG`, and `pattern` keywords in a JSON Schema require an
+     in-process `outlines` backend (e.g. `outlines.models.transformers`) and will
+     raise `TypeError` over HTTP. All schemas use `Literal[...]`, numeric bounds,
+     and `@model_validator` / post-parse Pydantic validators instead.
+   - **Wired into five structured paths** (all use in-process `outlines` schema +
+     multi-layer fallback; none bypass the other guardrails above):
+     - `eval/judge.py::JudgeVerdict` — LLM judge verdict structuring with
+       `max_tokens`, `timeout`, and `stop=LLM_STOP_SEQUENCES`.
+     - `agents/semantic_fallback.py::ConceptProposal` — semantic concept discovery
+       for queries the planner could not place.
+     - `services/relationship_suggestions.py::PairSuggestions` — relationship
+       suggestions for new dataset pairs.
+     - `agents/general_agent.py::GeneralActionIR` — structured approved-action IR
+       for the General Chat orchestrator.
+     - `agents/house_agent.py::HouseActionIR` — structured approved-action IR for
+       the House Chat agent (aligned to all 8 House tool names).
+
+7. **5-Gate Response Validator (`agents/response_validator.py`)**:
+   - After every LLM-generated reply, deterministically checks (in order):
+     1. Conflict / non-answer / 0-row short-circuit.
+     2. Table-reference and excluded-outlier consistency.
+     3. Claim-by-claim numeric grounding with configurable tolerance.
+     4. Multi-entity direction comparison + unconditional score-bounds check.
+     5. Deterministic grounded-table fallback if grounding fails.
+   - Populates `ToolResult.evidence` (`tables_queried`, `columns`, `row_count`,
+     `applied_filters`, `excluded_records`, `artifact_refs`, `provenance`) from
+     every tool call so each gate has structured facts to verify against.
+
 Total combined guardrail overhead per user turn is $\sim 0.065\ \text{ms}$
 ($< 0.005\%$ of total request latency), introducing zero perceptible degradation.
 
