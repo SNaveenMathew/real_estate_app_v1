@@ -507,7 +507,11 @@ def _compile_sql_from_plan(query_plan) -> str:
         rel, new_table = picked
         left_qualified = _qualify_join_expr(rel.left_table, rel.left_expr)
         right_qualified = _qualify_join_expr(rel.right_table, rel.right_expr)
-        from_sql += f" JOIN {new_table} ON {left_qualified} = {right_qualified}"
+        on_sql = f"{left_qualified} = {right_qualified}"
+        scope = schema.relationship_scope_sql(rel)
+        if scope:
+            on_sql += " AND " + " AND ".join(scope)
+        from_sql += f" JOIN {new_table} ON {on_sql}"
         connected.add(new_table)
         remaining.remove(new_table)
 
@@ -789,6 +793,13 @@ def query_database(
     if proposed:
         with schema.forcing_concepts(proposed):
             return _envelope(_annotate_interpretation(_answer(request, requirements, presentation), proposed))
+
+    # A dataset level that is not loaded is decided from the catalog BEFORE the semantic cache: cached "empty"
+    # evidence must not outlive the data, and the request must never reach SQL generation where an aggregate over an
+    # empty filter comes back as NULL and invites a guess (agents/answer_policy.py::availability_gap).
+    unloaded = answer_policy.availability_gap(structured_plan)
+    if unloaded:
+        return _envelope(answer_policy.wrap(answer_policy.NOT_SQL_LABEL, unloaded))
 
     # Semantic cache (services/cache.py): an earlier question the deterministic planner routed to the
     # SAME concepts, tables, operation and scope, on unchanged data, is reused verbatim - so the

@@ -12,6 +12,8 @@ msa_context   existing metro / NRI / census questions.  They may improve (more p
 census        the questions this hardening was written for.
 zhvi_levels   one question per ZHVI geography level, so the planned join is checked against the grain: houses.zip
               for zip rows, houses.msa_code for metro rows, and no houses join for a neighborhood name.
+transit       FTA agency/ridership/safety/routes questions, including the route-to-ZCTA bridge.  The fixture
+              carries a small transit sample but no safety rows; the plan is still the contract.
 
 Adding a dataset?  Add two or three representative questions to a group, run ``python scripts/plan_battery.py --update``
 and review the diff of ``tests/golden/plan_battery.json``: every changed plan outside your own dataset is a collision.
@@ -84,6 +86,12 @@ GROUPS = {
         "home value by metro",
         "metro home value in Pittsburgh",
         "home value by neighborhood",
+    ],
+    "transit": [
+        "How many transit agencies are loaded?",
+        "What was total transit ridership in 2024?",
+        "Which transit agency has the highest number of transit safety events?",
+        "How many transit routes are loaded?",
     ],
     "census": [
         "Verify the land areas of Pittsburgh and Indianapolis",

@@ -7,7 +7,8 @@ should not, say exactly why.
 
    * a place name fits several places (``ambiguous`` entities)  -> ask the user which one;
    * a matched concept declares ``derived``                      -> run the registered provider (polygon areas, ...);
-   * only ``gap`` concepts matched                               -> say the topic is not loaded, estimate nothing.
+   * only ``gap`` concepts matched                               -> say the topic is not loaded, estimate nothing;
+   * a ``level`` concept pins a dataset level with no rows       -> say which level is missing and which are loaded.
 
 2. ``unplannable_result``   Nothing in the catalog matched.  No SQL the model could write would survive plan validation
    (every statement must use a planned table), so asking it - up to three times - only burns time.  Return an honest,
@@ -22,6 +23,9 @@ editing this file.
 """
 
 from __future__ import annotations
+
+import re
+from datetime import date, timedelta
 
 import db.duckdb_store as store
 import db.schema_catalog as schema
@@ -58,7 +62,230 @@ def route_before_sql(plan, request: str, *, presentation: str = "auto") -> str |
     gap = _gap_only_message(concepts)
     if gap:
         return wrap(NOT_SQL_LABEL, gap)
+    unloaded = availability_gap(plan)
+    if unloaded:
+        return wrap(NOT_SQL_LABEL, unloaded)
+    time_gap = apply_time_scope(plan, request)
+    if time_gap:
+        return wrap(NOT_SQL_LABEL, time_gap)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Which month is the question about?  (ZHVI / Market Heat Index are monthly series)
+# ---------------------------------------------------------------------------
+_TIME_SERIES = ("zhvi", "market_heat_index")
+_MONTH_NAMES = (
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
+)
+_MONTH_YEAR_RE = re.compile(
+    r"(?<![A-Za-z])(" + "|".join(_MONTH_NAMES) + r")[ ]+((?:19|20)[0-9]{2})(?![0-9])", re.I
+)
+_ISO_DATE_RE = re.compile(r"(?<![0-9])((?:19|20)[0-9]{2})-([0-9]{1,2})(?:-([0-9]{1,2}))?(?![0-9])")
+_SINCE_RE = re.compile(r"(?<![A-Za-z])since[ ]+((?:19|20)[0-9]{2})(?![0-9])", re.I)
+_YEAR_RE = re.compile(r"(?<![0-9])((?:19|20)[0-9]{2})(?![0-9])")
+_CURRENT_WORDS = re.compile(
+    r"(?<![A-Za-z])(current|currently|now|today|latest|this month|right now|as of now|at present)(?![A-Za-z])",
+    re.I,
+)
+# A trend/history question is about the whole series; asking which single month it means would be wrong.
+_SERIES_WORDS = re.compile(
+    r"(?<![A-Za-z])(trend|trends|over time|history|historical|monthly|by month|each month|time series|appreciat[A-Za-z]*)"
+    r"(?![A-Za-z])",
+    re.I,
+)
+
+
+def _time_series_table(plan) -> str | None:
+    """The monthly dataset this plan actually selects a value from, if any."""
+    exprs = [*(plan.metrics or ()), *(plan.filters or ()), plan.select_expression or "", plan.aggregation or ""]
+    for table in _TIME_SERIES:
+        if any(re.search(rf"(?<![A-Za-z_]){re.escape(table)}[.]", str(e)) for e in exprs):
+            return table
+    return None
+
+
+def _planned_level(plan, table: str) -> str | None:
+    for filter_text in plan.filters or ():
+        match = _EQUALITY_FILTER.match(str(filter_text).strip())
+        if match and match.group(1) == table and match.group(2) == "region_type":
+            return match.group(3)
+    return None
+
+
+def _loaded_range(table: str, level: str | None):
+    sql = f"SELECT min(date) AS first, max(date) AS last FROM {table}"
+    params = []
+    if level:
+        sql += " WHERE region_type = ?"
+        params.append(level)
+    try:
+        row = store.query(sql, params).iloc[0]
+    except Exception:
+        return None
+    first, last = row["first"], row["last"]
+    if first is None or last is None:
+        return None
+    return first.date() if hasattr(first, "date") else first, last.date() if hasattr(last, "date") else last
+
+
+def _month_bounds(year: int, month: int):
+    end = date(year, 12, 31) if month == 12 else date(year, month + 1, 1) - timedelta(days=1)
+    return date(year, month, 1), end
+
+
+def apply_time_scope(plan, request: str) -> str | None:
+    """Resolve the month a monthly dataset question is about, or say why it cannot be answered as asked.
+
+    ZHVI and the Market Heat Index are monthly series, but a plan that selects their value carries only the geography
+    level, so a bare aggregation would average every month ever loaded (a ZIP whose latest value is 207,716 would
+    answer 155,775).  This decides the period from the request and pins it as a plan filter - the exact month for an
+    explicit month, the year for a year, the latest loaded month for "current".  With no period at all it asks the
+    user which they mean (``needs_clarification``) instead of picking silently, and a period outside the loaded
+    months is reported as ``date_out_of_range`` with the range that IS available.  A trend/history question is left
+    alone: its answer is the series itself.
+    """
+    table = _time_series_table(plan)
+    if not table:
+        return None
+    text = request or ""
+    if _SERIES_WORDS.search(text):
+        return None
+    loaded = _loaded_range(table, _planned_level(plan, table))
+    if not loaded:
+        return None
+    first, last = loaded
+    label = "Zillow home value" if table == "zhvi" else "Zillow market heat index"
+
+    if _CURRENT_WORDS.search(text):
+        plan.filters = list(plan.filters or []) + [f"{table}.date = DATE '{last.isoformat()}'"]
+        return None
+
+    requested = ""
+    start = end = None
+    match = _MONTH_YEAR_RE.search(text)
+    if match:
+        month = _MONTH_NAMES.index(match.group(1).lower()) + 1
+        start, end = _month_bounds(int(match.group(2)), month)
+        requested = f"{match.group(1).title()} {match.group(2)}"
+    else:
+        match = _ISO_DATE_RE.search(text)
+        if match:
+            start, end = _month_bounds(int(match.group(1)), int(match.group(2)))
+            requested = match.group(0)
+        else:
+            match = _SINCE_RE.search(text)
+            if match:
+                start, end = date(int(match.group(1)), 1, 1), last
+                requested = f"since {match.group(1)}"
+            else:
+                match = _YEAR_RE.search(text)
+                if match:
+                    start, end = date(int(match.group(1)), 1, 1), date(int(match.group(1)), 12, 31)
+                    requested = match.group(1)
+
+    if start is None:
+        level = _planned_level(plan, table)
+        scope = f" for {level} rows" if level else ""
+        return status.not_answered(
+            status.NEEDS_CLARIFICATION,
+            f"{label} is monthly data from {first:%Y-%m} to {last:%Y-%m}{scope}. Do you want the current value "
+            f"(latest loaded month, {last:%Y-%m}), a specific month or year, or a range? For example: 'current', "
+            f"'{last:%Y-%m}', '2024', or 'since {first.year}'.",
+        )
+
+    if start > last or end < first:
+        level = _planned_level(plan, table)
+        scope = f" for {level} rows" if level else ""
+        return status.not_answered(
+            status.DATE_OUT_OF_RANGE,
+            f"{requested} is outside the loaded range: {label.lower()} covers {first:%Y-%m} to {last:%Y-%m}{scope}, "
+            "and nothing was estimated for the requested period. Ask for a month inside that range.",
+        )
+
+    plan.filters = list(plan.filters or []) + [
+        f"{table}.date >= DATE '{start.isoformat()}'",
+        f"{table}.date <= DATE '{end.isoformat()}'",
+    ]
+    return None
+
+
+# ---------------------------------------------------------------------------
+# A dataset level that is not loaded
+# ---------------------------------------------------------------------------
+_EQUALITY_FILTER = re.compile(r"^([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*=\s*'([^']*)'$")
+
+
+def _has_rows(table: str, column: str, value: str) -> bool:
+    try:
+        return not store.query(f"SELECT 1 FROM {table} WHERE {column} = ? LIMIT 1", [value]).empty
+    except Exception:
+        return True  # a probe that cannot run must not block a question
+
+
+def _table_has_rows(table: str) -> bool:
+    try:
+        return not store.query(f"SELECT 1 FROM {table} LIMIT 1").empty
+    except Exception:
+        return True
+
+
+def _loaded_values(table: str, column: str, limit: int = 8) -> list[str]:
+    try:
+        df = store.query(
+            f"SELECT {column} AS v FROM {table} WHERE {column} IS NOT NULL "
+            f"GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT {int(limit)}"
+        )
+        return [str(v) for v in df["v"].tolist()]
+    except Exception:
+        return []
+
+
+def availability_gap(plan) -> str | None:
+    """Why the planned dataset level cannot be answered, when the catalog and the data both say so up front.
+
+    A ``level`` concept pins its grain in a filter (``zhvi.region_type = 'metro'``).  When no row of that table
+    carries the pinned value, every statement over it is empty - and an aggregate over an empty filter returns NULL,
+    not an error, so SQL "succeeds" and hands the answer model a NULL it can only narrate or guess around.  The
+    request therefore stops here, before SQL generation, naming the missing level and the levels present.  Returns
+    ``None`` when every pinned level has rows, so a loaded level is planned exactly as before.
+    """
+    for concept in _matched_concepts(plan):
+        if not concept.get("level"):
+            continue
+        for filter_text in concept.get("filters", ()):
+            match = _EQUALITY_FILTER.match(str(filter_text).strip())
+            if not match:
+                continue
+            table, column, value = match.groups()
+            if _has_rows(table, column, value):
+                continue
+            return _missing_level_message(table, column, value)
+    return None
+
+
+def _quoted(value: str) -> str:
+    """The value as quoted text, or a digit-free stand-in (a NOT_ANSWERED message may not contain digits)."""
+    return value if not any(ch.isdigit() for ch in value) else "the requested value"
+
+
+def _missing_level_message(table: str, column: str, value: str) -> str:
+    shown = _quoted(value)
+    if not _table_has_rows(table):
+        return status.not_answered(
+            status.DATA_UNAVAILABLE,
+            f"The {table} dataset has no rows in this database, so the question cannot be answered from it. "
+            "Nothing was estimated; this is a data-loading gap, not a query error.",
+        )
+    loaded = [v for v in _loaded_values(table, column) if not any(ch.isdigit() for ch in v)]
+    present = f" {column} values that are loaded: {', '.join(loaded)}." if loaded else ""
+    return status.not_answered(
+        status.DATA_UNAVAILABLE,
+        f"The data this question needs is not loaded: no row of {table} has {column} = '{shown}', and an aggregate "
+        f"over that level returns nothing rather than a number.{present} Nothing was estimated; load that level of "
+        "the dataset and ask again.",
+    )
 
 
 def _example_qualifier(value: str) -> str:

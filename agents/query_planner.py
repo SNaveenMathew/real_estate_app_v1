@@ -197,6 +197,23 @@ def build_query_plan(request: str, requirements: str = "", plan: str = "", scope
     explicit_tracts = [e for e in resolved_all if e["entity_type"] == "tract_fips"]
     if requested_entity_types:
         resolved = [e for e in resolved_all if e["entity_type"] in requested_entity_types]
+        # A concept that opts into county/MSA/tract entities must still resolve a city named in its own
+        # table (bike_routes.city is the only city label a bike route has).  A bare city name also matches
+        # the MSA whose title starts with that city, so prefer the own-table city unless the question
+        # explicitly names a county/metro/tract.
+        own_entities = [e for e in resolved_all if e["table"] in preferred_tables]
+        if own_entities and not any(
+            term in text.lower()
+            for term in ("county", "metro", "msa", "metropolitan", "tract", "city limits", "city boundary")
+        ):
+            resolved = own_entities
+        elif not resolved:
+            resolved = own_entities
+        lowered = text.lower()
+        if "county" in lowered:
+            resolved = [e for e in resolved if e["entity_type"] != "MSA"]
+        elif any(term in lowered for term in ("metro", "msa", "metropolitan")):
+            resolved = [e for e in resolved if e["entity_type"] != "county"]
         if explicit_tracts:
             preferred_domains = {e["domain"] for e in explicit_tracts if e["table"] in preferred_tables}
             if not preferred_domains:

@@ -30,6 +30,7 @@ place
 data
   topic_unavailable   The topic is known NOT to be loaded (a ``gap`` concept); nothing may be estimated.
   data_unavailable    The data needed exists in the model but is missing/incomplete in the database.
+  date_out_of_range   The requested month/year is outside the range the dataset actually covers.
   result_empty        A valid query executed and matched no rows (a factual zero, not an error).
 sql
   sql_invalid         The statement was rejected by the contract/validator, so it never ran.          (retryable)
@@ -80,6 +81,7 @@ PLACE_AMBIGUOUS = "place_ambiguous"
 # ── Data ─────────────────────────────────────────────────────────────────────
 TOPIC_UNAVAILABLE = "topic_unavailable"
 DATA_UNAVAILABLE = "data_unavailable"
+DATE_OUT_OF_RANGE = "date_out_of_range"
 RESULT_EMPTY = "result_empty"
 
 # ── SQL ──────────────────────────────────────────────────────────────────────
@@ -120,6 +122,7 @@ CODES = frozenset(
         PLACE_AMBIGUOUS,
         TOPIC_UNAVAILABLE,
         DATA_UNAVAILABLE,
+        DATE_OUT_OF_RANGE,
         RESULT_EMPTY,
         SQL_INVALID,
         SQL_EXECUTION_ERROR,
@@ -148,6 +151,7 @@ CATEGORY = {
     PLACE_AMBIGUOUS: "place",
     TOPIC_UNAVAILABLE: "data",
     DATA_UNAVAILABLE: "data",
+    DATE_OUT_OF_RANGE: "data",
     RESULT_EMPTY: "data",
     SQL_INVALID: "sql",
     SQL_EXECUTION_ERROR: "sql",
@@ -175,6 +179,7 @@ LABELS = {
     PLACE_AMBIGUOUS: "place is ambiguous",
     TOPIC_UNAVAILABLE: "topic not loaded",
     DATA_UNAVAILABLE: "data missing",
+    DATE_OUT_OF_RANGE: "date outside loaded range",
     RESULT_EMPTY: "no matching rows",
     SQL_INVALID: "statement rejected",
     SQL_EXECUTION_ERROR: "statement failed",
