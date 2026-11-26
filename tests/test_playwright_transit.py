@@ -8,7 +8,14 @@ Playwright end-to-end browser verification for FTA transit integration:
 """
 
 import time
-from playwright.sync_api import sync_playwright
+
+import pytest
+
+# Browser verification is opt-in: Playwright is not a runtime or CI dependency (see
+# requirements.txt), and importing it unconditionally turns a missing optional tool into a
+# collection error that fails the whole suite before a single test runs.
+pytest.importorskip("playwright.sync_api", reason="playwright is not installed; browser verification is opt-in")
+from playwright.sync_api import sync_playwright  # noqa: E402
 
 
 def run_transit_ui_verification():

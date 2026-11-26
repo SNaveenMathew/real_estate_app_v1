@@ -17,7 +17,9 @@ jobs:
   checks:
     name: lint + catalog + plans + pytest
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # The full suite takes ~38 min on a fast workstation; a 2-core runner is slower and the
+    # previous 45 min cap could cancel a healthy run before its last tests reported.
+    timeout-minutes: 90
     env:
       PYTHONUNBUFFERED: "1"
       # Tracing is optional (README §Troubleshooting); no collector runs in CI, and

@@ -55,7 +55,11 @@ def wired(fx, monkeypatch):
 
     lr.reset()
     monkeypatch.setattr(settings, "agent_max_concurrent_turns", 4)
-    monkeypatch.setattr(settings, "agent_queue_timeout_s", 60.0)
+    # This test asserts isolation, not throughput: 24 turns through 4 slots must each get their
+    # own answer. A 60 s queue budget made the result depend on machine speed and load, so a slow
+    # runner failed with Busy even though no turn saw another's state. The deadline stays finite
+    # so a real deadlock still fails the test instead of hanging CI.
+    monkeypatch.setattr(settings, "agent_queue_timeout_s", 600.0)
     monkeypatch.setattr(ga, "_get_code_agent", lambda: Empty())
     monkeypatch.setattr(ga, "_get_response_agent", lambda: Echo())
     monkeypatch.setattr(ha, "_get_house_code_agent", lambda: Empty())
