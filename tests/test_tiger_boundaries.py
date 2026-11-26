@@ -148,7 +148,12 @@ def test_route_to_place_bridge_counts_only_positive_lengths(fresh_db):
     conn = fresh_db.get_conn()
     conn.execute(
         "INSERT INTO bike_routes (route_id, city, layer_type, geometry_json) VALUES (?,?,?,?)",
-        ["r1", "pittsburgh", "bike_lanes", json.dumps(LineString([(-80.01, 40.44), (-79.93, 40.44)]).__geo_interface__)],
+        [
+            "r1",
+            "pittsburgh",
+            "bike_lanes",
+            json.dumps(LineString([(-80.01, 40.44), (-79.93, 40.44)]).__geo_interface__),
+        ],
     )
     boundaries = tiger.normalize_place_frame(_place_gdf(), "tl_2026_42_place.shp")
     tiger._replace_table("place_boundaries", boundaries)

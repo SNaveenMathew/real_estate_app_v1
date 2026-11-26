@@ -629,9 +629,9 @@ def _build_transit_route_bridge(boundary_table: str, boundary_key: str, bridge_t
             geometry=shapely.from_geojson(routes["geometry_json"].astype(str).to_numpy()),
             crs="EPSG:4326",
         )
-        routes_gdf = routes_gdf[
-            routes_gdf.geometry.notna() & ~routes_gdf.geometry.is_empty
-        ].drop_duplicates(subset=["route_uid"])
+        routes_gdf = routes_gdf[routes_gdf.geometry.notna() & ~routes_gdf.geometry.is_empty].drop_duplicates(
+            subset=["route_uid"]
+        )
         if routes_gdf.empty:
             continue
         routes_m = routes_gdf.to_crs("EPSG:5070")

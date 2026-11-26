@@ -124,7 +124,9 @@ def _sample_shape(table: str, expr: str, limit: int = 200) -> tuple[str, list[st
     return _shape(values), values[:3]
 
 
-def _measure(left_table: str, left_expr: str, right_table: str, right_expr: str, scope: list[str] | None = None) -> dict:
+def _measure(
+    left_table: str, left_expr: str, right_table: str, right_expr: str, scope: list[str] | None = None
+) -> dict:
     l = _q(left_expr, left_table)
     r = _q(right_expr, right_table)
     scope_sql = ""
@@ -199,8 +201,7 @@ def audit_relationship(rel, report: Report) -> None:
             report.add(
                 "error",
                 label,
-                f"incompatible key types: {rel.left_table}.{left_col} is {lt}, "
-                f"{rel.right_table}.{right_col} is {rt}",
+                f"incompatible key types: {rel.left_table}.{left_col} is {lt}, {rel.right_table}.{right_col} is {rt}",
             )
             return
 
@@ -315,16 +316,15 @@ def audit_relationship(rel, report: Report) -> None:
 
 def _matches_at_any_level(rel) -> str:
     """Which region_type level makes this relationship match, when one side is a multi-level dataset."""
-    table = rel.left_table if rel.left_table in _MULTI_LEVEL else rel.right_table if rel.right_table in _MULTI_LEVEL else ""
+    table = (
+        rel.left_table if rel.left_table in _MULTI_LEVEL else rel.right_table if rel.right_table in _MULTI_LEVEL else ""
+    )
     if not table:
         return ""
     l, r = _q(rel.left_expr, rel.left_table), _q(rel.right_expr, rel.right_table)
     own = l if table == rel.left_table else r
     for level in _region_levels(table):
-        sql = (
-            f"SELECT count(*) AS n FROM {rel.left_table} l JOIN {rel.right_table} r "
-            f"ON {l} = {r} WHERE {own}"
-        )
+        sql = f"SELECT count(*) AS n FROM {rel.left_table} l JOIN {rel.right_table} r ON {l} = {r} WHERE {own}"
         try:
             if int(store.query(sql, [level]).iloc[0]["n"]) > 0:
                 return level

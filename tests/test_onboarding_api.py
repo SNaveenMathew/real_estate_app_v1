@@ -509,11 +509,7 @@ def test_the_transformation_registry_is_served_and_a_link_can_be_retested(client
 
     ds = _upload(client, blockgroup_csv, "blocks.csv")
     ds = _job_result(client, f"/api/onboarding/datasets/{ds['dataset_id']}/analyze")
-    link = next(
-        p
-        for p in ds["proposals"]
-        if p["kind"] == "relationship" and p["payload"]["right_table"] == "houses"
-    )
+    link = next(p for p in ds["proposals"] if p["kind"] == "relationship" and p["payload"]["right_table"] == "houses")
     assert link["payload"]["transform"]["left"]["kind"] == "left"
 
     # The page reviews links after the table is published; re-testing must work on the live table too.

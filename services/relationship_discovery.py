@@ -743,14 +743,18 @@ def evaluate_selection(
     src = prof.get(source_column)
     if not src:
         raise ValueError(f"Column '{source_column}' is not in {source_table}.")
-    tgt = _target_profile(conn, {}, target_table, target_column, sql_family(_column_type(conn, target_table, target_column)))
+    tgt = _target_profile(
+        conn, {}, target_table, target_column, sql_family(_column_type(conn, target_table, target_column))
+    )
     sx = tx.sql(spec, qi(source_column))
     txr = tx.target_sql(spec, qi(target_column))
     st = eval_pair(conn, source_table, sx, target_table, txr)
     ex = build_examples(conn, source_table, source_column, sx, target_table, target_column, ctx_cols or [], tx=txr)
     tested = []
     for tr in make_transforms(src, tgt):
-        s = eval_pair(conn, source_table, tx.sql(tr, qi(source_column)), target_table, tx.target_sql(tr, qi(target_column)))
+        s = eval_pair(
+            conn, source_table, tx.sql(tr, qi(source_column)), target_table, tx.target_sql(tr, qi(target_column))
+        )
         tested.append(
             {
                 **tx.normalize(tr),

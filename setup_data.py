@@ -99,7 +99,7 @@ def run_all(only: str = None, resolve_tracts: bool = False, no_geocoding: bool =
 
         schema_ddl.initialize(store.get_conn())
         result = join_health.print_report(verbose=True)
-        print('Join verification:')
+        print("Join verification:")
         print(f"Join verification: {len(result.errors)} error(s), {len(result.warnings)} warning(s)")
         return
     print("\n🏠 Real Estate Intelligence — Data Setup")

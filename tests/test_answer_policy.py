@@ -57,6 +57,7 @@ def test_query_database_never_reaches_sql_for_an_unloaded_level(fresh_db):
     assert "'metro'" in str(out)
     assert getattr(out, "kind", None) == "not_answered"
 
+
 # ---------------------------------------------------------------------------
 # Monthly datasets: which month is the question about?
 # ---------------------------------------------------------------------------

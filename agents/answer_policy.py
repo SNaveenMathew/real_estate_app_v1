@@ -76,12 +76,20 @@ def route_before_sql(plan, request: str, *, presentation: str = "auto") -> str |
 # ---------------------------------------------------------------------------
 _TIME_SERIES = ("zhvi", "market_heat_index")
 _MONTH_NAMES = (
-    "january", "february", "march", "april", "may", "june",
-    "july", "august", "september", "october", "november", "december",
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
 )
-_MONTH_YEAR_RE = re.compile(
-    r"(?<![A-Za-z])(" + "|".join(_MONTH_NAMES) + r")[ ]+((?:19|20)[0-9]{2})(?![0-9])", re.I
-)
+_MONTH_YEAR_RE = re.compile(r"(?<![A-Za-z])(" + "|".join(_MONTH_NAMES) + r")[ ]+((?:19|20)[0-9]{2})(?![0-9])", re.I)
 _ISO_DATE_RE = re.compile(r"(?<![0-9])((?:19|20)[0-9]{2})-([0-9]{1,2})(?:-([0-9]{1,2}))?(?![0-9])")
 _SINCE_RE = re.compile(r"(?<![A-Za-z])since[ ]+((?:19|20)[0-9]{2})(?![0-9])", re.I)
 _YEAR_RE = re.compile(r"(?<![0-9])((?:19|20)[0-9]{2})(?![0-9])")

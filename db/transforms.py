@@ -91,6 +91,8 @@ _BARE_COLUMN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 def _column(text: str) -> str:
     """The bare column inside a parsed expression (quoted identifiers are unquoted)."""
     return text.strip().strip('"')
+
+
 _TRIM = re.compile(r"^TRIM\((.+)\)$", re.I)
 _CASED_TRIM = re.compile(r"^(LOWER|UPPER)\(TRIM\((.+)\)\)$", re.I)
 _LPAD = re.compile(r"^LPAD\(TRIM\((.+)\),\s*([0-9]+),\s*'0'\)$", re.I)
@@ -263,6 +265,10 @@ def pair(spec: dict, source_column: str, target_column: str) -> dict:
     spec = normalize(spec)
     return {
         "left": {**spec, "column": source_column},
-        "right": ({"kind": "ci", "column": target_column} if spec["kind"] == "ci" else {"kind": "identity", "column": target_column}),
+        "right": (
+            {"kind": "ci", "column": target_column}
+            if spec["kind"] == "ci"
+            else {"kind": "identity", "column": target_column}
+        ),
         "rule": rule_text(spec, source_column),
     }

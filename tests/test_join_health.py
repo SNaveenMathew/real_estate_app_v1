@@ -44,9 +44,7 @@ def test_audit_flags_a_join_that_fans_out(fresh_db):
         "INSERT INTO transit_ridership (ntd_id, agency, mode, tos, date, upt) "
         "VALUES ('00001', 'A', 'MB', 'DO', DATE '2020-01-01', 10)"
     )
-    naive = Relationship(
-        "transit_ridership", "ntd_id", "transit_agencies", "ntd_id", "naive join", "many-to-one"
-    )
+    naive = Relationship("transit_ridership", "ntd_id", "transit_agencies", "ntd_id", "naive join", "many-to-one")
 
     report = join_health.Report()
     join_health.audit_relationship(naive, report)

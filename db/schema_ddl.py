@@ -767,7 +767,9 @@ def repair_ct_tract_codes(conn: duckdb.DuckDBPyConnection, *, force: bool = Fals
         ).fetchall()
         if not moves:
             return 0
-        conn.executemany("UPDATE census_tracts SET tract_fips = ? WHERE tract_fips = ?", [[new, old] for old, new in moves])
+        conn.executemany(
+            "UPDATE census_tracts SET tract_fips = ? WHERE tract_fips = ?", [[new, old] for old, new in moves]
+        )
         return len(moves)
     except Exception:
         return 0  # a table this build does not have
@@ -802,9 +804,9 @@ def backfill_house_msa_codes(conn: duckdb.DuckDBPyConnection, *, force: bool = F
               AND c.state_fips || c.county_fips = LEFT(houses.tract_fips, 5)
             """
         )
-        left = conn.execute(
-            "SELECT COUNT(*) FROM houses WHERE msa_code IS NULL AND tract_fips IS NOT NULL"
-        ).fetchone()[0]
+        left = conn.execute("SELECT COUNT(*) FROM houses WHERE msa_code IS NULL AND tract_fips IS NOT NULL").fetchone()[
+            0
+        ]
         return int(pending - left)
     except Exception:
         return 0

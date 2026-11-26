@@ -137,11 +137,7 @@ def tiger_boundary_paths(kind: str) -> list[Path]:
     data_root = Path(settings.data_dir)
     if data_root.exists():
         for child in data_root.iterdir():
-            if (
-                child.is_file()
-                and child.suffix.lower() in (".shp", ".zip")
-                and kind in child.name.lower()
-            ):
+            if child.is_file() and child.suffix.lower() in (".shp", ".zip") and kind in child.name.lower():
                 paths.add(child)
 
     unique: dict[str, Path] = {}
@@ -473,9 +469,7 @@ def _build_route_boundary_bridge(boundary_table: str, key_col: str, bridge_table
         geometry=shapely.from_geojson(boundaries["geometry_json"].astype(str).to_numpy()),
         crs="EPSG:4326",
     )
-    boundaries_gdf = boundaries_gdf[
-        boundaries_gdf.geometry.notna() & ~boundaries_gdf.geometry.is_empty
-    ].copy()
+    boundaries_gdf = boundaries_gdf[boundaries_gdf.geometry.notna() & ~boundaries_gdf.geometry.is_empty].copy()
     boundaries_gdf = boundaries_gdf.drop_duplicates(subset=[key_col])
     if boundaries_gdf.empty:
         conn.execute(f"DELETE FROM {bridge_table}")

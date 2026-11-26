@@ -964,7 +964,9 @@ async def _check_one_link(client: httpx.AsyncClient, source: "DataSource") -> di
         "blocked": blocked,
         "status": resp.status_code,
         "redirected_to": redirected if redirected != source.source_url else None,
-        "error": f"HTTP {resp.status_code} \u2014 reachable, but it blocks automated checks." if blocked else (None if ok else f"HTTP {resp.status_code}"),
+        "error": f"HTTP {resp.status_code} \u2014 reachable, but it blocks automated checks."
+        if blocked
+        else (None if ok else f"HTTP {resp.status_code}"),
     }
 
 
@@ -1269,9 +1271,7 @@ def _extract_fta_routes_zip(tmp_path: Path, dest_dir: Path, expected_shp: Path) 
                 if not base:
                     continue
                 member_stem, ext = Path(base).stem, Path(base).suffix
-                out_name = (
-                    f"{expected_stem}{ext.lower()}" if member_stem.lower() == stem_in_zip and ext else base
-                )
+                out_name = f"{expected_stem}{ext.lower()}" if member_stem.lower() == stem_in_zip and ext else base
                 out_path = dest_dir / out_name
                 with zf.open(member) as src, open(out_path, "wb") as dst:
                     shutil.copyfileobj(src, dst)

@@ -260,7 +260,5 @@ def load_bike_route_tracts() -> int:
         conn.execute("ROLLBACK")
         raise
 
-    print(
-        f"  ✓ {len(out):,} route/tract overlaps across {out['route_id'].nunique() if not out.empty else 0:,} routes"
-    )
+    print(f"  ✓ {len(out):,} route/tract overlaps across {out['route_id'].nunique() if not out.empty else 0:,} routes")
     return len(out)

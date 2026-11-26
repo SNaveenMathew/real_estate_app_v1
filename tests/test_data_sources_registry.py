@@ -103,11 +103,7 @@ def test_direct_download_sources_have_no_leftover_navigation_language():
 
 
 def test_every_source_has_a_captured_source_link():
-    missing = [
-        key
-        for key, source in REGISTRY.items()
-        if not source.source_url.startswith(("http://", "https://"))
-    ]
+    missing = [key for key, source in REGISTRY.items() if not source.source_url.startswith(("http://", "https://"))]
     assert not missing, f"data sources without a source URL: {missing}"
 
 
@@ -194,9 +190,7 @@ def test_fta_routes_zip_is_staged_as_the_loader_shapefile(tmp_path):
     dest_dir = tmp_path / "connections"
     dest_dir.mkdir()
 
-    shp, written = ds._extract_fta_routes_zip(
-        archive, dest_dir, dest_dir / "National_Transit_Map_Routes.shp"
-    )
+    shp, written = ds._extract_fta_routes_zip(archive, dest_dir, dest_dir / "National_Transit_Map_Routes.shp")
 
     assert shp == dest_dir / "National_Transit_Map_Routes.shp"
     assert (dest_dir / "National_Transit_Map_Routes.dbf").exists()
@@ -209,9 +203,7 @@ def test_fta_route_uid_is_stable_across_refreshes():
     assert _route_uid("00001", "feed", "R1", "S1") == _route_uid("00001", "feed", "R1", "S1")
     assert _route_uid("00001", "feed", "R1", "S1") != _route_uid("00001", "feed", "R1", "S2")
     # Feeds can publish several segments with the same IDs; geometry keeps them distinct.
-    assert _route_uid("00001", "feed", "R1", "S1", "line-a") != _route_uid(
-        "00001", "feed", "R1", "S1", "line-b"
-    )
+    assert _route_uid("00001", "feed", "R1", "S1", "line-a") != _route_uid("00001", "feed", "R1", "S1", "line-b")
     assert _route_uid("00001", "feed", "R1", "S1", "line-a", '{"name":"A"}') != _route_uid(
         "00001", "feed", "R1", "S1", "line-a", '{"name":"B"}'
     )

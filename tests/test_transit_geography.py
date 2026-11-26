@@ -48,9 +48,9 @@ def test_transit_route_place_bridge_counts_positive_length_and_fraction(fresh_db
     tiger._replace_table("place_boundaries", boundaries)
 
     assert transit.load_transit_route_places() == 1
-    row = store.query(
-        "SELECT route_uid, place_geoid, overlap_m, route_fraction FROM transit_route_places"
-    ).to_dict("records")[0]
+    row = store.query("SELECT route_uid, place_geoid, overlap_m, route_fraction FROM transit_route_places").to_dict(
+        "records"
+    )[0]
     assert row["route_uid"] == "r1"
     assert row["place_geoid"] == "4261000"
     assert row["overlap_m"] > 1

@@ -273,11 +273,7 @@ def test_join_transformations_are_first_class_nodes_and_edges(reference_data):
         assert node["label"] and node["description"] and node["sql_pattern"]
         assert isinstance(node["needs_width"], bool)
 
-    city = next(
-        e
-        for e in doc["edges"]
-        if e["predicate"] == "joins" and e.get("left_expr") == "lower(trim(city))"
-    )
+    city = next(e for e in doc["edges"] if e["predicate"] == "joins" and e.get("left_expr") == "lower(trim(city))")
     assert city["join_key"] == "houses.lower(trim(city))=transit_agencies.lower(trim(hq_city))"
     assert city["transform"]["left"] == {
         "kind": "lower",
@@ -297,7 +293,9 @@ def test_join_transformations_are_first_class_nodes_and_edges(reference_data):
 
     # A composite key is still represented honestly, as the expression transform rather than a
     # guessed simple rule; the expression remains authoritative for query generation.
-    composite = next(e for e in doc["edges"] if e["predicate"] == "joins" and "state_fips || county_fips" in e["left_expr"])
+    composite = next(
+        e for e in doc["edges"] if e["predicate"] == "joins" and "state_fips || county_fips" in e["left_expr"]
+    )
     assert composite["transform"]["left"]["kind"] == "expression"
     assert any(
         e["predicate"] == "transformed_by"
@@ -305,9 +303,7 @@ def test_join_transformations_are_first_class_nodes_and_edges(reference_data):
         and e["relationship"] == composite["key"]
         for e in doc["edges"]
     )
-    assert any(
-        item["relationship"] == composite["join_key"] for item in doc["coverage"]["custom_expressions"]
-    )
+    assert any(item["relationship"] == composite["join_key"] for item in doc["coverage"]["custom_expressions"])
 
 
 def test_rich_table_column_concept_and_entity_metadata_is_preserved(reference_data):

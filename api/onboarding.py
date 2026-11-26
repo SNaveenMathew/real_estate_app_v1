@@ -125,12 +125,10 @@ def onboarding_health():
             "checked": report.checked,
             "skipped": report.skipped,
             "errors": [
-                {"relationship": f.relationship, "message": f.message, "severity": f.severity}
-                for f in report.errors
+                {"relationship": f.relationship, "message": f.message, "severity": f.severity} for f in report.errors
             ],
             "warnings": [
-                {"relationship": f.relationship, "message": f.message, "severity": f.severity}
-                for f in report.warnings
+                {"relationship": f.relationship, "message": f.message, "severity": f.severity} for f in report.warnings
             ],
         },
     }

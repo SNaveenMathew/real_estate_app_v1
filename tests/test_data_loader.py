@@ -269,8 +269,7 @@ def test_load_redfin_fills_msa_code_while_loading_houses(fresh_db, tmp_path, mon
     redfin_dir = tmp_path / "redfin"
     redfin_dir.mkdir()
     (redfin_dir / "redfin_2024-01-15.csv").write_text(
-        "address,city,state,zip,price,lat,lon\n"
-        "1 Elm Street,New Haven,CT,06511,250000,41.3083,-72.9279\n",
+        "address,city,state,zip,price,lat,lon\n1 Elm Street,New Haven,CT,06511,250000,41.3083,-72.9279\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(settings, "redfin_dir", redfin_dir)
