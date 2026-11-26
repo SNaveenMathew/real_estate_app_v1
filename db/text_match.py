@@ -90,3 +90,94 @@ def has_phrase(text: str, alias: str) -> bool:
     if not a:
         return False
     return a in index_for(normalize(text)).grams(a.count(" ") + 1)
+
+
+def stem_token(token: str) -> str:
+    """Conservative plural/inflection stemmer used only for fallback matching (never alters ``normalize``)."""
+    t = token.lower()
+    if len(t) <= 3 or t.isdigit():
+        return t
+    if t.endswith("ies") and len(t) > 4:
+        return t[:-3] + "y"
+    if t.endswith(("ses", "xes", "zes", "ches", "shes")) and len(t) > 5:
+        return t[:-2]
+    if t.endswith("s") and not t.endswith(("ss", "us", "is", "as")):
+        return t[:-1]
+    return t
+
+
+def damerau_distance(a: str, b: str, max_dist: int = 2) -> int:
+    """Optimal string alignment (bounded Damerau-Levenshtein) distance, early-exiting past ``max_dist``."""
+    la, lb = len(a), len(b)
+    if abs(la - lb) > max_dist:
+        return max_dist + 1
+    if a == b:
+        return 0
+    prev2 = list(range(lb + 1))
+    prev1 = list(range(lb + 1))
+    for i in range(1, la + 1):
+        curr = [i] + [max_dist + 1] * lb
+        row_min = curr[0]
+        ai = a[i - 1]
+        for j in range(1, lb + 1):
+            cost = 0 if ai == b[j - 1] else 1
+            best = min(curr[j - 1] + 1, prev1[j] + 1, prev1[j - 1] + cost)
+            if i > 1 and j > 1 and ai == b[j - 2] and a[i - 2] == b[j - 1]:
+                best = min(best, prev2[j - 2] + 1)
+            curr[j] = best
+            if best < row_min:
+                row_min = best
+        if row_min > max_dist:
+            return max_dist + 1
+        prev2, prev1 = prev1, curr
+    return prev1[lb]
+
+
+def repair_typos(
+    text: str,
+    vocab: set[str] | frozenset[str],
+    *,
+    protected: set[str] | frozenset[str] = (),
+) -> tuple[str, bool]:
+    """Repair clear out-of-vocabulary spelling typos (e.g. transpositions like ``hosues`` -> ``houses``).
+
+    Returns ``(normalized_text, changed)``. Common English words in ``protected`` and tokens already in
+    ``vocab`` are never altered, guaranteeing zero drift on well-spelled queries.
+    """
+    normed = normalize(text)
+    if not normed:
+        return "", False
+    tokens = normed.split()
+    out: list[str] = []
+    changed = False
+    buckets: dict[int, list[str]] = {}
+    for w in vocab:
+        if len(w) >= 5:
+            buckets.setdefault(len(w), []).append(w)
+
+    for tok in tokens:
+        # Never treat a regular English plural (e.g. "scores" when "score" is in vocab) as a spelling typo.
+        if tok in vocab or stem_token(tok) in vocab or tok in protected or len(tok) < 5 or tok.isdigit():
+            out.append(tok)
+            continue
+        limit = 1
+        cands: list[str] = []
+        for length in range(max(5, len(tok) - limit), len(tok) + limit + 1):
+            cands.extend(buckets.get(length, ()))
+        best_dist = limit + 1
+        winners: list[str] = []
+        for cand in cands:
+            d = damerau_distance(tok, cand, max_dist=limit)
+            if d > limit:
+                continue
+            if d < best_dist:
+                best_dist = d
+                winners = [cand]
+            elif d == best_dist:
+                winners.append(cand)
+        if len(winners) == 1:
+            out.append(winners[0])
+            changed = True
+        else:
+            out.append(tok)
+    return (" ".join(out), changed)

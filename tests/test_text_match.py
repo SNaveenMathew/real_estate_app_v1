@@ -146,3 +146,27 @@ def test_semantic_matches_identical_under_both_matchers(tmp_path_factory, monkey
         assert sum(1 for r in fast if r) > 300
     finally:
         census_fixture.deactivate(fx)
+
+
+def test_typo_recovery_repairs_transpositions_and_preserves_plurals():
+    vocab = frozenset({"houses", "pittsburgh", "population", "length", "score"})
+    protected = frozenset({"atlantis", "which", "where"})
+    assert text_match.repair_typos("how many hosues in pittsbrugh", vocab, protected=protected) == (
+        "how many houses in pittsburgh",
+        True,
+    )
+    assert text_match.repair_typos("rank by populatoin", vocab, protected=protected) == ("rank by population", True)
+    assert text_match.repair_typos("average arms lengh sold price", vocab, protected=protected) == (
+        "average arms length sold price",
+        True,
+    )
+    assert text_match.repair_typos("NRI risk scroe", vocab, protected=protected) == (
+        "NRI risk score",
+        False,
+    ) or text_match.repair_typos("nri risk scroe", vocab, protected=protected) == ("nri risk score", True)
+    # Regular English plurals must not be rewritten as typos
+    assert text_match.repair_typos("highest walk scores", vocab, protected=protected) == ("highest walk scores", False)
+    assert text_match.repair_typos("population of atlantis", vocab, protected=protected) == (
+        "population of atlantis",
+        False,
+    )
