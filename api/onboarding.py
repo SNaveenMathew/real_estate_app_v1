@@ -9,6 +9,7 @@
     POST /api/onboarding/datasets/{id}/enrich      opt-in: tract from lat/lon, or geocode addresses
     POST /api/onboarding/datasets/{id}/analyze     propose the table + relationships, with evidence
     POST /api/onboarding/proposals/{id}/decision   approve / reject (approval applies immediately)
+    POST /api/onboarding/proposals/{id}/transform   re-test a pending link with another simple transformation
     POST /api/onboarding/relationships/revoke      undo an approved relationship
     POST /api/onboarding/datasets/{id}/retire      retire a published dataset / discard a draft
     GET  /api/onboarding/llm/status                the catalog model router
@@ -18,7 +19,7 @@ Threading: DuckDB access needs no event loop - db/duckdb_store.py hands every th
 own cursor on the shared database, so a plain ``def`` handler simply runs in FastAPI's
 worker pool. The short catalog reads and writes below are exactly that.
 
-The ingest path is different: saving a 250 MB upload, profiling it, proposing relationships
+The ingest path is different: saving a large dataset upload, profiling it, proposing relationships
 across the whole catalog and enriching thousands of rows take seconds to minutes, and doing
 that on the event loop froze every map pan and chat turn behind it. Those blocks therefore
 stay in ``async`` handlers and are handed to a worker thread with ``asyncio.to_thread``, so
@@ -41,6 +42,7 @@ from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException,
 
 import db.duckdb_store as store
 import db.schema_catalog as schema
+import db.transforms as tx
 from api.uploads import sanitize_filename, save_stream
 from config import settings
 from services import catalog_llm
@@ -71,7 +73,7 @@ def _warm_index() -> None:
 
 
 def _max_upload_bytes() -> int:
-    return int(getattr(settings, "onboarding_max_upload_mb", 250)) * 1024 * 1024
+    return int(getattr(settings, "onboarding_max_upload_mb", 600)) * 1024 * 1024
 
 
 def _start_job(kind: str, label: str, fn):
@@ -102,15 +104,48 @@ def get_catalog(dataset_id: str | None = None):
     return out
 
 
+@router.get("/health")
+def onboarding_health():
+    """Physical + semantic onboarding health, separate from metadata completeness.
+
+    ``db/ontology`` answers whether every visible table has a concept and a join;
+    this endpoint adds whether the physical table is populated and whether each
+    relationship resolves after its level/period scope is applied.  Keeping the
+    two answers separate stops an empty bridge from being reported as a complete
+    model just because its catalog row exists.
+    """
+    from db import join_health, ontology
+
+    store.get_conn()
+    doc = ontology.build_ontology()
+    report = join_health.report()
+    return {
+        "coverage": doc.get("coverage", {}),
+        "join_health": {
+            "checked": report.checked,
+            "skipped": report.skipped,
+            "errors": [
+                {"relationship": f.relationship, "message": f.message, "severity": f.severity}
+                for f in report.errors
+            ],
+            "warnings": [
+                {"relationship": f.relationship, "message": f.message, "severity": f.severity}
+                for f in report.warnings
+            ],
+        },
+    }
+
+
 @router.get("/datasets")
 def get_datasets():
     store.get_conn()
     return {
         "datasets": ob.list_datasets(),
         "formats": readers.SUPPORTED_EXTENSIONS,
-        "max_upload_mb": int(getattr(settings, "onboarding_max_upload_mb", 250)),
+        "max_upload_mb": int(getattr(settings, "onboarding_max_upload_mb", 600)),
         "domains": [{"key": k, "label": schema.DOMAIN_LABELS[k]} for k in ob.VALID_DOMAINS],
         "roles": list(ob.VALID_ROLES),
+        "transforms": tx.options(),
     }
 
 
@@ -238,6 +273,24 @@ async def decide(proposal_id: str, background: BackgroundTasks, payload: dict = 
     if payload.get("decision") == "approve":
         background.add_task(_warm_index)
     return out
+
+
+@router.get("/transforms")
+def get_transforms():
+    """The simple key transformations the Data page may offer (see db/transforms.py)."""
+    return {"transforms": tx.options()}
+
+
+@router.post("/proposals/{proposal_id}/transform")
+def retest_transform(proposal_id: str, payload: dict = Body(...)):
+    """Re-measure a pending link with the chosen transformation; nothing is applied yet."""
+    store.get_conn()
+    return _call(
+        ob.retest_transform,
+        proposal_id,
+        str(payload.get("kind", "")),
+        payload.get("width"),
+    )
 
 
 @router.post("/relationships/revoke")

@@ -69,6 +69,16 @@ def test_data_page_and_assets_are_served_with_cache_busting(client):
     assert "/data" in client.get("/").text  # the map app links to it
 
 
+def test_onboarding_health_separates_metadata_from_physical_join_health(client):
+    response = client.get("/api/onboarding/health")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert "tables" in body["coverage"] and "data_gaps" in body["coverage"]
+    assert body["join_health"]["checked"] >= 0
+    for finding in body["join_health"]["errors"] + body["join_health"]["warnings"]:
+        assert finding["relationship"] and finding["message"] and finding["severity"]
+
+
 def test_data_sources_are_listed_and_validate_refresh_uploads(client):
     response = client.get("/api/data-sources")
     assert response.status_code == 200
@@ -488,3 +498,34 @@ def test_data_source_health_check_endpoint_reports_reachable_and_broken_links(cl
     assert response.status_code == 200, response.text
     results = response.json()["results"]
     assert {r["key"]: r["ok"] for r in results} == {"redfin": True, "cbsa": False}
+
+
+def test_the_transformation_registry_is_served_and_a_link_can_be_retested(client, blockgroup_csv):
+    registry = client.get("/api/onboarding/transforms")
+    assert registry.status_code == 200
+    kinds = {t["kind"] for t in registry.json()["transforms"]}
+    assert {"identity", "trim", "ci", "zfill", "left", "right", "digits"} <= kinds
+    assert "transforms" in client.get("/api/onboarding/datasets").json()  # the page loads them once
+
+    ds = _upload(client, blockgroup_csv, "blocks.csv")
+    ds = _job_result(client, f"/api/onboarding/datasets/{ds['dataset_id']}/analyze")
+    link = next(
+        p
+        for p in ds["proposals"]
+        if p["kind"] == "relationship" and p["payload"]["right_table"] == "houses"
+    )
+    assert link["payload"]["transform"]["left"]["kind"] == "left"
+
+    # The page reviews links after the table is published; re-testing must work on the live table too.
+    table = next(p for p in ds["proposals"] if p["kind"] == "table")
+    approved = client.post(f"/api/onboarding/proposals/{table['proposal_id']}/decision", json={"decision": "approve"})
+    assert approved.status_code == 200, approved.text
+
+    r = client.post(
+        f"/api/onboarding/proposals/{link['proposal_id']}/transform",
+        json={"kind": "right", "width": 11},
+    )
+    assert r.status_code == 200, r.text
+    updated = next(p for p in r.json()["proposals"] if p["proposal_id"] == link["proposal_id"])
+    assert updated["payload"]["transform"]["left"] == {"kind": "right", "width": 11, "column": "geoid20"}
+    assert updated["evidence"]["stats"]["left_match_pct"] == 0.0  # measured, not assumed

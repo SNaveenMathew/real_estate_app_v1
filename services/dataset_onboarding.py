@@ -25,6 +25,7 @@ import pandas as pd
 
 import db.duckdb_store as store
 import db.schema_catalog as schema
+import db.transforms as tx
 from config import settings
 from db import catalog_store
 from db.catalog_model import (
@@ -1024,6 +1025,16 @@ def _approve_relationship(conn, ds: dict, prop: dict, note: str, edits: dict) ->
         pl["preferred"] = bool(edits["preferred"])
     if pl["cardinality"] not in {"one-to-one", "many-to-one", "one-to-many", "many-to-many"}:
         raise OnboardingError("Cardinality must be one-to-one, many-to-one, one-to-many or many-to-many.")
+    derive = pl.get("derive")
+    transform_meta = pl.get("transform")
+    if not isinstance(transform_meta, dict) and isinstance(derive, dict) and derive.get("kind") == "address_house":
+        transform_meta = {
+            "left": {"kind": "address", "column": derive.get("column") or "house_id"},
+            "right": {"kind": "identity", "column": "house_id"},
+            "rule": derive.get("rule", ""),
+        }
+    if not isinstance(transform_meta, dict) and derive and isinstance(derive.get("transform"), dict):
+        transform_meta = tx.pair(derive["transform"], derive.get("from") or pl["left_expr"], tx.column_of(pl["right_expr"]))
     rel = Relationship(
         left_table=pl["left_table"],
         left_expr=pl["left_expr"],
@@ -1037,8 +1048,8 @@ def _approve_relationship(conn, ds: dict, prop: dict, note: str, edits: dict) ->
         grain_effect=pl.get("grain_effect", ""),
         origin="upload",
         dataset_id=ds["dataset_id"],
+        transform=transform_meta if isinstance(transform_meta, dict) else {},
     )
-    derive = pl.get("derive")
     with schema.catalog_transaction():
         if derive:
             _materialize(conn, pl["left_table"], derive)
@@ -1136,6 +1147,170 @@ def discard_draft(dataset_id: str) -> dict:
     catalog_store.replace_proposals(conn, dataset_id, [])
     catalog_store.audit(conn, "discard_dataset", "dataset", dataset_id, {})
     return {"discarded": dataset_id}
+
+
+def retest_transform(proposal_id: str, kind: str, width: int | None = None) -> dict:
+    """Re-measure a pending link proposal with a different simple transformation.
+
+    The Data page calls this when a reviewer picks another rule from the registry: the choice is
+    evaluated on the real data (match rates, fan-out, examples) and the proposal is rewritten with
+    those numbers.  Nothing reaches the catalog until the link is approved, and approval
+    materialises exactly the column this evidence describes.
+    """
+    conn = _conn()
+    prop = catalog_store.get_proposal(conn, proposal_id)
+    if not prop:
+        raise OnboardingError("Proposal not found.", 404)
+    if prop["kind"] != "relationship":
+        raise OnboardingError("Only a link proposal has a transformation.", 400)
+    if prop["status"] != "pending":
+        raise OnboardingError(f"This proposal was already {prop['status']}.", 409)
+    ds = _get(prop["dataset_id"])
+    pl = dict(prop["payload"])
+    ev = dict(prop["evidence"])
+    if (ev.get("transform") or {}).get("kind") == "address":
+        raise OnboardingError("Address matching uses a fixed normalisation; it cannot be swapped.", 400)
+    try:
+        spec = tx.normalize({"kind": kind, "width": width})
+    except ValueError as exc:
+        raise OnboardingError(str(exc), 400) from exc
+
+    source = ds["staging_table"] or ds["table_name"]
+    source_column = (
+        ev.get("source_column")
+        or (pl.get("derive") or {}).get("from")
+        or tx.column_of(pl.get("left_expr") or "")
+    )
+    target_table = pl["right_table"]
+    target_column = ev.get("target_column") or tx.column_of(pl.get("right_expr") or "")
+    included = [c for c in ds["columns"] if c.get("include", True)]
+    ctx_cols = (
+        [c["name"] for c in included if c.get("role") == "measure"]
+        + [c["name"] for c in included if c.get("role") == "label" and c.get("key_kind") in ("city", "address")]
+    )[:3]
+    try:
+        result = disc.evaluate_selection(
+            conn, source, source_column, target_table, target_column, spec, ctx_cols
+        )
+    except ValueError as exc:
+        raise OnboardingError(str(exc), 400) from exc
+
+    st = result["stats"]
+    card = disc.cardinality_of(st)
+    score = disc.containment_score(st)
+    ns = float(pl.get("name_score") or 0.0)
+    conf = "high" if score >= 0.9 and (st["matched_distinct"] >= 3 or ns >= 0.9) else ("medium" if score >= 0.6 else "low")
+
+    current_derive = pl.get("derive") or {}
+    # Reuse the proposal's own derived column while it is still only a proposal (so switching
+    # rules does not litter the table with *_norm2 names).  A column that already exists on the
+    # table is never reused: it may hold values computed with the previous rule.
+    occupied = {r[0] for r in conn.execute(f"DESCRIBE {qi(source)}").fetchall()}
+    reuse = (
+        current_derive.get("column")
+        if current_derive.get("from") == source_column and current_derive.get("column") not in occupied
+        else None
+    )
+    taken = {c["name"] for c in ds["columns"]}
+    taken |= {
+        p["payload"].get("left_expr")
+        for p in catalog_store.list_proposals(conn, ds["dataset_id"])
+        if p["proposal_id"] != proposal_id and p["payload"].get("left_expr")
+    }
+    taken.discard(reuse)
+    if spec["kind"] == "identity":
+        left_expr, derive = source_column, None
+    else:
+        column = reuse or disc.derived_column_name(taken, target_column)
+        derive = {
+            "kind": "sql",
+            "column": column,
+            "from": source_column,
+            "transform": spec,
+            "sql": tx.sql(spec, qi(source_column)),
+            "rule": tx.rule_text(spec, source_column),
+        }
+        left_expr = column
+
+    right_expr = result["right_expr"]
+    warnings = []
+    if card == "many-to-many":
+        warnings.append(
+            "Rows on both sides repeat this key, so joining multiplies rows (for example, several "
+            "records of yours per house). Averages over the joined result weight each record equally."
+        )
+    if st["fanout_max"] > 100:
+        warnings.append(
+            f"One key matches up to {st['fanout_max']:,} rows in {target_table}; averages over the joined result are weighted by that repetition."
+        )
+    if score < 0.6:
+        warnings.append("Fewer than 60% of values match; check that the key's format is what you expect.")
+    if derive:
+        warnings.append(
+            f"A new column '{left_expr}' will be added to {pl['left_table']} ({tx.rule_text(spec, source_column).lower()})."
+        )
+
+    direction = (
+        "of your distinct values exist in the target"
+        if st["left_match_pct"] >= st["right_covered_pct"]
+        else "of target rows have a match in your data"
+    )
+    pl.update(
+        {
+            "left_expr": left_expr,
+            "right_expr": right_expr,
+            "derive": derive,
+            "transform": tx.pair(spec, source_column, target_column),
+            "cardinality": card,
+            "confidence": conf,
+            "preferred": (conf in ("high", "medium") and card != "many-to-many") or (conf == "high" and ns >= 0.9),
+            "grain_effect": f"{pl['left_table']} row -> {target_table} row(s)",
+            "note": f"{disc._explain(spec, source_column, target_table, right_expr)}.",
+            "score": round(score, 3),
+        }
+    )
+    ev.update(
+        {
+            "stats": st,
+            "transform": {**spec, "label": tx.label(spec)},
+            "rule_text": tx.rule_text(spec, source_column),
+            "options": result["options"],
+            "examples": result["examples"],
+            "unmatched": result["unmatched"],
+            "target": f"{target_table}.{right_expr}",
+            "target_column": target_column,
+            "target_columns": result["target_columns"],
+            "warnings": warnings,
+            "source_column": source_column,
+        }
+    )
+    title = f"{pl['left_table']}.{left_expr} joins {target_table}.{right_expr}"
+    summary = (
+        f"Each {pl['left_table']} row links to the {target_table} rows where "
+        f"{disc._explain(spec, source_column, target_table, right_expr)}. "
+        f"{max(st['left_match_pct'], st['right_covered_pct']):g}% {direction}."
+    )
+    with schema.catalog_transaction():
+        catalog_store.update_proposal(
+            conn,
+            proposal_id,
+            payload=pl,
+            evidence=ev,
+        )
+        conn.execute(
+            "UPDATE catalog_proposals SET title = ?, summary = ?, group_key = ? WHERE proposal_id = ?",
+            [title, summary, f"{source_column}|{tx.key(spec)}", proposal_id],
+        )
+        catalog_store.audit(
+            conn,
+            "retest_transform",
+            "proposal",
+            proposal_id,
+            {"kind": spec["kind"], "width": spec.get("width"), "score": round(score, 3)},
+        )
+    out = detail(prop["dataset_id"])
+    out["decided"] = catalog_store.get_proposal(conn, proposal_id)
+    return out
 
 
 # ---------------------------------------------------------------------------

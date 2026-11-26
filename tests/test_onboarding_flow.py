@@ -294,3 +294,47 @@ def test_editing_the_description_invalidates_stale_proposals(reference_data, blo
     assert any(p["status"] == "pending" for p in ds["proposals"])
     ds = ob.update_description(ds["dataset_id"], {"grain": "one row per block group"})
     assert ds["proposals"] == []
+
+
+def test_a_reviewer_can_swap_the_transformation_and_it_is_remeasured(reference_data, tmp_path):
+    p = tmp_path / "city_stats.csv"
+    pd.DataFrame(
+        {"City": ["PITTSBURGH", "PHILADELPHIA", "CLEVELAND", "DENVER"], "Median Rent": [1500, 1700, 1100, 2000]}
+    ).to_csv(p, index=False)
+    ds = ob.analyze(ob.create_dataset(p, "city_stats.csv")["dataset_id"])
+    link = _link(ds, "houses", right_expr="UPPER(TRIM(city))")
+    assert link["payload"]["transform"]["left"]["kind"] == "ci"
+    assert {"identity", "trim", "ci"} <= {o["kind"] for o in link["evidence"]["options"]}
+
+    # A weaker rule is measured on the real data, with the same proposal and derived column.
+    out = ob.retest_transform(link["proposal_id"], "trim")
+    link = next(x for x in out["proposals"] if x["proposal_id"] == link["proposal_id"])
+    assert link["payload"]["left_expr"] == "city_norm" and link["payload"]["derive"]["transform"] == {"kind": "trim"}
+    assert link["evidence"]["stats"]["right_covered_pct"] == 0.0 and link["evidence"]["examples"] == []
+
+    # Back to the rule that matches: the evidence and the plan expression follow the choice.
+    out = ob.retest_transform(link["proposal_id"], "ci")
+    link = next(x for x in out["proposals"] if x["proposal_id"] == link["proposal_id"])
+    assert link["payload"]["left_expr"] == "city_norm"
+    assert link["payload"]["right_expr"] == "UPPER(TRIM(city))"
+    assert link["evidence"]["stats"]["right_covered_pct"] == 100.0
+
+    ob.decide(_table(out)["proposal_id"], "approve")
+    ob.decide(link["proposal_id"], "approve")
+    rel = next(r for r in schema.RELATIONSHIPS if r.key().startswith("city_stats:"))
+    assert rel.transform["left"]["kind"] == "ci" and rel.transform["right"]["kind"] == "ci"
+    assert "UPPER(TRIM(houses.city))" in schema.house_link_plan("city_stats")["sql"]
+
+    # Retrospective path: an approved upload whose metadata predates this record is rebuilt
+    # from its approved proposal, not guessed from the derived column name.
+    import db.catalog_store as catalog_store
+
+    conn = reference_data  # the fixture hands back the live connection
+    conn.execute("UPDATE catalog_relationships SET transform_json = NULL WHERE rel_key LIKE 'city_stats:%'")
+    assert catalog_store.backfill_transforms(conn) == 1
+    schema.reload()
+    rel = next(r for r in schema.RELATIONSHIPS if r.key().startswith("city_stats:"))
+    assert rel.transform["left"]["kind"] == "ci" and rel.transform["right"]["kind"] == "ci"
+
+    with pytest.raises(ob.OnboardingError):
+        ob.retest_transform(link["proposal_id"], "trim")  # decided links cannot change silently

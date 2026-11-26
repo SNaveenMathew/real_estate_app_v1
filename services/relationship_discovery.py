@@ -26,6 +26,7 @@ from typing import Any
 import pandas as pd
 
 import db.schema_catalog as schema
+import db.transforms as tx
 from services.dataset_readers import qi
 from services.relationship_suggestions import suggest_pairs
 
@@ -289,50 +290,57 @@ def guess_role(name: str, p: dict, kind: str | None) -> str:
 # Value normalisations ("transforms") and their SQL
 # ---------------------------------------------------------------------------
 
-_KEY_WIDTHS = {5, 11, 12, 15}
-_SIMPLICITY = {"identity": 0, "trim": 1, "zfill": 2, "left": 3, "right": 3, "upper": 4, "lower": 4, "ci": 5}
+_KEY_WIDTHS = (5, 11, 12, 15)
+_SIMPLICITY = tx.SIMPLICITY
 
 
 def transform_sql(t: dict, ref: str) -> str:
-    k = t["kind"]
-    if k == "identity":
-        return ref
-    if k == "trim":
-        return f"TRIM({ref})"
-    if k in ("upper", "ci"):
-        return f"UPPER(TRIM({ref}))"
-    if k == "lower":
-        return f"LOWER(TRIM({ref}))"
-    if k == "zfill":
-        return f"LPAD(TRIM({ref}), {int(t['width'])}, '0')"
-    if k == "left":
-        return f"LEFT(TRIM({ref}), {int(t['width'])})"
-    if k == "right":
-        return f"RIGHT(TRIM({ref}), {int(t['width'])})"
-    raise ValueError(f"Unknown transform '{k}'")
+    return tx.sql(t, ref)
 
 
 def target_sql(t: dict, ref: str) -> str:
-    """Target-side expression a transform needs; only the case-insensitive one normalizes the target too."""
-    return f"UPPER(TRIM({ref}))" if t["kind"] == "ci" else ref
+    return tx.target_sql(t, ref)
 
 
 def transform_key(t: dict) -> str:
-    return t["kind"] + (str(t["width"]) if t.get("width") else "")
+    return tx.key(t)
 
 
 def transform_rule_text(t: dict, col: str) -> str:
-    k, w = t["kind"], t.get("width")
-    return {
-        "identity": f"Compare {col} as it is",
-        "trim": f"Trim extra spaces from {col}",
-        "ci": f"Match {col} ignoring extra spaces and letter case (both sides are normalized)",
-        "upper": f"Trim {col} and convert it to UPPER CASE",
-        "lower": f"Trim {col} and convert it to lower case",
-        "zfill": f"Pad {col} with leading zeros to {w} digits",
-        "left": f"Keep the first {w} characters of {col}",
-        "right": f"Keep the last {w} characters of {col}",
-    }[k]
+    return tx.rule_text(t, col)
+
+
+def derived_column_name(taken: set[str], base: str) -> str:
+    """An unused name for a materialised key column (the target name when it is free)."""
+    name, i = base, 2
+    while name in taken:
+        name = f"{base}_norm" if i == 2 else f"{base}_norm{i}"
+        i += 1
+    return name
+
+
+def make_transforms(src: dict, tgt: dict) -> list[dict]:
+    """Normalisations worth testing for a (source column, target column) pair.
+
+    This is the proposer's shortlist, not the full registry: every candidate costs a SQL
+    containment query, so only rules that fit the two profiles are tried.  The Data page can
+    ask for any other rule through ``evaluate_selection`` and gets it measured before approval.
+    """
+    out = [{"kind": "identity"}]
+    if src["family"] == "text" and tgt["family"] == "text":
+        if tgt.get("digit_frac", 0) >= 0.95 and tgt.get("mode_len"):
+            w = int(tgt["mode_len"])
+            smin, smax, smode = src.get("min_len") or 0, src.get("max_len") or 0, src.get("mode_len") or 0
+            if w in _KEY_WIDTHS:  # complete identifiers only (county 5, tract 11, block group 12, block 15)
+                if src.get("digit_frac", 0) >= 0.95 and smax < w and smin >= w - 2:
+                    out.append({"kind": "zfill", "width": w})
+                if smode and smode > w:
+                    out += [{"kind": "left", "width": w}, {"kind": "right", "width": w}]
+            if src.get("digit_frac", 0) < 0.95:
+                out.append({"kind": "digits"})
+        else:
+            out += [{"kind": "trim"}, {"kind": "upper"}, {"kind": "lower"}, {"kind": "ci"}]
+    return out
 
 
 def _better(cand: tuple, best: tuple, tolerance: float = 0.05) -> bool:
@@ -716,6 +724,62 @@ def _address_proposal(conn, dataset: dict, source_table: str) -> dict | None:
     }
 
 
+def evaluate_selection(
+    conn,
+    source_table: str,
+    source_column: str,
+    target_table: str,
+    target_column: str,
+    transform: dict,
+    ctx_cols: list[str] | None = None,
+) -> dict:
+    """Measure one chosen transform for a pair, with the same evidence the proposer records.
+
+    Used by the Data page when a person picks a different rule: the choice is never applied on
+    faith, it is re-measured on the real data and the proposal is updated with the new numbers.
+    """
+    spec = tx.normalize(transform)
+    prof = profile_table(conn, source_table)
+    src = prof.get(source_column)
+    if not src:
+        raise ValueError(f"Column '{source_column}' is not in {source_table}.")
+    tgt = _target_profile(conn, {}, target_table, target_column, sql_family(_column_type(conn, target_table, target_column)))
+    sx = tx.sql(spec, qi(source_column))
+    txr = tx.target_sql(spec, qi(target_column))
+    st = eval_pair(conn, source_table, sx, target_table, txr)
+    ex = build_examples(conn, source_table, source_column, sx, target_table, target_column, ctx_cols or [], tx=txr)
+    tested = []
+    for tr in make_transforms(src, tgt):
+        s = eval_pair(conn, source_table, tx.sql(tr, qi(source_column)), target_table, tx.target_sql(tr, qi(target_column)))
+        tested.append(
+            {
+                **tx.normalize(tr),
+                "label": tx.label(tr),
+                "score": round(containment_score(s), 3),
+                "left_match_pct": s["left_match_pct"],
+                "right_covered_pct": s["right_covered_pct"],
+            }
+        )
+    return {
+        "transform": spec,
+        "stats": st,
+        "examples": ex["examples"],
+        "unmatched": ex["unmatched"],
+        "target_columns": ex["target_columns"],
+        "right_expr": tx.target_sql(spec, target_column),  # stored bare; qualification adds the table
+        "left_sql": sx,
+        "options": tested,
+    }
+
+
+def _column_type(conn, table: str, column: str) -> str:
+    row = conn.execute(
+        "SELECT data_type FROM information_schema.columns WHERE table_name = ? AND column_name = ?",
+        [table, column],
+    ).fetchone()
+    return str(row[0]) if row else "VARCHAR"
+
+
 # ---------------------------------------------------------------------------
 # Candidate generation
 # ---------------------------------------------------------------------------
@@ -839,12 +903,23 @@ def discover_relationships(
             if tp.get("digit_frac", 0) >= 0.95 and (tp.get("mode_len") or 0) <= 3:
                 continue  # component codes (county 001, tract code 040100) repeat across states: not keys
             best = None  # (score, transform, stats)
+            tested: list[dict] = []
             for tr in make_transforms(p, tp):
                 evals += 1
                 st = eval_pair(
                     conn, source_table, transform_sql(tr, qi(cname)), t["table"], target_sql(tr, qi(t["column"]))
                 )
-                cand = (containment_score(st), tr, st)
+                score = containment_score(st)
+                tested.append(
+                    {
+                        **tx.normalize(tr),
+                        "label": tx.label(tr),
+                        "score": round(score, 3),
+                        "left_match_pct": st["left_match_pct"],
+                        "right_covered_pct": st["right_covered_pct"],
+                    }
+                )
+                cand = (score, tr, st)
                 if best is None or _better(cand, best):
                     best = cand
             if not best:
@@ -865,13 +940,8 @@ def discover_relationships(
             if tr["kind"] != "identity":
                 dkey = (cname, transform_key(tr))
                 if dkey not in derived_names:
-                    base = t["column"]
-                    name, i = base, 2
-                    while name in taken_cols:
-                        name = f"{base}_norm" if i == 2 else f"{base}_norm{i}"
-                        i += 1
-                    derived_names[dkey] = name
-                    taken_cols.add(name)
+                    derived_names[dkey] = derived_column_name(taken_cols, t["column"])
+                    taken_cols.add(derived_names[dkey])
                 left_expr = derived_names[dkey]
                 derive = {
                     "kind": "sql",
@@ -942,6 +1012,7 @@ def discover_relationships(
                     "grain_effect": f"{final} row -> {t['table']} row(s)",
                     "note": f"{_explain(tr, cname, t['table'], right_expr)}.",
                     "derive": derive,
+                    "transform": tx.pair(tr, cname, t["column"]),
                     "score": round(score, 3),
                     "name_score": ns,
                     **({"origin": "llm-suggested"} if llm_suggested else {}),
@@ -950,9 +1021,11 @@ def discover_relationships(
                     "stats": st,
                     "transform": {**tr, "label": transform_rule_text(tr, cname)},
                     "rule_text": transform_rule_text(tr, cname),
+                    "options": tested,
                     "examples": ex["examples"],
                     "unmatched": ex["unmatched"],
                     "target": f"{t['table']}.{right_expr}",
+                    "target_column": t["column"],
                     "target_columns": ex["target_columns"],
                     "warnings": warnings,
                     "source_column": cname,

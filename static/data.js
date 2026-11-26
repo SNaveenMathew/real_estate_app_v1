@@ -101,12 +101,13 @@ const ROLE_LABEL = { key: 'Key (used to join)', label: 'Label (names things)', m
   dimension: 'Category', date: 'Date', geo: 'Coordinates or geometry', other: 'Other' };
 
 const S = {
-  catalog: null, meta: { formats: [], domains: [], roles: [], max_upload_mb: 250 }, datasets: [],
+  catalog: null, meta: { formats: [], domains: [], roles: [], max_upload_mb: 600 }, datasets: [],
   ds: null, form: null, tab: 'describe', busy: null, sel: null, llm: null, selftest: null,
   colRole: 'all', colQuery: '', justAdded: new Set(), edits: {}, lastEnrich: null,
   filter: { q: '', hidden: new Set(), allCols: false, system: false }, upload: { sheet: '', skiprows: '' },
   zoom: 1.0,
   dataSources: [], activeSourceKey: null, sourceResult: null, linkHealth: {}, checkingLinks: false,
+  health: null, checkingHealth: false,
 };
 
 function toast(msg, kind = '') {
@@ -159,6 +160,7 @@ function linkHealthBadge(key) {
   const r = S.linkHealth[key];
   if (!r) return null;
   if (r.ok === null) return h('span', { class: 'pill', title: r.error }, 'no link');
+  if (r.ok && r.blocked) return h('span', { class: 'pill ok', title: r.error || '' }, 'reachable (bot-blocked)');
   if (r.ok) return h('span', { class: 'pill ok', title: `HTTP ${r.status}` }, 'reachable');
   return h('span', { class: 'pill bad', title: r.error || '' }, 'unreachable');
 }
@@ -578,7 +580,10 @@ function dataSourcesSection(keys) {
       h('div', {},
         h('button', { class: 'title', type: 'button', onclick: () => openSourceView(r.key) }, r.label),
         h('div', { class: 'muted' }, 'Last refreshed from here: ', timeAgo(r.last_loaded_at))),
-      h('button', { class: 'btn small', type: 'button', onclick: () => openSourceView(r.key) }, 'Manage')))));
+      h('div', { class: 'row' },
+        r.source_url ? h('a', { class: 'link-btn', href: r.source_url, target: '_blank', rel: 'noopener' },
+          r.direct_download ? 'Download latest' : 'Source page') : null,
+        h('button', { class: 'btn small', type: 'button', onclick: () => openSourceView(r.key) }, 'Manage'))))));
 }
 
 function openSourceView(key) {
@@ -629,9 +634,10 @@ function sourceView() {
       h('p', { class: 'muted' }, h('span', { class: 'pill' }, src.category), ' · ', plural(src.current_row_count, 'row'), ' currently loaded')),
     h('div', { class: 'card' },
       h('p', {}, src.instructions),
+      h('p', { class: 'muted' }, 'Uploading is an upsert: existing keys are updated and new rows are added; full-snapshot sources replace the table.'),
       src.source_url ? h('p', {},
         h('a', { href: src.source_url, target: '_blank', rel: 'noopener' },
-          src.direct_download ? 'Download the current file ↓' : 'Open the source page ↗'),
+          src.direct_download ? 'Download the latest file ↓' : 'Open the latest-data page ↗'),
         ' ', linkHealthBadge(src.key),
         src.direct_download ? null : h('span', { class: 'muted' }, ' — you will need to find the current download there, this isn\'t a one-click file.')
       ) : null,
@@ -643,7 +649,7 @@ function sourceView() {
         h('dt', {}, 'Rows'), h('dd', {}, src.last_row_count != null ? fmt(src.last_row_count) : '—'),
         h('dt', {}, 'File(s)'), h('dd', {}, (src.last_source_files || []).length ? (src.last_source_files || []).map(f => h('span', { class: 'chip' }, f)) : '—')),
       src.last_message ? h('p', { class: 'muted', style: { marginTop: '6px' } }, src.last_message) : null),
-    h('div', { class: 'card' }, h('h3', {}, 'Upload the latest export'), drop),
+    h('div', { class: 'card' }, h('h3', {}, 'Upload the latest version'), drop),
     res && res.ok === false ? h('div', { class: 'note bad' }, res.error) : null,
     res && res.ok ? [
       h('div', { class: 'note ' + (res.warnings && res.warnings.length ? 'warn' : 'ok') }, res.message),
@@ -727,8 +733,53 @@ function homeView() {
         h('button', { class: 'btn-close-panel', type: 'button', title: 'Close sidebar', 'aria-label': 'Close sidebar', onclick: closePanel }, '✕')
       )
     ),
-    uploadCard(), dataSourcesCard(), datasetsCard(), modelCard(),
+    uploadCard(), dataSourcesCard(), healthCard(), datasetsCard(), modelCard(),
   ];
+}
+
+function healthCard() {
+  const report = S.health;
+  const body = [];
+  if (!report) {
+    body.push(h('p', { class: 'muted' }, 'Check that every visible table is populated and every catalog join resolves after its level/period scope is applied. This reads the live database and may take a few seconds.'));
+  } else {
+    const c = report.coverage || {}, jh = report.join_health || {};
+    const metaGaps = c.gaps || [], dataGaps = c.data_gaps || [];
+    const errors = jh.errors || [], warnings = jh.warnings || [];
+    body.push(h('div', { class: 'row wrap', style: { gap: '6px' } },
+      h('span', { class: 'pill ' + (metaGaps.length ? 'warn' : 'ok') }, `${metaGaps.length} metadata gap(s)`),
+      h('span', { class: 'pill ' + (dataGaps.length ? 'warn' : 'ok') }, `${dataGaps.length} data gap(s)`),
+      h('span', { class: 'pill ' + (errors.length ? 'bad' : warnings.length ? 'warn' : 'ok') }, `${jh.checked || 0} joins checked`)));
+    if (!metaGaps.length && !dataGaps.length && !errors.length && !warnings.length) {
+      body.push(h('p', { class: 'note ok' }, 'Every visible table has concepts and joins, has rows, and every relationship resolves.'));
+    }
+    for (const g of metaGaps.slice(0, 6)) body.push(h('p', { class: 'note warn' }, `${g.subject}: ${g.detail}`));
+    for (const g of dataGaps.slice(0, 6)) body.push(h('p', { class: 'note warn' }, `${g.subject}: ${g.detail}`));
+    for (const e of errors.slice(0, 6)) body.push(h('p', { class: 'note bad' }, `${e.relationship}: ${e.message}`));
+    for (const w of warnings.slice(0, 6)) body.push(h('p', { class: 'note warn' }, `${w.relationship}: ${w.message}`));
+    if (errors.length + warnings.length + metaGaps.length + dataGaps.length > 18) {
+      body.push(h('p', { class: 'muted' }, 'More findings are available from /api/onboarding/health.'));
+    }
+  }
+  return h('div', { class: 'card' },
+    h('div', { class: 'row between', style: { alignItems: 'flex-start' } },
+      h('div', {}, h('h3', {}, 'Onboarding health'),
+        h('p', { class: 'muted', style: { fontSize: '12.5px' } }, 'Metadata coverage plus physical and semantic-join checks.')),
+      h('button', { class: 'btn small', type: 'button', disabled: S.checkingHealth || !!S.busy, onclick: runHealth },
+        S.checkingHealth ? 'Checking…' : 'Run checks')),
+    h('div', { style: { marginTop: '8px' } }, body));
+}
+
+async function runHealth() {
+  S.checkingHealth = true; renderPanel();
+  try {
+    S.health = await api('/health');
+    toast('Onboarding health measured', (S.health.join_health.errors || []).length ? 'bad' : 'ok');
+  } catch (e) {
+    toast('Health check failed: ' + e.message, 'bad');
+  } finally {
+    S.checkingHealth = false; renderPanel();
+  }
 }
 
 function dataSourcesCard() {
@@ -1042,6 +1093,10 @@ function relGroup(key, items, published) {
 function relCard(p, published) {
   const pl = p.payload, ev = p.evidence, st = ev.stats || {}, tgt = `${pl.right_table}.${pl.right_expr}`;
   const edit = S.edits[p.proposal_id] || (S.edits[p.proposal_id] = { cardinality: pl.cardinality, preferred: pl.preferred, note: pl.note || '' });
+  const isAddr = (ev.transform || {}).kind === 'address';
+  const curTr = (pl.transform && pl.transform.left) || (pl.derive && pl.derive.transform) || { kind: 'identity' };
+  const trSpec = (S.meta.transforms || []).find(t => t.kind === curTr.kind) || null;
+  const defaultWidth = curTr.width || (trSpec && trSpec.widths && trSpec.widths[2]) || 11;
   const rightCov = st.right_covered_pct, leftPct = st.left_match_pct;
   const lead = rightCov >= leftPct
     ? h('span', {}, h('b', {}, pct(rightCov)), ` of ${pl.right_table} rows have a match in your data (${fmt(st.right_rows_matched)} of ${fmt(st.right_rows)})`)
@@ -1061,7 +1116,17 @@ function relCard(p, published) {
         h('label', { class: 'field' }, h('span', {}, 'Cardinality'), h('select', { onchange: e => { edit.cardinality = e.target.value; }, value: edit.cardinality },
           ['many-to-one', 'one-to-many', 'one-to-one', 'many-to-many'].map(c => h('option', { value: c }, c)))),
         h('label', { class: 'check', style: { alignSelf: 'end' } }, h('input', { type: 'checkbox', checked: edit.preferred, onchange: e => { edit.preferred = e.target.checked; } }), 'Show this link to the assistant by default'),
-        h('label', { class: 'field wide' }, h('span', {}, 'Note for the assistant'), h('input', { type: 'text', value: edit.note, oninput: e => { edit.note = e.target.value; } })))) : null,
+        h('label', { class: 'field wide' }, h('span', {}, 'Note for the assistant'), h('input', { type: 'text', value: edit.note, oninput: e => { edit.note = e.target.value; } })),
+        isAddr ? null : h('label', { class: 'field' }, h('span', {}, 'Transformation'),
+          h('select', { onchange: e => retestTransform(p, e.target.value, defaultWidth) },
+            (S.meta.transforms || []).map(t => h('option', { value: t.kind, selected: t.kind === curTr.kind }, t.label)))),
+        (!isAddr && trSpec && trSpec.needs_width) ? h('label', { class: 'field' }, h('span', {}, 'Width'),
+          h('input', { type: 'number', min: '1', max: '32', value: defaultWidth,
+            onchange: e => retestTransform(p, curTr.kind, Number(e.target.value)) })) : null,
+        isAddr ? null : h('div', { class: 'note', style: { gridColumn: '1 / -1' } },
+          'The rule is re-measured on your data before you approve; ',
+          h('span', { class: 'mono' }, ev.rule_text || curTr.kind),
+          '. Approval adds the key column only if the chosen rule needs one.'))) : null,
     p.status === 'pending' ? h('div', { class: 'actions' },
       h('button', { class: 'btn primary', type: 'button', disabled: !canApprove || !!S.busy, title: canApprove ? '' : 'Approve the table first', onclick: () => decide(p, 'approve', { cardinality: edit.cardinality, preferred: edit.preferred, note: edit.note }) }, 'Approve link'),
       h('button', { class: 'btn', type: 'button', disabled: !!S.busy, onclick: () => decide(p, 'reject') }, 'Reject')) : null,
@@ -1115,6 +1180,15 @@ async function bulkApprove(items) {
     }
     if (out) S.ds = out;
     await loadCatalog(); toast(`${items.length} links approved. They are live now.`, 'ok');
+  });
+}
+async function retestTransform(p, kind, width) {
+  await withBusy('Re-measuring this transformation…', async () => {
+    const out = await post(`/proposals/${p.proposal_id}/transform`, { kind, width: width == null ? null : Number(width) });
+    delete S.edits[p.proposal_id];  // cardinality/preferred are re-measured with the new rule
+    S.ds = out;
+    await loadCatalog();
+    toast('Transformation re-measured. Check the match rates and examples before approving.', 'ok');
   });
 }
 async function revoke(relKey) {
