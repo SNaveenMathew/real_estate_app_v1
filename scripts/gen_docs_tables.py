@@ -163,16 +163,20 @@ def matrix_rows() -> list[list[str]]:
         build_fixture(Path(tmp) / "capability_fixture.duckdb")
         tables = sorted(schema.list_table_names(agent_visible_only=True))
         counts = {t: schema._row_count(t) for t in tables}
-        store.close()
 
-    coverage = {t: 0 for t in tables}
-    for example in GOLDEN_SET:
-        try:
-            plan = build_query_plan(example.question)
-        except Exception:
-            continue
-        for table in set(getattr(plan, "required_tables", []) or []) & set(tables):
-            coverage[table] += 1
+        # Build coverage while the fixture DB is still active so build_query_plan()
+        # uses the same seeded catalog (bridge tables are only registered in the
+        # fixture-seeded catalog, not necessarily in the developer's live DB).
+        coverage = {t: 0 for t in tables}
+        for example in GOLDEN_SET:
+            try:
+                plan = build_query_plan(example.question)
+            except Exception:
+                continue
+            for table in set(getattr(plan, "required_tables", []) or []) & set(tables):
+                coverage[table] += 1
+
+        store.close()
 
     rows = []
     for table in tables:

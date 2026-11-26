@@ -429,6 +429,207 @@ COMMUTE_ROWS = [
 AVG_DRIVE_TIME_TO_WORK = round(sum(r["drive_min"] for r in COMMUTE_ROWS) / len(COMMUTE_ROWS), 4)  # 20.0
 SHORTEST_BIKE_COMMUTE = min(r["bike_min"] for r in COMMUTE_ROWS)  # 30.0
 
+# ─────────────────────────────────────────────────────────────────────────
+# Full 25/25 agent-visible table fixtures (boundaries, bridges, snapshots,
+# ZHVI, Market Heat Index, transit safety & route-agency bridges, crime summary)
+# ─────────────────────────────────────────────────────────────────────────
+
+HOUSE_SNAPSHOTS = [
+    dict(
+        snapshot_id="snap-h1-1",
+        house_id="h1",
+        snapshot_date="2024-01-15",
+        source_file="eval_fixture.csv",
+        source_type="redfin",
+        status="Active",
+        price=360000.0,
+        beds=3.0,
+        baths=2.0,
+        sqft=1500.0,
+    ),
+    dict(
+        snapshot_id="snap-h1-2",
+        house_id="h1",
+        snapshot_date="2024-03-01",
+        source_file="eval_fixture.csv",
+        source_type="redfin",
+        status="Active",
+        price=350000.0,
+        beds=3.0,
+        baths=2.0,
+        sqft=1500.0,
+    ),
+]
+
+ZCTA_BOUNDARIES = [
+    dict(zcta5="15213", geo_id="15213", land_area_sq_mi=1.85, water_area_sq_mi=0.0, lat=40.4406, lon=-79.9559),
+    dict(zcta5="80202", geo_id="80202", land_area_sq_mi=1.60, water_area_sq_mi=0.0, lat=39.7525, lon=-104.9995),
+]
+ZCTA_15213_LAND_AREA = ZCTA_BOUNDARIES[0]["land_area_sq_mi"]
+
+PLACE_BOUNDARIES = [
+    dict(
+        place_geoid="4261000",
+        place_fips="61000",
+        state_fips="42",
+        name="Pittsburgh city",
+        short_name="Pittsburgh",
+        namelsad="Pittsburgh city",
+        land_area_sq_mi=55.37,
+        water_area_sq_mi=2.98,
+        lat=40.4397,
+        lon=-79.9764,
+    ),
+    dict(
+        place_geoid="0820000",
+        place_fips="20000",
+        state_fips="08",
+        name="Denver city",
+        short_name="Denver",
+        namelsad="Denver city",
+        land_area_sq_mi=153.07,
+        water_area_sq_mi=1.62,
+        lat=39.7618,
+        lon=-104.8811,
+    ),
+]
+PITTSBURGH_PLACE_LAND_AREA = PLACE_BOUNDARIES[0]["land_area_sq_mi"]
+
+ZHVI_ROWS = [
+    dict(
+        region_id="zhvi-15213",
+        region_type="zip",
+        region_name="15213",
+        size_rank=100,
+        state_name="Pennsylvania",
+        state="PA",
+        city="Pittsburgh",
+        metro="Pittsburgh, PA",
+        county_name="Allegheny County",
+        msa_code="38300",
+        date="2024-06-01",
+        home_value=325000.0,
+    ),
+    dict(
+        region_id="zhvi-80202",
+        region_type="zip",
+        region_name="80202",
+        size_rank=80,
+        state_name="Colorado",
+        state="CO",
+        city="Denver",
+        metro="Denver, CO",
+        county_name="Denver County",
+        msa_code="19740",
+        date="2024-06-01",
+        home_value=495000.0,
+    ),
+]
+AVG_ZIP_ZHVI = round(sum(r["home_value"] for r in ZHVI_ROWS) / len(ZHVI_ROWS), 2)
+
+MARKET_HEAT_ROWS = [
+    dict(
+        region_id="mhi-38300",
+        region_type="metro",
+        region_name="Pittsburgh, PA",
+        size_rank=27,
+        state_name="Pennsylvania",
+        state="PA",
+        metro="Pittsburgh, PA",
+        msa_code="38300",
+        date="2024-06-01",
+        heat_index=62.5,
+    ),
+    dict(
+        region_id="mhi-12420",
+        region_type="metro",
+        region_name="Austin, TX",
+        size_rank=29,
+        state_name="Texas",
+        state="TX",
+        metro="Austin, TX",
+        msa_code="12420",
+        date="2024-06-01",
+        heat_index=48.5,
+    ),
+]
+PITTSBURGH_MARKET_HEAT_INDEX = 62.5
+
+TRANSIT_SAFETY_ROWS = [
+    dict(
+        year=2024,
+        ntd_id="30001",
+        agency="Pittsburgh Regional Transit",
+        mode="MB",
+        tos="DO",
+        city="Pittsburgh",
+        state="PA",
+        uza_name="Pittsburgh, PA",
+        msa_code="38300",
+        event_total=45,
+        collision_total=12,
+        total_fatalities=1,
+        total_injuries=18,
+        serious_injuries=2,
+        upt=220000.0,
+    ),
+    dict(
+        year=2024,
+        ntd_id="30002",
+        agency="Regional Transportation District",
+        mode="MB",
+        tos="DO",
+        city="Denver",
+        state="CO",
+        uza_name="Denver--Aurora, CO",
+        msa_code="19740",
+        event_total=30,
+        collision_total=8,
+        total_fatalities=0,
+        total_injuries=11,
+        serious_injuries=1,
+        upt=110000.0,
+    ),
+]
+TOP_TRANSIT_SAFETY_AGENCY = "Pittsburgh Regional Transit"
+
+TRANSIT_ROUTE_AGENCIES_ROWS = [
+    dict(route_uid="tr-pgh-1", ntd_id="30001", raw_ntd_id="30001"),
+    dict(route_uid="tr-pgh-2", ntd_id="30001", raw_ntd_id="30001"),
+]
+TRANSIT_ROUTES_BY_AGENCY_COUNT = len(TRANSIT_ROUTE_AGENCIES_ROWS)
+
+TRANSIT_ROUTE_ZCTAS_ROWS = [
+    dict(route_uid="tr-pgh-1", zcta5="15213", overlap_m=1609.344, route_fraction=0.50),
+    dict(route_uid="tr-pgh-2", zcta5="15213", overlap_m=804.672, route_fraction=0.25),
+]
+TRANSIT_ROUTES_IN_15213 = len({r["route_uid"] for r in TRANSIT_ROUTE_ZCTAS_ROWS})
+
+TRANSIT_ROUTE_PLACES_ROWS = [
+    dict(route_uid="tr-pgh-1", place_geoid="4261000", overlap_m=3218.688, route_fraction=0.80),
+    dict(route_uid="tr-pgh-2", place_geoid="4261000", overlap_m=1609.344, route_fraction=0.60),
+]
+TRANSIT_ROUTES_IN_PITTSBURGH_PLACE = len({r["route_uid"] for r in TRANSIT_ROUTE_PLACES_ROWS})
+
+BIKE_ROUTE_TRACTS_ROWS = [
+    dict(route_id="bike-pgh-lane-1", tract_fips="42003140300", overlap_m=804.672),
+    dict(route_id="bike-pgh-trail-1", tract_fips="42003140300", overlap_m=1609.344),
+]
+BIKE_ROUTES_IN_PGH_TRACT = len({r["route_id"] for r in BIKE_ROUTE_TRACTS_ROWS})
+
+BIKE_ROUTE_ZCTAS_ROWS = [
+    dict(route_id="bike-pgh-lane-1", zcta5="15213", overlap_m=804.672),
+    dict(route_id="bike-pgh-lane-2", zcta5="15213", overlap_m=1207.008),
+]
+BIKE_ROUTES_IN_15213 = len({r["route_id"] for r in BIKE_ROUTE_ZCTAS_ROWS})
+
+BIKE_ROUTE_PLACES_ROWS = [
+    dict(route_id="bike-pgh-lane-1", place_geoid="4261000", overlap_m=1609.344),
+    dict(route_id="bike-pgh-lane-2", place_geoid="4261000", overlap_m=804.672),
+    dict(route_id="bike-pgh-trail-1", place_geoid="4261000", overlap_m=2414.016),
+]
+BIKE_ROUTES_IN_PITTSBURGH_PLACE = len({r["route_id"] for r in BIKE_ROUTE_PLACES_ROWS})
+
 
 def build_fixture(db_path: Path) -> None:
     """(Re)build the evaluation fixture database at db_path from scratch."""
@@ -657,6 +858,153 @@ def build_fixture(db_path: Path) -> None:
                 row["status"],
                 row["source"],
             ],
+        )
+
+    # ── house_snapshots ──────────────────────────────────────────────────
+    for s in HOUSE_SNAPSHOTS:
+        conn.execute(
+            "INSERT INTO house_snapshots (snapshot_id, house_id, snapshot_date, source_file, source_type, "
+            "status, price, beds, baths, sqft) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                s["snapshot_id"],
+                s["house_id"],
+                s["snapshot_date"],
+                s["source_file"],
+                s["source_type"],
+                s["status"],
+                s["price"],
+                s["beds"],
+                s["baths"],
+                s["sqft"],
+            ],
+        )
+
+    # ── zcta_boundaries + place_boundaries ───────────────────────────────
+    for z in ZCTA_BOUNDARIES:
+        conn.execute(
+            "INSERT INTO zcta_boundaries (zcta5, geo_id, land_area_sq_mi, water_area_sq_mi, lat, lon, source_file) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [z["zcta5"], z["geo_id"], z["land_area_sq_mi"], z["water_area_sq_mi"], z["lat"], z["lon"], "eval_fixture"],
+        )
+    for pl in PLACE_BOUNDARIES:
+        conn.execute(
+            "INSERT INTO place_boundaries (place_geoid, place_fips, state_fips, name, short_name, namelsad, "
+            "land_area_sq_mi, water_area_sq_mi, lat, lon, source_file) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                pl["place_geoid"],
+                pl["place_fips"],
+                pl["state_fips"],
+                pl["name"],
+                pl["short_name"],
+                pl["namelsad"],
+                pl["land_area_sq_mi"],
+                pl["water_area_sq_mi"],
+                pl["lat"],
+                pl["lon"],
+                "eval_fixture",
+            ],
+        )
+
+    # ── crime_city_year ───────────────────────────────────────────────────
+    # crime_city_year is a VIEW (see db/schema_ddl.py::CRIME_CITY_YEAR) that
+    # aggregates directly from crime_incidents; no INSERT needed here — the
+    # crime_incidents rows inserted above automatically satisfy the view.
+
+    # ── zhvi + market_heat_index ─────────────────────────────────────────
+    for zrow in ZHVI_ROWS:
+        conn.execute(
+            "INSERT INTO zhvi (region_id, region_type, region_name, size_rank, state_name, state, city, "
+            "metro, county_name, msa_code, date, home_value, source_file) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                zrow["region_id"],
+                zrow["region_type"],
+                zrow["region_name"],
+                zrow["size_rank"],
+                zrow["state_name"],
+                zrow["state"],
+                zrow["city"],
+                zrow["metro"],
+                zrow["county_name"],
+                zrow["msa_code"],
+                zrow["date"],
+                zrow["home_value"],
+                "eval_fixture.csv",
+            ],
+        )
+    for mrow in MARKET_HEAT_ROWS:
+        conn.execute(
+            "INSERT INTO market_heat_index (region_id, region_type, region_name, size_rank, state_name, state, "
+            "metro, msa_code, date, heat_index, source_file) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                mrow["region_id"],
+                mrow["region_type"],
+                mrow["region_name"],
+                mrow["size_rank"],
+                mrow["state_name"],
+                mrow["state"],
+                mrow["metro"],
+                mrow["msa_code"],
+                mrow["date"],
+                mrow["heat_index"],
+                "eval_fixture.csv",
+            ],
+        )
+
+    # ── transit_safety + route bridges ───────────────────────────────────
+    for ts in TRANSIT_SAFETY_ROWS:
+        conn.execute(
+            "INSERT INTO transit_safety (year, ntd_id, agency, mode, tos, city, state, uza_name, msa_code, "
+            "event_total, collision_total, total_fatalities, total_injuries, serious_injuries, upt) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ts["year"],
+                ts["ntd_id"],
+                ts["agency"],
+                ts["mode"],
+                ts["tos"],
+                ts["city"],
+                ts["state"],
+                ts["uza_name"],
+                ts["msa_code"],
+                ts["event_total"],
+                ts["collision_total"],
+                ts["total_fatalities"],
+                ts["total_injuries"],
+                ts["serious_injuries"],
+                ts["upt"],
+            ],
+        )
+    for tra in TRANSIT_ROUTE_AGENCIES_ROWS:
+        conn.execute(
+            "INSERT INTO transit_route_agencies (route_uid, ntd_id, raw_ntd_id) VALUES (?, ?, ?)",
+            [tra["route_uid"], tra["ntd_id"], tra["raw_ntd_id"]],
+        )
+    for trz in TRANSIT_ROUTE_ZCTAS_ROWS:
+        conn.execute(
+            "INSERT INTO transit_route_zctas (route_uid, zcta5, overlap_m, route_fraction) VALUES (?, ?, ?, ?)",
+            [trz["route_uid"], trz["zcta5"], trz["overlap_m"], trz["route_fraction"]],
+        )
+    for trp in TRANSIT_ROUTE_PLACES_ROWS:
+        conn.execute(
+            "INSERT INTO transit_route_places (route_uid, place_geoid, overlap_m, route_fraction) VALUES (?, ?, ?, ?)",
+            [trp["route_uid"], trp["place_geoid"], trp["overlap_m"], trp["route_fraction"]],
+        )
+
+    # ── bike route bridges ───────────────────────────────────────────────
+    for brt in BIKE_ROUTE_TRACTS_ROWS:
+        conn.execute(
+            "INSERT INTO bike_route_tracts (route_id, tract_fips, overlap_m) VALUES (?, ?, ?)",
+            [brt["route_id"], brt["tract_fips"], brt["overlap_m"]],
+        )
+    for brz in BIKE_ROUTE_ZCTAS_ROWS:
+        conn.execute(
+            "INSERT INTO bike_route_zctas (route_id, zcta5, overlap_m) VALUES (?, ?, ?)",
+            [brz["route_id"], brz["zcta5"], brz["overlap_m"]],
+        )
+    for brp in BIKE_ROUTE_PLACES_ROWS:
+        conn.execute(
+            "INSERT INTO bike_route_places (route_id, place_geoid, overlap_m) VALUES (?, ?, ?)",
+            [brp["route_id"], brp["place_geoid"], brp["overlap_m"]],
         )
 
     store.close()

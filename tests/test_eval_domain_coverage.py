@@ -137,3 +137,85 @@ def test_new_examples_carry_domain_tags():
     for tag, ids in tags.items():
         for example_id in ids:
             assert tag in get_example(example_id).tags, f"{example_id!r} is missing tag {tag!r}"
+
+
+def test_remaining_capability_constants_and_routes(fixture_conn):
+    from agents.query_planner import build_query_plan
+
+    conn = fixture_conn
+    assert scalar(conn, "SELECT AVG(home_value) FROM zhvi WHERE region_type = 'zip'") == pytest.approx(
+        fixtures.AVG_ZIP_ZHVI, abs=0.01
+    )
+    assert scalar(
+        conn, "SELECT heat_index FROM market_heat_index WHERE region_type = 'metro' AND msa_code = '38300'"
+    ) == pytest.approx(fixtures.PITTSBURGH_MARKET_HEAT_INDEX, abs=0.01)
+    assert (
+        scalar(conn, "SELECT SUM(incidents) FROM crime_city_year WHERE city = 'pittsburgh'")
+        == fixtures.PITTSBURGH_CRIME_COUNT
+    )
+    assert (
+        scalar(conn, "SELECT agency FROM transit_safety ORDER BY event_total DESC LIMIT 1")
+        == fixtures.TOP_TRANSIT_SAFETY_AGENCY
+    )
+    assert (
+        scalar(conn, "SELECT COUNT(DISTINCT route_uid) FROM transit_route_agencies WHERE ntd_id = '30001'")
+        == fixtures.TRANSIT_ROUTES_BY_AGENCY_COUNT
+    )
+    assert scalar(conn, "SELECT land_area_sq_mi FROM zcta_boundaries WHERE zcta5 = '15213'") == pytest.approx(
+        fixtures.ZCTA_15213_LAND_AREA, abs=0.01
+    )
+    assert scalar(
+        conn, "SELECT land_area_sq_mi FROM place_boundaries WHERE short_name = 'Pittsburgh'"
+    ) == pytest.approx(fixtures.PITTSBURGH_PLACE_LAND_AREA, abs=0.01)
+    assert (
+        scalar(conn, "SELECT COUNT(DISTINCT route_uid) FROM transit_route_zctas WHERE zcta5 = '15213'")
+        == fixtures.TRANSIT_ROUTES_IN_15213
+    )
+    assert (
+        scalar(conn, "SELECT COUNT(DISTINCT route_uid) FROM transit_route_places WHERE place_geoid = '4261000'")
+        == fixtures.TRANSIT_ROUTES_IN_PITTSBURGH_PLACE
+    )
+    assert (
+        scalar(conn, "SELECT COUNT(DISTINCT route_id) FROM bike_route_tracts WHERE tract_fips = '42003140300'")
+        == fixtures.BIKE_ROUTES_IN_PGH_TRACT
+    )
+    assert (
+        scalar(conn, "SELECT COUNT(DISTINCT route_id) FROM bike_route_zctas WHERE zcta5 = '15213'")
+        == fixtures.BIKE_ROUTES_IN_15213
+    )
+    assert (
+        scalar(conn, "SELECT COUNT(DISTINCT route_id) FROM bike_route_places WHERE place_geoid = '4261000'")
+        == fixtures.BIKE_ROUTES_IN_PITTSBURGH_PLACE
+    )
+
+    for example_id, expected_table in [
+        ("house_snapshot_history_pittsburgh", "house_snapshots"),
+        ("zhvi_zip_avg_home_value", "zhvi"),
+        ("market_heat_index_pittsburgh", "market_heat_index"),
+        ("crime_city_summary_pittsburgh", "crime_city_year"),
+        ("transit_top_safety_events_agency", "transit_safety"),
+        ("transit_routes_by_agency_count", "transit_route_agencies"),
+        ("zcta_15213_land_area", "zcta_boundaries"),
+        ("place_pittsburgh_land_area", "place_boundaries"),
+        ("transit_routes_in_zcta_15213", "transit_route_zctas"),
+        ("transit_routes_in_place_pittsburgh", "transit_route_places"),
+        ("bike_routes_in_pgh_tract", "bike_route_tracts"),
+        ("bike_routes_in_zcta_15213", "bike_route_zctas"),
+        ("bike_routes_in_place_pittsburgh", "bike_route_places"),
+    ]:
+        plan = build_query_plan(get_example(example_id).question)
+        assert expected_table in plan.required_tables, (example_id, plan.required_tables)
+
+
+def test_sold_comp_exclusion_count_and_provenance(fixture_conn):
+    import db.duckdb_store as store
+    import db.schema_catalog as schema
+
+    stats = store.get_price_stats_in_tract("42003140300")
+    assert int(stats["sold_sold_count"]) == 1
+    assert int(stats["sold_non_arms_length_excluded"]) == 1
+
+    prov = schema.table_provenance("nri_tracts")
+    assert prov["source_key"] == "nri" and prov["vintage"] and prov["licence"]
+    ctx = schema.build_query_context("What is the riverine flood risk for the Pittsburgh metro?")
+    assert "DATA PROVENANCE" in ctx and "FEMA National Risk Index" in ctx
