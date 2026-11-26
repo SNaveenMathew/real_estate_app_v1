@@ -15,10 +15,11 @@ Architecture:
 from __future__ import annotations
 
 import ast
+import json
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type
 
 import pydantic
 from pydantic import BaseModel, Field
@@ -31,6 +32,151 @@ try:
     OUTLINES_AVAILABLE = True
 except ImportError:
     OUTLINES_AVAILABLE = False
+
+
+def inline_json_schema(schema_or_model: Any) -> dict[str, Any]:
+    """Return a flat JSON Schema with ``$defs`` / ``$ref`` resolved for Outlines / llama-server."""
+    if isinstance(schema_or_model, type) and issubclass(schema_or_model, BaseModel):
+        raw = schema_or_model.model_json_schema()
+    elif isinstance(schema_or_model, dict):
+        raw = dict(schema_or_model)
+    else:
+        raise TypeError(f"Expected a Pydantic BaseModel class or schema dict, got {type(schema_or_model).__name__}")
+
+    defs = raw.pop("$defs", {}) or {}
+
+    def _resolve(node: Any) -> Any:
+        if isinstance(node, dict):
+            if "$ref" in node:
+                ref_name = str(node["$ref"]).split("/")[-1]
+                return _resolve(dict(defs[ref_name]))
+            return {k: _resolve(v) for k, v in node.items() if k != "title"}
+        if isinstance(node, list):
+            return [_resolve(item) for item in node]
+        return node
+
+    return _resolve(raw)
+
+
+class StructuredGenerationReply:
+    """AIMessage-compatible envelope returned by ``OutlinesStructuredClient.invoke``."""
+
+    def __init__(
+        self,
+        content: str,
+        *,
+        parsed: BaseModel | None = None,
+        usage_metadata: dict[str, Any] | None = None,
+        response_metadata: dict[str, Any] | None = None,
+    ):
+        self.content = content
+        self.parsed = parsed
+        self.usage_metadata = usage_metadata or {}
+        self.response_metadata = response_metadata or {}
+
+
+class OutlinesStructuredClient:
+    """Decode-time JSON-schema constrained client wired via ``outlines.from_openai`` + ``outlines.Generator``.
+
+    Exposes ``.invoke(messages)`` so every structured LLM path shares ``llm_resilience.invoke``'s
+    circuit breakers, cancellation, prompt caching, and token telemetry while still enforcing the schema.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        model: str,
+        output_schema: type[BaseModel],
+        temperature: float = 0.0,
+        max_tokens: int = 256,
+        timeout: float = 60.0,
+        max_retries: int = 0,
+        stop: list[str] | None = None,
+    ):
+        if not OUTLINES_AVAILABLE:
+            raise RuntimeError("Outlines is required for OutlinesStructuredClient but is not installed.")
+        import openai
+
+        self.base_url = base_url
+        self.model = model
+        self.model_name = model
+        self.output_schema = output_schema
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.stop = list(stop or [])
+        self._last_usage: dict[str, Any] = {}
+
+        raw_client = openai.OpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+        orig_create = raw_client.chat.completions.create
+
+        def _tracked_create(*args, **kwargs):
+            resp = orig_create(*args, **kwargs)
+            usage = getattr(resp, "usage", None)
+            if usage is not None:
+                p_tok = int(getattr(usage, "prompt_tokens", 0) or 0)
+                c_tok = int(getattr(usage, "completion_tokens", 0) or 0)
+                t_tok = int(getattr(usage, "total_tokens", 0) or (p_tok + c_tok))
+                details = getattr(usage, "completion_tokens_details", None)
+                r_tok = int(getattr(details, "reasoning_tokens", 0) or 0) if details else 0
+                self._last_usage = {
+                    "input_tokens": p_tok,
+                    "output_tokens": c_tok,
+                    "total_tokens": t_tok,
+                    "output_token_details": {"reasoning": r_tok},
+                }
+            else:
+                self._last_usage = {}
+            return resp
+
+        raw_client.chat.completions.create = _tracked_create  # type: ignore[method-assign]
+        self._outlines_model = outlines.from_openai(raw_client, model_name=model)
+        flat_schema = inline_json_schema(output_schema)
+        self._generator = outlines.Generator(self._outlines_model, outlines.types.JsonSchema(flat_schema))
+
+    @staticmethod
+    def _to_outlines_chat(messages: Any):
+        from outlines.inputs import Chat
+
+        chat = Chat()
+        for msg in messages:
+            if isinstance(msg, dict):
+                role = str(msg.get("role") or "user").lower()
+                content = str(msg.get("content") or "")
+            else:
+                mtype = str(getattr(msg, "type", "user") or "user").lower()
+                role = {"human": "user", "ai": "assistant", "system": "system"}.get(mtype, "user")
+                content = str(getattr(msg, "content", msg) or "")
+            chat.append({"role": role, "content": content})
+        return chat
+
+    def invoke(self, messages: Any, **overrides: Any) -> StructuredGenerationReply:
+        self._last_usage = {}
+        chat = self._to_outlines_chat(messages)
+        kwargs: dict[str, Any] = {
+            "temperature": overrides.get("temperature", self.temperature),
+            "max_tokens": overrides.get("max_tokens", self.max_tokens),
+        }
+        stop = overrides.get("stop", self.stop)
+        if stop:
+            kwargs["stop"] = list(stop)
+        raw_text = self._generator(chat, **kwargs)
+        text = raw_text if isinstance(raw_text, str) else json.dumps(raw_text)
+        parsed = self.output_schema.model_validate_json(text)
+        return StructuredGenerationReply(
+            content=parsed.model_dump_json(),
+            parsed=parsed,
+            usage_metadata=dict(self._last_usage),
+            response_metadata={"model_name": self.model, "outlines": True},
+        )
 
 
 # ── Guardrail Result Models ───────────────────────────────────────────────────
@@ -82,9 +228,11 @@ class InputGuardrail:
             r"(?i)\b(?:you\s+are\s+now|act\s+as|switch\s+to|enter|act\s+in)\s+(?:in\s+)?(?:DAN|developer|jailbreak|unrestricted|god)\s+mode\b"
         ),
         re.compile(
-            r"(?i)\b(?:reveal|show|print|display|output)\s+(?:your\s+)?(?:system\s+prompt|hidden\s+instructions|developer\s+mode|initial\s+prompt)\b"
+            r"(?i)\b(?:reveal|show|print|display|output|dump)\s+(?:your\s+)?(?:(?:full|complete|entire|exact)\s+)?(?:system\s+prompt|hidden\s+instructions|developer\s+mode|initial\s+prompt|tool\s+definitions?)\b"
         ),
-        re.compile(r"(?i)\b(?:output|print)\s+(?:your\s+)?(?:initial|system)\s+instructions\b"),
+        re.compile(
+            r"(?i)\b(?:output|print|reveal)\s+(?:your\s+)?(?:(?:full|complete|entire|exact)\s+)?(?:initial|system)\s+instructions\b"
+        ),
         re.compile(r"(?i)\bdo\s+anything\s+now\b"),
         re.compile(r"(?i)\bpretend\s+(?:you\s+have|to\s+have)\s+no\s+(?:rules|guidelines|safety|restrictions)\b"),
         # A request to MUTATE the database is refused on its action, whatever the framing.  The narrow list this
@@ -152,7 +300,101 @@ class InputGuardrail:
         )
 
 
-# ── 2. Code Agent & SQL Guardrail ─────────────────────────────────────────────
+# ── 2. Scope-Widening & Bulk-Dump Policy Guardrail ───────────────────────────
+
+
+@dataclass
+class ScopePolicyDecision:
+    """Deterministic decision for scope-stripping or whole-database dump attempts."""
+
+    allowed: bool
+    violation: str | None = None  # "scope_refused" | "limit_exceeded"
+    reasons: list[str] = field(default_factory=list)
+    latency_ms: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "allowed": self.allowed,
+            "violation": self.violation,
+            "reasons": self.reasons,
+            "latency_ms": round(self.latency_ms, 3),
+        }
+
+
+class ScopePolicyGuardrail:
+    """Detect general-chat filter-drop imperatives and whole-database bulk-dump requests before SQL generation."""
+
+    _FILTER_NOUNS = (
+        r"(?:census\s+tract|tract|geography|geographic|metro|msa|county|city|state|zip|scope|arm'?s[-\s]*length|"
+        r"saved|favorite|price|market[-\s]*sale)?\s*(?:filter|filters|scope|constraint|constraints|restriction|restrictions)"
+    )
+    _SCOPE_DROP_PATTERNS = (
+        re.compile(
+            rf"(?i)\b(?:forget|ignore|skip|drop|remove|bypass|omit|disable|disregard|turn\s+off|clear)\b"
+            rf"[^.!?\n]{{0,48}}\b{_FILTER_NOUNS}\b"
+        ),
+        re.compile(
+            r"(?i)\b(?:without\s+(?:any\s+)?(?:geography|geographic|tract|county|city|msa|scope)\s+filter|"
+            r"do\s+not\s+filter\s+by\s+(?:census\s+tract|tract|county|city|msa|geography))\b"
+        ),
+    )
+
+    _BULK_DUMP_PATTERNS = (
+        re.compile(
+            r"(?i)\b(?:complete\s+raw\s+contents|full\s+raw\s+(?:contents|dump)|entire\s+database|"
+            r"whole\s+database|every\s+table\s+in\s+the\s+database|all\s+tables(?:\s+and\s+(?:all\s+)?(?:rows|columns))?|"
+            r"dump\s+(?:every|all)\s+tables?)\b"
+        ),
+        re.compile(
+            r"(?i)\b(?:every|all)\s+tables?\b[^.!?\n]{0,60}\b(?:all\s+rows|all\s+columns|raw\s+contents|no\s+limit)\b"
+        ),
+    )
+
+    _PROGRAM_DROP_PATTERNS = (
+        re.compile(
+            r"(?i)\b(?:do\s+not\s+filter|without\s+(?:any\s+)?filtering|no\s+geography\s+filter|"
+            r"ignore\s+(?:the\s+)?(?:tract|geography|scope|arm'?s[-\s]*length)?\s*filter|"
+            r"skip\s+(?:the\s+)?(?:tract|geography|scope)?\s*filter|whole\s+table)\b"
+        ),
+    )
+
+    @classmethod
+    def inspect_request(cls, user_message: str) -> ScopePolicyDecision:
+        t0 = time.perf_counter()
+        text = user_message or ""
+        for pat in cls._SCOPE_DROP_PATTERNS:
+            m = pat.search(text)
+            if m:
+                return ScopePolicyDecision(
+                    allowed=False,
+                    violation="scope_refused",
+                    reasons=[f"Detected scope-widening / filter-removal instruction: {m.group(0)!r}"],
+                    latency_ms=(time.perf_counter() - t0) * 1000.0,
+                )
+        for pat in cls._BULK_DUMP_PATTERNS:
+            m = pat.search(text)
+            if m:
+                return ScopePolicyDecision(
+                    allowed=False,
+                    violation="limit_exceeded",
+                    reasons=[f"Detected unbounded whole-database dump request: {m.group(0)!r}"],
+                    latency_ms=(time.perf_counter() - t0) * 1000.0,
+                )
+        return ScopePolicyDecision(allowed=True, latency_ms=(time.perf_counter() - t0) * 1000.0)
+
+    @classmethod
+    def program_drops_scope(cls, code_str: str) -> list[str]:
+        """Return reasons if generated Code Agent requirements/plan prose tries to strip scope/filters."""
+        reasons: list[str] = []
+        text = code_str or ""
+        for pat in cls._PROGRAM_DROP_PATTERNS:
+            m = pat.search(text)
+            if m:
+                reasons.append(f"Generated program attempts to bypass filtering ('{m.group(0)}').")
+        return reasons
+
+
+# ── 2b. Code Agent & SQL Guardrail ────────────────────────────────────────────
 
 
 class CodeAgentGuardrail:
@@ -343,6 +585,10 @@ class GuardrailManager:
     @staticmethod
     def inspect_turn_input(user_message: str) -> GuardrailResult:
         return InputGuardrail.validate_input(user_message)
+
+    @staticmethod
+    def inspect_scope_and_dump(user_message: str) -> ScopePolicyDecision:
+        return ScopePolicyGuardrail.inspect_request(user_message)
 
     @staticmethod
     def inspect_code_step(code_str: str, approved_functions: Set[str]) -> GuardrailResult:

@@ -105,6 +105,7 @@ MODEL_UNAVAILABLE = "model_unavailable"
 # ── Safety / privacy ─────────────────────────────────────────────────────────
 REFUSED_UNSAFE = "refused_unsafe"
 REFUSED_PII = "refused_pii"
+SCOPE_REFUSED = "scope_refused"
 
 # ── Clarification ────────────────────────────────────────────────────────────
 NEEDS_CLARIFICATION = "needs_clarification"
@@ -136,6 +137,7 @@ CODES = frozenset(
         MODEL_UNAVAILABLE,
         REFUSED_UNSAFE,
         REFUSED_PII,
+        SCOPE_REFUSED,
         NEEDS_CLARIFICATION,
         INTERNAL_ERROR,
     }
@@ -165,6 +167,7 @@ CATEGORY = {
     MODEL_UNAVAILABLE: "model",
     REFUSED_UNSAFE: "safety",
     REFUSED_PII: "privacy",
+    SCOPE_REFUSED: "safety",
     NEEDS_CLARIFICATION: "clarification",
     INTERNAL_ERROR: "internal",
 }
@@ -193,6 +196,7 @@ LABELS = {
     MODEL_UNAVAILABLE: "model unavailable",
     REFUSED_UNSAFE: "refused: unsafe instruction",
     REFUSED_PII: "refused: personal fields",
+    SCOPE_REFUSED: "refused: scope-widening request",
     NEEDS_CLARIFICATION: "asked the user",
     INTERNAL_ERROR: "internal error",
 }
@@ -217,6 +221,20 @@ LIMITATION_TEXT = {
     SQL_INVALID: "The query was rejected by the read-only data contract before it ran. Nothing was estimated.",
     SQL_EXECUTION_ERROR: (
         "The database rejected the generated query, so no result was produced. Nothing was estimated."
+    ),
+    REFUSED_UNSAFE: (
+        "I can't do that. I only read this database - I can't drop, alter or delete tables - and I won't take "
+        "instructions that try to override how I work or expose internal configuration. Ask about the loaded houses, "
+        "sold homes, census, hazard, crime, bike, or transit data instead."
+    ),
+    SCOPE_REFUSED: (
+        "I can't drop a geographic or data-quality filter to run an unbounded table-wide aggregation. "
+        "Which census tract, city, county, or metro area would you like me to focus on?"
+    ),
+    LIMIT_EXCEEDED: (
+        "I cannot dump the complete raw contents of every table in the database because queries are answered per "
+        "question with strict row and column limits. Name a specific table, metric, or place for a bounded summary or "
+        "scoped query."
     ),
     INTERNAL_ERROR: "Something went wrong while answering, so no result was produced. Nothing was estimated.",
 }
