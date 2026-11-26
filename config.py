@@ -153,6 +153,9 @@ class Settings(BaseSettings):
     zhvi_dir: Path = BASE_DIR / "data" / "zhvi"  # ZHVI ("Home Values" -> ZHVI)
     market_heat_dir: Path = BASE_DIR / "data" / "market_heat_index"  # Market Heat Index
     shapefile_dir: Path = BASE_DIR / "data" / "shapefiles"
+    # Census TIGER/Line boundary shapefiles.  Keep this separate from
+    # shapefile_dir: geo_utils treats every .shp there as a census tract.
+    tiger_dir: Path = BASE_DIR / "data" / "tiger"
     fta_dir: Path = BASE_DIR / "data" / "fta"
     fta_safety_file: Path = BASE_DIR / "data" / "fta" / "S&S Time Series-July 2026_261102.xlsx"
     fta_ridership_file: Path = (
@@ -164,7 +167,8 @@ class Settings(BaseSettings):
     # onboarding_max_upload_mb, enforced while streaming
 
     # ── Data onboarding (uploaded datasets; see services/dataset_onboarding.py) ──
-    onboarding_max_upload_mb: int = 250
+    # The nationwide TIGER ZCTA5 zip is about 505 MB; leave headroom for later vintages.
+    onboarding_max_upload_mb: int = 600
     onboarding_sample_rows: int = 8
     onboarding_geocode_row_cap: int = 2000  # rows sent to the Census geocoder per run
     onboarding_api_row_cap: int = 500  # rows allowed through the per-point Census API when no tract geometry is loaded

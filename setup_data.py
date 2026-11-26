@@ -8,6 +8,9 @@ Usage:
     python setup_data.py --only census      # load only Census
     python setup_data.py --only sold        # load only Sold
     python setup_data.py --only bike        # load only Bike Lanes
+    python setup_data.py --only tiger       # load both TIGER boundary layers (ZCTA5 + Place)
+    python setup_data.py --only zcta        # load only Census ZCTA5 boundaries
+    python setup_data.py --only places      # load only Census Place boundaries
     python setup_data.py --only crime       # load only Crime (data/crime/<city>/)
     python setup_data.py --only zhvi        # load only Zillow Home Value Index
     python setup_data.py --only market_heat_index  # load only Zillow Market Heat Index
@@ -24,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config import settings
 import db.duckdb_store as store
+from db import schema_ddl
 import db.schema_catalog as schema
 from services import data_loader
 from services import geo_utils
@@ -62,8 +66,42 @@ def _run_commute_step(explicit: bool) -> None:
         print(f"    - {w}")
 
 
+def _log_source(key: str, rows: int, source_files: list[str] | None = None) -> None:
+    """Record a setup load in the same ledger the Data page uses.
+
+    The Data page previously showed "never refreshed" for almost every built-in
+    source because only uploads called ``record_source_load``.  A setup run is a
+    load too; recording it keeps freshness and provenance honest without making
+    the loaders depend on the HTTP layer.
+    """
+    try:
+        from services import data_sources as source_registry
+
+        source = source_registry.REGISTRY.get(key)
+        if source is None:
+            return
+        store.record_source_load(
+            key,
+            source.label,
+            int(rows or 0),
+            list(source_files or []),
+            "Loaded by setup_data.py",
+        )
+    except Exception as exc:
+        print(f"  ⚠ Source ledger write failed for {key}: {exc}")
+
+
 def run_all(only: str = None, resolve_tracts: bool = False, no_geocoding: bool = False):
     t0 = time.time()
+    if only == "verify":
+        # Read-only: check every catalog relationship against the data that is already loaded.
+        from db import join_health
+
+        schema_ddl.initialize(store.get_conn())
+        result = join_health.print_report(verbose=True)
+        print('Join verification:')
+        print(f"Join verification: {len(result.errors)} error(s), {len(result.warnings)} warning(s)")
+        return
     print("\n🏠 Real Estate Intelligence — Data Setup")
     print(f"   DuckDB: {settings.duckdb_path}")
     print(f"   Chroma: {settings.chroma_dir}")
@@ -76,6 +114,7 @@ def run_all(only: str = None, resolve_tracts: bool = False, no_geocoding: bool =
         settings.data_dir / "sold",
         settings.data_dir / "crime",
         settings.data_dir / "shapefiles",
+        settings.tiger_dir,
         settings.zhvi_dir,
         settings.market_heat_dir,
         settings.uploads_dir,
@@ -114,10 +153,11 @@ def run_all(only: str = None, resolve_tracts: bool = False, no_geocoding: bool =
         n = data_loader.load_nri()
         if n:
             print(f"  ✓ {n:,} tracts loaded")
+            _log_source("nri", n)
             # If shapefile was just loaded, the geometry cache now exists —
             # make it available for tract resolution in subsequent steps
             if settings.nri_shp.exists():
-                geo_utils._load_nri_geometry.cache_clear()
+                geo_utils.clear_geometry_cache()
                 use_geo = geo_utils  # always resolve tracts when shapefile is present
 
     # ── Crime ────────────────────────────────────────────────────────────
@@ -150,6 +190,26 @@ def run_all(only: str = None, resolve_tracts: bool = False, no_geocoding: bool =
             n = data_loader.load_crime()
             if n:
                 print(f"  ✓ {n:,} crime incidents loaded")
+                try:
+                    from services import data_sources as source_registry
+
+                    counts = {
+                        str(row["city"]).strip().lower(): int(row["n"])
+                        for row in store.query(
+                            "SELECT city, COUNT(*) AS n FROM crime_incidents WHERE city IS NOT NULL GROUP BY city"
+                        ).to_dict("records")
+                    }
+                    for city_dir in city_dirs:
+                        key = f"crime_{city_dir.name.lower()}"
+                        city_count = counts.get(city_dir.name.lower(), 0)
+                        if key in source_registry.REGISTRY and city_count:
+                            _log_source(
+                                key,
+                                city_count,
+                                [str(p) for p in city_dir.glob("*") if p.is_file()],
+                            )
+                except Exception:
+                    pass
 
     # ── Bike Lanes ─────────────────────────────────────────────────────────
     if only in (None, "bike", "bike_lanes"):
@@ -165,8 +225,27 @@ def run_all(only: str = None, resolve_tracts: bool = False, no_geocoding: bool =
             n = data_loader.load_bike_routes()
             if n:
                 print(f"  ✓ {n:,} bike route features loaded")
+                _log_source("bike", n)
+            data_loader.load_bike_route_tracts()
+            data_loader.load_bike_route_zctas()
+            data_loader.load_bike_route_places()
 
-    # ── Census (CBSA crosswalk must come first so MSA name→code matching works) ──
+    # ── Census TIGER boundaries ────────────────────────────────────────────
+    if only in (None, "tiger", "zcta", "places", "place"):
+        banner("Census ZCTA5 and Place Boundaries")
+        if only in (None, "tiger", "zcta"):
+            print("  ZCTA5 (Census ZIP Code Tabulation Areas):")
+            n = data_loader.load_tiger_zcta5()
+            if n:
+                _log_source("tiger_zcta", n)
+        if only in (None, "tiger", "places", "place"):
+            print("  Place (incorporated places / Census designated places):")
+            n = data_loader.load_tiger_places()
+            if n:
+                _log_source("tiger_places", n)
+
+    # ── Census (CBSA crosswalk must come first: MSA name→code matching and houses.msa_code need it;
+    #    the full run therefore loads census before redfin) ──
     if only in (None, "census"):
         banner("CBSA County Crosswalk")
         census_dir = settings.cbsa_xlsx.parent
@@ -186,6 +265,12 @@ def run_all(only: str = None, resolve_tracts: bool = False, no_geocoding: bool =
             n = data_loader.load_cbsa_crosswalk()
             if n:
                 print(f"  ✓ {n:,} CBSA→county mappings loaded")
+                _log_source("cbsa", n)
+                # Houses loaded before this file existed have no msa_code; fill them now so the order
+                # between census and redfin stops deciding the result.
+                filled = schema_ddl.backfill_house_msa_codes(store.get_conn())
+                if filled:
+                    print(f"  ✓ Filled msa_code on {filled:,} houses from the new crosswalk")
 
         banner("Census — Tract Populations (DECENNIALPL2020.P1)")
         if not settings.census_tract_csv.exists():
@@ -196,6 +281,8 @@ def run_all(only: str = None, resolve_tracts: bool = False, no_geocoding: bool =
         else:
             n = data_loader.load_census_tracts()
             print(f"  ✓ {n:,} census tracts loaded")
+            if n:
+                _log_source("census_tracts", n)
 
         banner("Census — MSA Populations (DECENNIALPL2020.P1)")
         # Auto-detect: accept settings path OR any DECENNIALPL2020_P1*.csv in the dir
@@ -215,6 +302,7 @@ def run_all(only: str = None, resolve_tracts: bool = False, no_geocoding: bool =
             n = data_loader.load_census_msa()
             if n:
                 print(f"  ✓ {n:,} MSAs loaded")
+                _log_source("census_msa", n)
 
     # ── Zillow Home Value Index (ZHVI) ──────────────────────────────────────
     if only in (None, "zhvi"):
@@ -231,6 +319,7 @@ def run_all(only: str = None, resolve_tracts: bool = False, no_geocoding: bool =
             n = data_loader.load_zhvi()
             if n:
                 print(f"  ✓ {n:,} ZHVI rows loaded")
+                _log_source("zhvi", n)
 
     # ── Zillow Market Heat Index ─────────────────────────────────────────────
     if only in (None, "market_heat_index"):
@@ -246,11 +335,15 @@ def run_all(only: str = None, resolve_tracts: bool = False, no_geocoding: bool =
             n = data_loader.load_market_heat_index()
             if n:
                 print(f"  ✓ {n:,} Market Heat Index rows loaded")
+                _log_source("market_heat_index", n)
 
     # ── Federal Transit Administration (FTA) ──────────────────────────────
     if only in (None, "fta", "transit"):
         banner("Federal Transit Administration (FTA) Data")
-        data_loader.load_fta_data()
+        loaded = data_loader.load_fta_data()
+        for key in ("fta_ridership", "fta_safety", "fta_routes"):
+            if int(loaded.get(key.replace("fta_", ""), 0) or 0):
+                _log_source(key, int(loaded.get(key.replace("fta_", ""), 0) or 0))
 
     # ── Redfin ────────────────────────────────────────────────────────────
     if only in (None, "redfin"):
@@ -261,8 +354,14 @@ def run_all(only: str = None, resolve_tracts: bool = False, no_geocoding: bool =
             print("  → Drop your Redfin export CSVs (with lat/lon) into data/redfin/")
         else:
             print(f"  Found {len(csv_files)} file(s): {[f.name for f in csv_files]}")
+            if not store.get_conn().execute("SELECT 1 FROM cbsa_counties LIMIT 1").fetchone():
+                print("  ⚠ cbsa_counties is empty: houses will load without msa_code, so metro joins return nothing.")
+                print("    Load the census crosswalk first: python setup_data.py --only census")
+                print("    (msa_code is backfilled automatically on the next start once it exists)")
             n = data_loader.load_redfin(use_geo)
             print(f"  ✓ {n:,} houses loaded")
+            if n:
+                _log_source("redfin", n, [str(p) for p in csv_files])
 
     # ── Sold homes ────────────────────────────────────────────────────────
     if only in (None, "sold"):
@@ -280,6 +379,8 @@ def run_all(only: str = None, resolve_tracts: bool = False, no_geocoding: bool =
                 geo_utils=use_geo,
             )
             print(f"  ✓ {n:,} sold homes loaded")
+            if n:
+                _log_source("sold", n, [str(p) for p in csv_files])
 
     # ── Re-geocode pending ────────────────────────────────────────────────
     if only == "geocode":
@@ -371,6 +472,17 @@ def run_all(only: str = None, resolve_tracts: bool = False, no_geocoding: bool =
     except Exception:
         pass
 
+    # Verify the catalog's join claims against the data that was just loaded: key types, value formats, coverage
+    # and the cardinality each relationship declares (db/join_health.py).  Read-only, and a failure never aborts
+    # a load that otherwise succeeded - it names what to fix.
+    from db import join_health
+
+    print()
+    print("Verifying catalog joins ...")
+    health = join_health.print_report()
+    if health.errors:
+        print("  ⚠ Fix the join errors above: the catalog describes a join the loaded data does not satisfy.")
+
     elapsed = time.time() - t0
     print(f"\n✅ Done in {elapsed:.1f}s\n")
     store.close()
@@ -393,9 +505,14 @@ if __name__ == "__main__":
             "match",
             "bike",
             "bike_lanes",
+            "tiger",
+            "zcta",
+            "places",
+            "place",
             "commute",
             "fta",
             "transit",
+            "verify",
         ],
         help=(
             "Load only a specific dataset, or run a maintenance task:\n"
@@ -407,10 +524,14 @@ if __name__ == "__main__":
             "  zhvi              — Zillow Home Value Index (data/zhvi/)\n"
             "  market_heat_index — Zillow Market Heat Index (data/market_heat_index/)\n"
             "  bike              — Bike Lanes (BikePGH active transportation network)\n"
+            "  tiger             — Both TIGER boundary layers (ZCTA5 + Place)\n"
+            "  zcta              — Census ZCTA5 boundaries (data/tiger/)\n"
+            "  places            — Census Place boundaries (data/tiger/)\n"
             "  fta / transit     — Federal Transit Administration (NTD agencies, ridership, safety, routes)\n"
             "  geocode           — Retry pending geocodes for sold homes\n"
             "  commute           — Commute times to your saved work location (see the Commute tab)\n"
             "  repair            — Fix X-coded msa_codes in census_msa (no data reload needed)"
+            "  verify            — Check every catalog join key (type, format, coverage, cardinality) against the data"
         ),
     )
     parser.add_argument(

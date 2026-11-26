@@ -123,9 +123,11 @@ def test_bike_routes_is_a_lines_layer_using_the_specialized_renderer(reference_d
     assert spec["kind"] == "lines" and spec["group"] == "overlay" and spec["renderer"] == "bike_routes"
 
 
-def test_nri_and_census_tracts_are_the_only_fill_layers_and_risk_score_ranks_first(reference_data):
+def test_builtin_fill_layers_include_the_route_tract_bridge_and_risk_score_ranks_first(reference_data):
     out = ml.describe_layers()
-    assert set(out["exclusive_groups"]["fill"]) == {"nri_tracts", "census_tracts"}
+    # bike_route_tracts is an empty bridge in this fixture but is still a valid
+    # tract-anchored fill layer; ZCTA/Place polygons appear once loaded.
+    assert set(out["exclusive_groups"]["fill"]) == {"nri_tracts", "census_tracts", "bike_route_tracts"}
     nri = next(l for l in out["layers"] if l["name"] == "nri_tracts")
     assert nri["kind"] == "choropleth" and nri["default_measure"] == "risk_score"
     cols = {m["column"] for m in nri["measures"]}
@@ -168,7 +170,12 @@ def test_a_dataset_linked_to_nri_tracts_becomes_a_choropleth_with_no_code_change
     assert spec["anchor"] == "nri_tracts"
     assert "natwalkind" in {m["column"] for m in spec["measures"]}
     out = ml.describe_layers()
-    assert set(out["exclusive_groups"]["fill"]) == {"nri_tracts", "census_tracts", "smart_location_database"}
+    assert set(out["exclusive_groups"]["fill"]) == {
+        "nri_tracts",
+        "census_tracts",
+        "bike_route_tracts",
+        "smart_location_database",
+    }
 
 
 def test_retiring_that_dataset_removes_it_from_the_layer_panel(walk_dataset):
@@ -545,7 +552,13 @@ def test_real_database_layer_inventory_and_fill_exclusivity(against_real_db):
     out = ml.describe_layers()
     by_name = {l["name"]: l for l in out["layers"]}
     assert {"houses", "bike_routes", "census_tracts", "crime_incidents", "nri_tracts", "sold_homes"} <= set(by_name)
-    assert set(out["exclusive_groups"]["fill"]) == {"nri_tracts", "census_tracts"}
+    assert set(out["exclusive_groups"]["fill"]) == {
+        "nri_tracts",
+        "census_tracts",
+        "bike_route_tracts",
+        "zcta_boundaries",
+        "place_boundaries",
+    }
     assert {n for n, l in by_name.items() if l["group"] == "overlay"} >= {
         "houses",
         "bike_routes",

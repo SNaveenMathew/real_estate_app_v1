@@ -84,6 +84,8 @@ TITLE_OVERRIDES = {  # cosmetic only; every one of these is also reachable throu
     "transit_routes": "Transit Routes",
     "nri_tracts": "Risk (NRI)",
     "census_tracts": "Population",
+    "zcta_boundaries": "ZIP Code Areas (ZCTA)",
+    "place_boundaries": "City / Place Boundaries",
 }
 
 # Columns that are never offered as a "color by" measure or a heat weight: identifiers, join keys and

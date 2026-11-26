@@ -19,6 +19,7 @@ from services.loaders import sold  # noqa: F401
 from services.loaders import bike  # noqa: F401
 from services.loaders import zillow  # noqa: F401
 from services.loaders import transit  # noqa: F401
+from services.loaders import tiger  # noqa: F401
 
 from services.loaders.redfin import *  # noqa: F401,F403
 from services.loaders.nri import *  # noqa: F401,F403
@@ -29,6 +30,7 @@ from services.loaders.sold import *  # noqa: F401,F403
 from services.loaders.bike import *  # noqa: F401,F403
 from services.loaders.zillow import *  # noqa: F401,F403
 from services.loaders.transit import *  # noqa: F401,F403
+from services.loaders.tiger import *  # noqa: F401,F403
 
 __all__ = sorted(
     {
@@ -41,5 +43,6 @@ __all__ = sorted(
         *bike.__all__,
         *zillow.__all__,
         *transit.__all__,
+        *tiger.__all__,
     }
 )

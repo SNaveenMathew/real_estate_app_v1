@@ -29,8 +29,23 @@ __all__ = [
     "load_transit_ridership",
     "load_transit_safety",
     "load_transit_routes",
+    "load_transit_route_agencies",
+    "load_transit_route_zctas",
+    "load_transit_route_places",
     "load_fta_data",
 ]
+
+
+def _route_uid(*parts: str) -> str:
+    """Deterministic identity for one route feature in a snapshot.
+
+    Every stored attribute participates, not just the shapefile row index:
+    feeds publish several routes with the same ntd_id/feed_id/route_id/
+    shape_id, and sometimes those rows differ only in metadata. Identical
+    duplicate rows still collapse under the primary key.
+    """
+    return hashlib.md5("|".join(parts).encode()).hexdigest()[:20]
+
 
 # ── Federal Transit Administration (FTA) Data ─────────────────────────────────
 
@@ -422,7 +437,6 @@ def load_transit_routes() -> int:
             route_text = ""
         download_d = str(gdf["download_d"].iloc[i] or "") if pd.notna(gdf["download_d"].iloc[i]) else ""
 
-        uid = hashlib.md5(f"{ntd_id}_{feed_id}_{route_id}_{shape_id}_{i}".encode()).hexdigest()[:20]
         geo_json_str = shapely.to_geojson(geom)
         props = {
             "ntd_id": ntd_id,
@@ -432,6 +446,25 @@ def load_transit_routes() -> int:
             "route_type_name": route_ty_1,
             "color": route_colo or "#4f8ef7",
         }
+        properties_json = json.dumps(props, ensure_ascii=False)
+        uid = _route_uid(
+            ntd_id,
+            feed_id,
+            route_id,
+            shape_id,
+            agency_id,
+            route_shor,
+            route_long,
+            route_desc,
+            route_type,
+            route_ty_1,
+            route_url,
+            route_colo,
+            route_text,
+            download_d,
+            geo_json_str,
+            properties_json,
+        )
 
         rows.append(
             {
@@ -455,7 +488,7 @@ def load_transit_routes() -> int:
                 "max_lon": float(maxx),
                 "max_lat": float(maxy),
                 "geometry_json": geo_json_str,
-                "properties_json": json.dumps(props, ensure_ascii=False),
+                "properties_json": properties_json,
             }
         )
 
@@ -464,14 +497,211 @@ def load_transit_routes() -> int:
 
     chunk_size = 25_000
     n_chunks = max(1, math.ceil(len(out) / chunk_size))
-    for i in range(n_chunks):
-        chunk = out.iloc[i * chunk_size : (i + 1) * chunk_size]
-        store.upsert_df("transit_routes", chunk)
-        if n_chunks > 1:
-            print(f"    Upserted routes chunk {i + 1}/{n_chunks} ({len(chunk):,} features)")
+    conn = store.get_conn()
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        # A national route snapshot: replace the table so routes removed upstream
+        # do not survive an upsert. route_uid is stable across refreshes.
+        conn.execute("DELETE FROM transit_routes")
+        for i in range(n_chunks):
+            chunk = out.iloc[i * chunk_size : (i + 1) * chunk_size]
+            store.upsert_df("transit_routes", chunk)
+            if n_chunks > 1:
+                print(f"    Upserted routes chunk {i + 1}/{n_chunks} ({len(chunk):,} features)")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
 
     print(f"  ✓ {len(out):,} transit route features loaded across {out['ntd_id'].nunique():,} agencies")
+    load_transit_route_agencies()
     return len(out)
+
+
+def load_transit_route_agencies() -> int:
+    """Split the route file's multi-valued ``ntd_id`` into one row per route/agency.
+
+    The source field is a semicolon-separated list for some feeds (for example
+    ``90032;90034;90131``).  A direct equality join silently misses every one of
+    those routes, so the catalog joins through this bridge instead.  Unmatched
+    agency IDs are retained: they are a real coverage signal, not a parse error.
+    """
+    routes = store.query("SELECT route_uid, ntd_id FROM transit_routes")
+    rows: list[dict[str, str]] = []
+    if not routes.empty:
+        for row in routes.itertuples(index=False):
+            route_uid = "" if pd.isna(row.route_uid) else str(row.route_uid).strip()
+            raw = "" if pd.isna(row.ntd_id) else str(row.ntd_id).strip()
+            if not route_uid:
+                continue
+            ids = sorted({part.strip() for part in raw.split(";") if part.strip()})
+            for ntd_id in ids:
+                rows.append({"route_uid": route_uid, "ntd_id": ntd_id, "raw_ntd_id": raw})
+
+    out = pd.DataFrame(rows, columns=["route_uid", "ntd_id", "raw_ntd_id"])
+    conn = store.get_conn()
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        conn.execute("DELETE FROM transit_route_agencies")
+        if not out.empty:
+            conn.register("__transit_route_agencies", out)
+            conn.execute(
+                "INSERT INTO transit_route_agencies (route_uid, ntd_id, raw_ntd_id) "
+                "SELECT route_uid, ntd_id, raw_ntd_id FROM __transit_route_agencies"
+            )
+            conn.unregister("__transit_route_agencies")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    print(
+        f"  ✓ {len(out):,} route-agency memberships across "
+        f"{out['route_uid'].nunique() if not out.empty else 0:,} routes"
+    )
+    return len(out)
+
+
+def _build_transit_route_bridge(boundary_table: str, boundary_key: str, bridge_table: str) -> int:
+    """Build the route-to-area bridge for transit route linework.
+
+    The bridge is deliberately separate from ``transit_routes``: a route can
+    cross many ZCTAs/Places, and a route that merely touches a boundary is not a
+    member of it.  Overlaps are measured on projected linework in metres, then
+    divided by each route's full projected length so ``route_fraction`` stays
+    interpretable even when boundary coverage is incomplete.
+
+    A missing/empty source table leaves the existing bridge untouched: a failed
+    or partial boundary refresh must not erase a good bridge.  A successful
+    build replaces the bridge in one transaction.
+    """
+    import geopandas as gpd
+    import shapely
+
+    conn = store.get_conn()
+    route_count = int(store.query("SELECT COUNT(*) AS n FROM transit_routes").iloc[0]["n"])
+    if not route_count:
+        print(f"  ⚠ No transit routes loaded; {bridge_table} left untouched")
+        return 0
+    boundary_count = int(
+        store.query(f"SELECT COUNT(*) AS n FROM {boundary_table} WHERE {boundary_key} IS NOT NULL").iloc[0]["n"]
+    )
+    if not boundary_count:
+        print(f"  ⚠ No {boundary_table} loaded; {bridge_table} left untouched")
+        return 0
+
+    boundaries = store.query(
+        f"SELECT {boundary_key} AS boundary_key, geometry_json FROM {boundary_table} "
+        f"WHERE {boundary_key} IS NOT NULL AND geometry_json IS NOT NULL"
+    )
+    if boundaries.empty:
+        print(f"  ⚠ {boundary_table} has no usable geometry; {bridge_table} left untouched")
+        return 0
+    boundaries_gdf = gpd.GeoDataFrame(
+        {"boundary_key": boundaries["boundary_key"].astype(str).to_numpy()},
+        geometry=shapely.from_geojson(boundaries["geometry_json"].astype(str).to_numpy()),
+        crs="EPSG:4326",
+    )
+    boundaries_gdf = boundaries_gdf[
+        boundaries_gdf.geometry.notna() & ~boundaries_gdf.geometry.is_empty
+    ].drop_duplicates(subset=["boundary_key"])
+    if boundaries_gdf.empty:
+        print(f"  ⚠ {boundary_table} has no usable geometry; {bridge_table} left untouched")
+        return 0
+    boundaries_m = boundaries_gdf.to_crs("EPSG:5070")
+
+    print(f"  Building {bridge_table} from {route_count:,} transit routes × {len(boundaries_m):,} boundaries...")
+    pairs: dict[tuple[str, str], float] = {}
+    route_lengths: dict[str, float] = {}
+    chunk_size = 5000
+    offset = 0
+    while True:
+        routes = store.query(
+            "SELECT route_uid, geometry_json FROM transit_routes "
+            "WHERE route_uid IS NOT NULL AND geometry_json IS NOT NULL "
+            "ORDER BY route_uid LIMIT ? OFFSET ?",
+            [chunk_size, offset],
+        )
+        if routes.empty:
+            break
+        offset += len(routes)
+        routes_gdf = gpd.GeoDataFrame(
+            {"route_uid": routes["route_uid"].astype(str).to_numpy()},
+            geometry=shapely.from_geojson(routes["geometry_json"].astype(str).to_numpy()),
+            crs="EPSG:4326",
+        )
+        routes_gdf = routes_gdf[
+            routes_gdf.geometry.notna() & ~routes_gdf.geometry.is_empty
+        ].drop_duplicates(subset=["route_uid"])
+        if routes_gdf.empty:
+            continue
+        routes_m = routes_gdf.to_crs("EPSG:5070")
+        routes_m["geometry"] = routes_m.geometry.make_valid()
+        routes_m["route_length_m"] = routes_m.length
+        route_lengths.update(
+            {
+                str(row.route_uid): float(row.route_length_m)
+                for row in routes_m[["route_uid", "route_length_m"]].itertuples(index=False)
+                if row.route_length_m and row.route_length_m > 0
+            }
+        )
+
+        minx, miny, maxx, maxy = routes_m.total_bounds
+        nearby = boundaries_m.cx[minx - 1000 : maxx + 1000, miny - 1000 : maxy + 1000]
+        if nearby.empty:
+            continue
+        nearby_tree = nearby.sindex
+        nearby_geoms = list(nearby.geometry)
+        nearby_keys = nearby["boundary_key"].to_numpy()
+        for route_uid, route_geom in zip(routes_m["route_uid"], routes_m.geometry):
+            try:
+                candidate_idx = nearby_tree.query(route_geom, predicate="intersects")
+            except TypeError:  # older shapely: query without a predicate, then measure each candidate
+                candidate_idx = nearby_tree.query(route_geom)
+            for idx in candidate_idx:
+                try:
+                    overlap = route_geom.intersection(nearby_geoms[idx]).length
+                except Exception:
+                    continue
+                if overlap > 1.0:  # ignore point/boundary touches
+                    key = (str(route_uid), str(nearby_keys[idx]))
+                    pairs[key] = pairs.get(key, 0.0) + float(overlap)
+        print(f"    Processed {offset:,}/{route_count:,} routes ({len(pairs):,} overlaps)")
+
+    rows = []
+    for (route_uid, boundary_value), overlap_m in pairs.items():
+        total = route_lengths.get(route_uid, 0.0)
+        if total <= 0:
+            continue
+        fraction = min(1.0, max(0.0, overlap_m / total))
+        rows.append((route_uid, boundary_value, round(overlap_m, 3), round(fraction, 6)))
+    out = pd.DataFrame(rows, columns=["route_uid", "boundary_key", "overlap_m", "route_fraction"])
+
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        conn.execute(f"DELETE FROM {bridge_table}")
+        if not out.empty:
+            conn.register("__transit_bridge", out)
+            conn.execute(
+                f"INSERT INTO {bridge_table} (route_uid, {boundary_key}, overlap_m, route_fraction) "
+                f"SELECT route_uid, boundary_key, overlap_m, route_fraction FROM __transit_bridge"
+            )
+            conn.unregister("__transit_bridge")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    print(f"  ✓ {len(out):,} transit route/boundary overlap(s) written to {bridge_table}")
+    return len(out)
+
+
+def load_transit_route_zctas() -> int:
+    """Rebuild the transit-route to ZCTA overlap bridge from installed geometry."""
+    return _build_transit_route_bridge("zcta_boundaries", "zcta5", "transit_route_zctas")
+
+
+def load_transit_route_places() -> int:
+    """Rebuild the transit-route to Census Place overlap bridge from installed geometry."""
+    return _build_transit_route_bridge("place_boundaries", "place_geoid", "transit_route_places")
 
 
 def load_fta_data() -> dict[str, int]:
@@ -483,9 +713,13 @@ def load_fta_data() -> dict[str, int]:
     n_ridership = load_transit_ridership()
     n_safety = load_transit_safety()
     n_routes = load_transit_routes()
+    n_route_zctas = load_transit_route_zctas()
+    n_route_places = load_transit_route_places()
     return {
         "agencies": n_agencies,
         "ridership": n_ridership,
         "safety": n_safety,
         "routes": n_routes,
+        "route_zctas": n_route_zctas,
+        "route_places": n_route_places,
     }

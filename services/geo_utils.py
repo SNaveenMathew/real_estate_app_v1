@@ -95,6 +95,19 @@ def _load_tracts_gdf() -> Optional[gpd.GeoDataFrame]:
     return None
 
 
+def clear_geometry_cache() -> None:
+    """Drop the process-local geometry caches after a loader replaces their source files.
+
+    ``load_nri`` writes a new parquet cache, but a long-running server otherwise keeps
+    serving the old GeoDataFrame from ``lru_cache``.  The bike-tract bridge is built in
+    the same process immediately after an NRI refresh, so stale geometry would put the
+    wrong tracts in the bridge even though the parquet on disk is current.
+    """
+    _load_nri_geometry.cache_clear()
+    _load_tiger_shapefiles.cache_clear()
+    _load_tracts_gdf.cache_clear()
+
+
 # ── Spatial join ──────────────────────────────────────────────────────────────
 
 

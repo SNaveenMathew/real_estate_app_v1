@@ -19,7 +19,14 @@ from config import settings
 import db.duckdb_store as store
 
 
-__all__ = ["_BIKE_LAYER_SPECS", "_norm_folder_name", "_bike_route_id", "_json_safe_value", "load_bike_routes"]
+__all__ = [
+    "_BIKE_LAYER_SPECS",
+    "_norm_folder_name",
+    "_bike_route_id",
+    "_json_safe_value",
+    "load_bike_routes",
+    "load_bike_route_tracts",
+]
 
 # ── Bike routes ────────────────────────────────────────────────────────────────
 # Standardizes any BikePGH-style line datasets stored as:
@@ -151,4 +158,109 @@ def load_bike_routes() -> int:
     out = out.drop_duplicates(subset=["route_id"])
     store.upsert_df("bike_routes", out)
     print(f"  ✓ {len(out):,} bike route features loaded across {out['city'].nunique()} cities")
+    return len(out)
+
+
+def load_bike_route_tracts() -> int:
+    """Build the route-to-tract bridge from the installed tract geometry.
+
+    A route can cross several tracts, so this is deliberately one row per
+    route/tract overlap rather than a ``tract_fips`` column on ``bike_routes``.
+    County and CBSA/MSA are reached from ``tract_fips`` through the existing
+    census/NRI/CBSA relationships.
+    """
+    import geopandas as gpd
+    import shapely
+    from services import geo_utils
+
+    routes = store.query("SELECT route_id, geometry_json FROM bike_routes")
+    conn = store.get_conn()
+    if routes.empty:
+        conn.execute("DELETE FROM bike_route_tracts")
+        print("  - No bike routes; route-to-tract bridge cleared")
+        return 0
+
+    geoms = shapely.from_geojson(routes["geometry_json"].astype(str).to_numpy())
+    routes_gdf = gpd.GeoDataFrame(
+        {"route_id": routes["route_id"].astype(str).to_numpy()},
+        geometry=geoms,
+        crs="EPSG:4326",
+    )
+    routes_gdf = routes_gdf[routes_gdf.geometry.notna() & ~routes_gdf.geometry.is_empty].copy()
+    if routes_gdf.empty:
+        conn.execute("DELETE FROM bike_route_tracts")
+        print("  ⚠ Bike routes have no usable geometry; route-to-tract bridge cleared")
+        return 0
+
+    tracts = geo_utils._load_tracts_gdf()
+    if tracts is None:
+        # Leaving the previous bridge in place would make an empty/removed geometry source
+        # look healthy. Clear it so coverage and join health report the real state.
+        conn.execute("DELETE FROM bike_route_tracts")
+        print("  ⚠ No tract geometry available; route-to-tract bridge cleared")
+        return 0
+
+    # Restrict the national tract layer to the routes' footprint before the
+    # spatial join.  The NRI cache remains the single geometry source; no
+    # boundary columns are added to bike_routes.
+    min_lon, min_lat, max_lon, max_lat = routes_gdf.total_bounds
+    pad = 0.05
+    tracts = tracts.cx[min_lon - pad : max_lon + pad, min_lat - pad : max_lat + pad]
+    tracts = tracts[tracts["tract_fips"].notna() & tracts.geometry.notna() & ~tracts.geometry.is_empty].copy()
+    tracts = tracts.drop_duplicates(subset=["tract_fips"])
+    if tracts.empty:
+        conn.execute("DELETE FROM bike_route_tracts")
+        print("  ⚠ No tract polygons intersect the bike routes; route-to-tract bridge cleared")
+        return 0
+
+    utm = routes_gdf.estimate_utm_crs() or "EPSG:32617"
+    routes_m = routes_gdf.to_crs(utm)
+    tracts_m = tracts.to_crs(utm)
+    routes_m["geometry"] = routes_m.geometry.make_valid()
+    tracts_m["geometry"] = tracts_m.geometry.make_valid()
+
+    candidates = gpd.sjoin(
+        routes_m[["route_id", "geometry"]],
+        tracts_m[["tract_fips", "geometry"]],
+        how="inner",
+        predicate="intersects",
+    )
+    route_geoms = routes_m.set_index("route_id").geometry
+    tract_geoms = tracts_m.set_index("tract_fips").geometry
+    overlaps = []
+    for row in candidates[["route_id", "tract_fips"]].itertuples(index=False):
+        route_geom = route_geoms.get(row.route_id)
+        tract_geom = tract_geoms.get(row.tract_fips)
+        if route_geom is None or tract_geom is None:
+            continue
+        try:
+            overlap = route_geom.intersection(tract_geom).length
+        except Exception:
+            continue
+        if overlap > 1.0:  # ignore point/boundary touches; 1 m is the noise floor
+            overlaps.append((row.route_id, row.tract_fips, float(overlap)))
+
+    out = pd.DataFrame(overlaps, columns=["route_id", "tract_fips", "overlap_m"])
+    if not out.empty:
+        out = out.groupby(["route_id", "tract_fips"], as_index=False)["overlap_m"].sum()
+        out["overlap_m"] = out["overlap_m"].round(3)
+
+    conn.execute("BEGIN")
+    try:
+        conn.execute("DELETE FROM bike_route_tracts")
+        if not out.empty:
+            conn.register("__bike_route_tracts", out)
+            conn.execute(
+                "INSERT INTO bike_route_tracts (route_id, tract_fips, overlap_m) "
+                "SELECT route_id, tract_fips, overlap_m FROM __bike_route_tracts"
+            )
+            conn.unregister("__bike_route_tracts")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+    print(
+        f"  ✓ {len(out):,} route/tract overlaps across {out['route_id'].nunique() if not out.empty else 0:,} routes"
+    )
     return len(out)

@@ -20,7 +20,7 @@ def test_list_layers_shape_and_exclusive_groups(client):
     out = client.get("/api/layers").json()
     names = {l["name"] for l in out["layers"]}
     assert {"houses", "nri_tracts", "census_tracts", "commute"} <= names
-    assert set(out["exclusive_groups"]["fill"]) == {"nri_tracts", "census_tracts"}
+    assert set(out["exclusive_groups"]["fill"]) == {"nri_tracts", "census_tracts", "bike_route_tracts"}
     houses = next(l for l in out["layers"] if l["name"] == "houses")
     assert houses["default_on"] is True and houses["special"] == "houses"
 
