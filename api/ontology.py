@@ -25,6 +25,11 @@ def ontology_document(
     format: str = Query(default="json", description="json (default) or jsonld"),
     counts: bool = Query(default=False, description="also count the live values behind each entity type"),
 ):
+    """Classes, properties, typed edges, transform vocabulary, coverage and structural issues.
+
+    ``format=jsonld`` returns the same document as a reified ``@graph``.  ``counts=true`` adds one
+    ``COUNT(DISTINCT)`` per entity domain; the default build performs metadata reads only.
+    """
     store.get_conn()
     doc = ontology.build_ontology(with_counts=counts)
     if format.lower() in {"jsonld", "json-ld"}:

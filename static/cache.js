@@ -38,15 +38,17 @@ const fmt = n => (n == null || n === '' ? '–' : Number(n).toLocaleString('en-U
 const clip = (t, n) => { const v = String(t == null ? '' : t); return v.length > n ? v.slice(0, n - 1) + '…' : v; };
 
 /* ---------------------------------------------------------------- vocabulary */
-const LANES = ['domain', 'dataset', 'concept', 'entity_type', 'table', 'column'];
+const LANES = ['domain', 'dataset', 'concept', 'entity_type', 'transform', 'table', 'column'];
 const LANE_LABEL = {
   domain: 'subject area', dataset: 'dataset', concept: 'concept',
-  entity_type: 'entity type', table: 'table', column: 'column (property)',
+  entity_type: 'entity type', transform: 'join-key rule', table: 'table', column: 'column (property)',
 };
-const LANE_WIDTH = { domain: 176, dataset: 208, concept: 286, entity_type: 178, table: 190, column: 236 };
+const LANE_WIDTH = {
+  domain: 176, dataset: 208, concept: 286, entity_type: 178, transform: 214, table: 190, column: 236,
+};
 const KIND_COLOR = {
   domain: '#0f9d8a', dataset: '#6d4fc4', concept: '#3d7be8',
-  entity_type: '#e0742f', table: '#7b8598', column: '#9aa5b8',
+  entity_type: '#e0742f', transform: '#b5651d', table: '#7b8598', column: '#9aa5b8',
 };
 const DOMAIN_ORDER = ['housing', 'geography', 'risk', 'sales', 'safety', 'mobility', 'environment',
   'demographics', 'other', 'system'];
@@ -57,7 +59,8 @@ const DOMAIN_COLOR = {
 const EDGE_COLOR = {
   in_domain: '#dfe5ef', in_dataset: '#e2daf6', in_table: '#e8edf5', uses_table: '#a8bad2',
   measures: '#c99a2e', about: '#e0a06a', requires_entity: '#c9770f', subclass_of: '#0f9d8a',
-  overrides: '#5a67d8', joins: '#c2415c', identified_by: '#8d6e63', derived_from: '#b08a1e',
+  overrides: '#5a67d8', joins: '#c2415c', transformed_by: '#b5651d', identified_by: '#8d6e63',
+  derived_from: '#b08a1e',
 };
 const ROW = 32, HEAD = 48, LANE_GAP = 86;
 
@@ -83,6 +86,16 @@ function renderStats() {
     card('Tables', fmt(st.tables), 'physical tables the planner may read'),
     card('Columns', fmt(st.columns), 'properties, with role and unit'),
     card('Relations', fmt(st.relationships), 'approved join paths'),
+    card('Key rules', fmt(st.transformations), `${fmt(st.relationships_with_transform)} joins normalized · ${fmt(st.opaque_relationships)} custom expressions`),
+    card('Coverage',
+      g.coverage && g.coverage.gaps.length
+        ? `${g.coverage.gaps.length} setup gap${g.coverage.gaps.length === 1 ? '' : 's'}`
+        : g.coverage && (g.coverage.data_gaps || []).length
+          ? `${g.coverage.data_gaps.length} data gap${g.coverage.data_gaps.length === 1 ? '' : 's'}`
+          : 'complete',
+      g.coverage && (g.coverage.data_gaps || []).length
+        ? 'metadata complete; physical or semantic join gaps remain'
+        : 'visible tables with concepts and join paths'),
     card('Entity types', fmt(st.entity_types), 'named values a request can anchor to'),
     card('Datasets', fmt(st.datasets), 'built-in model plus uploads'),
     card('Model checks', `${errors} err · ${warnings} warn`,
@@ -154,6 +167,9 @@ function subLine(n) {
     const cols = (n.columns || []).length;
     return n.individuals == null ? `${cols} source column${cols === 1 ? '' : 's'}`
       : `${fmt(n.individuals)} values · ${cols} source column${cols === 1 ? '' : 's'}`;
+  }
+  if (n.kind === 'transform') {
+    return `${n.needs_width ? 'needs a width' : 'no width'} · ${n.normalizes_target ? 'normalizes both sides' : 'source side only'}`;
   }
   if (n.kind === 'table') return `${fmt(n.rows)} rows · ${n.domain || 'other'}`;
   const bits = [n.role || 'column'];
@@ -273,7 +289,9 @@ function connections(node) {
     const outgoing = e.source === node.id;
     const other = byId.get(outgoing ? e.target : e.source);
     const label = (S.graph.predicates || {})[e.predicate] || e.predicate;
-    const attrs = [e.cardinality, e.confidence ? `${e.confidence} confidence` : null, e.match_mode]
+    const attrs = [e.cardinality, e.confidence ? `${e.confidence} confidence` : null, e.match_mode,
+      e.predicate === 'transformed_by' ? (e.column || e.expr) : null,
+      e.predicate === 'transformed_by' ? e.rule : null]
       .filter(Boolean).join(' · ');
     list.append(h('li', null,
       h('span', { class: 'mono' }, outgoing ? '→' : '←'), ' ', label, ' ',
@@ -302,6 +320,10 @@ function showNode(node) {
       ['Entity types', (node.entity_types || []).join(', ') || '—'],
       ['Grain', node.grain || '—'],
       ['Null policy', node.null_policy || '—'],
+      ['Required terms', (node.required_terms || []).join(', ') || '—'],
+      ['Excluded terms', (node.excluded_terms || []).join(', ') || '—'],
+      ['Default operation', node.default_operation || '—'],
+      ['Filters', (node.filters || []).length ? `${(node.filters || []).length} declared` : '—'],
       ['Narrower than', (node.broader || []).join(', ') || '—'],
       ['Takes precedence over', (node.overrides || []).join(', ') || '—'],
       ['Origin', node.origin || 'builtin'],
@@ -325,6 +347,7 @@ function showNode(node) {
     pairs.push(['Area', node.domain || '—'], ['Grain', node.grain || '—'],
       ['Rows', fmt(node.rows)], ['Visible to the agents', node.agent_visible ? 'yes' : 'no'],
       ['Default filter', h('span', { class: 'mono' }, node.default_filter || '—')],
+      ['Setup hint', node.setup_hint || '—'], ['Filter hint', node.filter_hint || '—'],
       ['Origin', node.origin || 'builtin'], ['Dataset', node.dataset_id || '—']);
     body.replaceChildren(kv(pairs), h('div', { class: 'card' }, h('h3', null, 'Relations'), connections(node)));
     renderMap();
@@ -333,7 +356,8 @@ function showNode(node) {
   if (node.kind === 'column') {
     pairs.push(['Table', node.table], ['Type', node.type || '—'], ['Role', node.role || '—'],
       ['Unit', node.unit || '—'], ['Derived from', node.derived_from || '—'],
-      ['Hidden from prompts', node.hidden ? 'yes' : 'no'], ['Origin', node.origin || 'builtin']);
+      ['Hidden from prompts', node.hidden ? 'yes' : 'no'], ['Primary key', node.primary_key ? 'yes' : 'no'],
+      ['Not null', node.not_null ? 'yes' : 'no'], ['Origin', node.origin || 'builtin']);
     body.replaceChildren(kv(pairs), h('div', { class: 'card' }, h('h3', null, 'Relations'), connections(node)));
     renderMap();
     return;
@@ -347,6 +371,16 @@ function showNode(node) {
         cols.length ? kv(cols.map(c => [`${c.table}.${c.column}`, `${c.match_mode}${c.domain ? ' · ' + c.domain : ''}`]))
           : h('p', { class: 'muted' }, 'None.')),
       h('div', { class: 'card' }, h('h3', null, 'Relations'), connections(node)));
+    renderMap();
+    return;
+  }
+  if (node.kind === 'transform') {
+    pairs.push(['Rule key', h('span', { class: 'mono' }, node.key)],
+      ['Needs width', node.needs_width ? 'yes' : 'no'],
+      ['Accepted widths', (node.widths || []).join(', ') || '—'],
+      ['SQL pattern', h('span', { class: 'mono' }, node.sql_pattern || '—')],
+      ['Target side', node.normalizes_target ? 'normalized too' : 'unchanged']);
+    body.replaceChildren(kv(pairs), h('div', { class: 'card' }, h('h3', null, 'Relations'), connections(node)));
     renderMap();
     return;
   }
