@@ -37,3 +37,28 @@ def test_run_without_a_judge_only_runs_the_deterministic_half():
     rows, ok = calibration.run(judge=None)
     assert ok
     assert {r["id"] for r in rows} == {c.id for c in calibration.CALIBRATION_CASES}
+
+
+def test_judge_calibration_covers_sixteen_balanced_controls():
+    assert len(calibration.JUDGE_CASES) >= 16
+    ids = [c.id for c in calibration.JUDGE_CASES]
+    assert len(ids) == len(set(ids))
+    verdicts = {c.expected_verdict for c in calibration.JUDGE_CASES}
+    assert verdicts == {"PASS", "FAIL"}
+    assert any(c.artifacts for c in calibration.JUDGE_CASES)
+
+
+def test_judge_calibration_executes_with_stub_judge_and_forwards_artifacts():
+    seen = []
+
+    class MirrorJudge:
+        def judge(self, example, reply, *, artifacts=()):
+            seen.append((example.id, artifacts))
+            expected = next(c.expected_verdict for c in calibration.JUDGE_CASES if c.id == example.id)
+            from eval.scoring import ScoreResult
+
+            return ScoreResult(example.id, expected, "llm_judge", "stub")
+
+    rows = calibration.judge_rows(MirrorJudge())
+    assert len(rows) == len(calibration.JUDGE_CASES) and all(r["ok"] for r in rows)
+    assert any(cid == "cal-judge-artifact-table-pass" and arts for cid, arts in seen)

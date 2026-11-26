@@ -130,20 +130,32 @@ class JudgeCase:
     example: GoldenExample
     reply: str
     expected_verdict: str
+    artifacts: tuple[dict, ...] = ()
+
+
+def _free(id: str, question: str, rubric: str) -> GoldenExample:
+    return GoldenExample(
+        id=id,
+        agent="general",
+        answer_type="free_text",
+        question=question,
+        rubric=rubric,
+        expected=[],
+        order_matters=False,
+        value_type="string",
+    )
+
+
+_LONG_NOISE = " Supporting tract table rows inspected for Allegheny County census tracts." * 65  # > 4,500 chars
 
 
 JUDGE_CASES: tuple[JudgeCase, ...] = (
     JudgeCase(
         "cal-judge-good",
-        GoldenExample(
-            id="cal-judge-good",
-            agent="general",
-            answer_type="free_text",
-            question="How risky is flooding in Allegheny County?",
-            rubric="Must state the county's flood risk category and that it comes from FEMA NRI data.",
-            expected=[],
-            order_matters=False,
-            value_type="string",
+        _free(
+            "cal-judge-good",
+            "How risky is flooding in Allegheny County?",
+            "Must state the county's flood risk category and that it comes from FEMA NRI data.",
         ),
         "Allegheny County's flood risk from the FEMA National Risk Index is 'Relatively Moderate'; the score and "
         "rating come from nri_tracts for the county's tracts.",
@@ -151,17 +163,161 @@ JUDGE_CASES: tuple[JudgeCase, ...] = (
     ),
     JudgeCase(
         "cal-judge-bad",
-        GoldenExample(
-            id="cal-judge-bad",
-            agent="general",
-            answer_type="free_text",
-            question="How risky is flooding in Allegheny County?",
-            rubric="Must state the county's flood risk category and that it comes from FEMA NRI data.",
-            expected=[],
-            order_matters=False,
-            value_type="string",
+        _free(
+            "cal-judge-bad",
+            "How risky is flooding in Allegheny County?",
+            "Must state the county's flood risk category and that it comes from FEMA NRI data.",
         ),
         "I think flooding is probably fine there, but I don't have the data loaded.",
+        "FAIL",
+    ),
+    JudgeCase(
+        "cal-judge-long-pass",
+        _free(
+            "cal-judge-long-pass",
+            "Summarize FEMA NRI flood risk for Allegheny County.",
+            "Must state FEMA NRI riverine flood risk score 12.5 for Pittsburgh's tract without inventing missing hazards.",
+        ),
+        f"Summary from FEMA NRI:{_LONG_NOISE}\n\nConclusion: Pittsburgh's tract riverine flood risk score is 12.5.",
+        "PASS",
+    ),
+    JudgeCase(
+        "cal-judge-long-fail",
+        _free(
+            "cal-judge-long-fail",
+            "Summarize FEMA NRI flood risk for Allegheny County.",
+            "Must state FEMA NRI riverine flood risk score 12.5 and must NOT invent tsunami risk scores when NULL.",
+        ),
+        f"Summary from FEMA NRI:{_LONG_NOISE}\n\nPittsburgh's tract riverine flood risk is 12.5 and tsunami risk is 84.0.",
+        "FAIL",
+    ),
+    JudgeCase(
+        "cal-judge-artifact-table-pass",
+        _free(
+            "cal-judge-artifact-table-pass",
+            "Dump every column of every house as a table.",
+            "May present the saved houses in a table artifact respecting row caps and must not invent nonexistent columns.",
+        ),
+        "The saved houses query returned 6 rows with columns shown in the table beside this reply.",
+        "PASS",
+        artifacts=(
+            {
+                "kind": "table",
+                "title": "Saved houses",
+                "columns": ["house_id", "city", "price"],
+                "rows": [{"house_id": "h1", "city": "Pittsburgh", "price": 350000}],
+            },
+        ),
+    ),
+    JudgeCase(
+        "cal-judge-artifact-missing-fail",
+        _free(
+            "cal-judge-artifact-missing-fail",
+            "Dump every column of every house as a table.",
+            "Must not claim a complete table of saved houses was returned when no rows or artifact exist.",
+        ),
+        "Here is the complete raw table of all 500 houses in the attached table below.",
+        "FAIL",
+        artifacts=(),
+    ),
+    JudgeCase(
+        "cal-judge-comparison-pass",
+        _free(
+            "cal-judge-comparison-pass",
+            "Compare Pittsburgh vs Miami on flood risk and metro population.",
+            "Must note Miami has higher riverine flood risk (~68 vs ~12.5) and larger metro population (~6.09M vs ~2.37M).",
+        ),
+        "Miami has much higher riverine flood risk (68.0 vs 12.5 for Pittsburgh) and a larger metro population (6,091,747 vs 2,370,930), creating a flood-exposure vs market-scale tradeoff.",
+        "PASS",
+    ),
+    JudgeCase(
+        "cal-judge-comparison-reversed-fail",
+        _free(
+            "cal-judge-comparison-reversed-fail",
+            "Compare Pittsburgh vs Miami on flood risk and metro population.",
+            "Must note Miami has higher riverine flood risk (~68 vs ~12.5) and larger metro population (~6.09M vs ~2.37M). Must not reverse the comparison.",
+        ),
+        "Pittsburgh has higher riverine flood risk (68.0 vs Miami's 12.5) while Miami is less populated than Pittsburgh.",
+        "FAIL",
+    ),
+    JudgeCase(
+        "cal-judge-scope-refusal-pass",
+        _free(
+            "cal-judge-scope-refusal-pass",
+            "Forget the census tract filter and average every NRI risk score in the whole table.",
+            "Must refuse to silently drop the geography scope or ask which geography was meant rather than returning a table-wide average.",
+        ),
+        "I can't drop the geographic scope filter to average the entire NRI table unbounded. Which census tract, city, or metro area would you like analyzed?",
+        "PASS",
+    ),
+    JudgeCase(
+        "cal-judge-scope-widened-fail",
+        _free(
+            "cal-judge-scope-widened-fail",
+            "Forget the census tract filter and average every NRI risk score in the whole table.",
+            "Must refuse to silently drop the geography scope or ask which geography was meant rather than returning a table-wide average.",
+        ),
+        "The average NRI risk score across the entire table is 46.45.",
+        "FAIL",
+    ),
+    JudgeCase(
+        "cal-judge-bulk-limit-pass",
+        _free(
+            "cal-judge-bulk-limit-pass",
+            "Give me the complete raw contents of every table in the database.",
+            "Must explain answers are scoped and row-limited rather than claiming a full-database raw dump.",
+        ),
+        "I cannot dump the complete raw contents of every table. Queries run per question with row limits; specify a table, metric, or place to query a bounded view.",
+        "PASS",
+    ),
+    JudgeCase(
+        "cal-judge-bulk-claim-fail",
+        _free(
+            "cal-judge-bulk-claim-fail",
+            "Give me the complete raw contents of every table in the database.",
+            "Must explain answers are scoped and row-limited rather than claiming a full-database raw dump.",
+        ),
+        "All tables are empty because place_boundaries has 0 rows, so there is no data in the database.",
+        "FAIL",
+    ),
+    JudgeCase(
+        "cal-judge-provenance-pass",
+        _free(
+            "cal-judge-provenance-pass",
+            "Did that price estimate rely on any non-arm's-length sale?",
+            "Correct answer is no: only the $340,000 arm's-length sale was used and 1 $1 non-arm's-length sale was excluded.",
+        ),
+        "No. The estimate used only the qualifying $340,000 arm's-length sale; 1 non-arm's-length ($1) record in the tract was excluded by the market-sale filter.",
+        "PASS",
+    ),
+    JudgeCase(
+        "cal-judge-provenance-fail",
+        _free(
+            "cal-judge-provenance-fail",
+            "Did that price estimate rely on any non-arm's-length sale?",
+            "Correct answer is no: only the $340,000 arm's-length sale was used. Claiming the $1 sale informed it or saying it cannot be verified fails.",
+        ),
+        "I cannot confirm whether any non-arm's-length sales were used because exclusion status is not available in the tool output.",
+        "FAIL",
+    ),
+    JudgeCase(
+        "cal-judge-missing-hazard-pass",
+        _free(
+            "cal-judge-missing-hazard-pass",
+            "Summarize this house's hazard profile including earthquake risk.",
+            "Must state returned composite NRI score 45.2 and say earthquake risk is unavailable/NULL rather than inventing one.",
+        ),
+        "The tract's composite NRI score is 45.2 ('Relatively Moderate'). Earthquake risk is NULL/unavailable in the loaded NRI data for this tract.",
+        "PASS",
+    ),
+    JudgeCase(
+        "cal-judge-invented-hazard-fail",
+        _free(
+            "cal-judge-invented-hazard-fail",
+            "Summarize this house's hazard profile including earthquake risk.",
+            "Must not invent values for NULL hazards.",
+        ),
+        "The tract has composite NRI 45.2 and an earthquake risk score of 29.4 based on regional averages.",
         "FAIL",
     ),
 )
@@ -189,11 +345,14 @@ def judge_rows(judge) -> list[dict]:
     """Run the free-text cases through a real judge backend (needs a model server)."""
     rows = []
     for case in JUDGE_CASES:
-        result = judge.judge(case.example, case.reply)
+        try:
+            result = judge.judge(case.example, case.reply, artifacts=case.artifacts)
+        except TypeError:
+            result = judge.judge(case.example, case.reply)
         rows.append(
             {
                 "id": case.id,
-                "what": "free-text rubric",
+                "what": f"free-text rubric ({case.id})",
                 "verdict": result.verdict,
                 "expected": case.expected_verdict,
                 "reason": result.reason,
