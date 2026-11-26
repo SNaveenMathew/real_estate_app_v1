@@ -147,3 +147,146 @@ def test_repair_zip_codes_pads_legacy_rows_exactly_once():
     # The marker makes the second pass a no-op, so a reconnect never rescans the tables.
     assert schema_ddl.repair_zip_codes(conn) == 0
     conn.close()
+
+
+# ── Census geography: Connecticut tract codes and houses.msa_code ─────────────
+
+
+def test_house_msa_codes_resolve_through_the_county_crosswalk(fresh_db):
+    conn = fresh_db.get_conn()
+    conn.execute(
+        "INSERT INTO cbsa_counties (cbsa_code, cbsa_title, state_fips, county_fips) "
+        "VALUES ('35300', 'New Haven, CT', '09', '170')"
+    )
+    codes = data_loader._house_msa_codes(pd.Series(["09170141600", "06037000100", None]))
+
+    assert list(codes) == ["35300", None, None]
+
+
+def test_house_msa_codes_warn_when_the_crosswalk_is_not_loaded(fresh_db, capsys):
+    assert list(data_loader._house_msa_codes(pd.Series(["09170141600"]))) == [None]
+
+    out = capsys.readouterr().out
+    assert "cbsa_counties is empty" in out and "--only census" in out
+
+
+def test_backfill_house_msa_codes_fills_only_empty_rows(fresh_db):
+    conn = fresh_db.get_conn()
+    conn.execute(
+        "INSERT INTO cbsa_counties (cbsa_code, cbsa_title, state_fips, county_fips) "
+        "VALUES ('38300', 'Pittsburgh, PA', '42', '003')"
+    )
+    conn.execute(
+        "INSERT INTO houses (house_id, address, city, state, tract_fips, msa_code) "
+        "VALUES ('h1', 'a', 'Pittsburgh', 'PA', '42003040100', NULL)"
+    )
+    conn.execute(
+        "INSERT INTO houses (house_id, address, city, state, tract_fips, msa_code) "
+        "VALUES ('h2', 'b', 'Pittsburgh', 'PA', '42003040100', '11111')"
+    )
+
+    assert schema_ddl.backfill_house_msa_codes(conn) == 1
+    assert conn.execute("SELECT house_id, msa_code FROM houses ORDER BY 1").fetchall() == [
+        ("h1", "38300"),
+        ("h2", "11111"),  # a code the load already resolved is never overwritten
+    ]
+    assert schema_ddl.backfill_house_msa_codes(conn) == 0  # idempotent
+
+
+def test_ct_tract_codes_are_rekeyed_from_the_current_vintage_tracts(fresh_db):
+    """CT moved to planning-region county codes in 2022; the census file still uses 090xx."""
+    conn = fresh_db.get_conn()
+    conn.execute(
+        "INSERT INTO nri_tracts (tract_fips, county_fips, state_fips, county_name, state_name, risk_score) "
+        "VALUES ('09170141600', '09170', '09', 'New Haven', 'CT', 50.0)"
+    )
+    conn.execute(
+        "INSERT INTO census_tracts (tract_fips, geo_id, name, population) "
+        "VALUES ('09009141600', '1400000US09009141600', 'Census Tract 1416, New Haven County, CT', 5139)"
+    )
+    conn.execute(
+        "INSERT INTO census_tracts (tract_fips, geo_id, name, population) "
+        "VALUES ('09001000100', 'x', 'Census Tract 1, Fairfield County, CT', 100)"
+    )
+
+    assert schema_ddl.repair_ct_tract_codes(conn) == 1
+    assert conn.execute("SELECT tract_fips FROM census_tracts ORDER BY 1").fetchall() == [
+        ("09001000100",),  # no current-vintage row for this number: left alone, never guessed
+        ("09170141600",),
+    ]
+    assert schema_ddl.repair_ct_tract_codes(conn) == 0  # idempotent
+
+
+def test_ct_tract_repair_waits_for_a_current_vintage_source(fresh_db):
+    conn = fresh_db.get_conn()
+    conn.execute(
+        "INSERT INTO census_tracts (tract_fips, geo_id, name, population) "
+        "VALUES ('09009141600', 'x', 'Census Tract 1416', 5139)"
+    )
+
+    assert schema_ddl.repair_ct_tract_codes(conn) == 0
+    assert conn.execute("SELECT tract_fips FROM census_tracts").fetchall() == [("09009141600",)]
+
+
+def test_ct_house_keeps_the_whole_census_chain_and_an_msa_code(fresh_db):
+    """The 2022 code change must not drop a Connecticut house out of tract -> county -> CBSA."""
+    conn = fresh_db.get_conn()
+    conn.execute(
+        "INSERT INTO nri_tracts (tract_fips, county_fips, state_fips, county_name, state_name, risk_score) "
+        "VALUES ('09170141600', '09170', '09', 'New Haven', 'CT', 50.0)"
+    )
+    conn.execute(
+        "INSERT INTO census_tracts (tract_fips, geo_id, name, population) "
+        "VALUES ('09009141600', 'x', 'Census Tract 1416', 5139)"
+    )
+    conn.execute(
+        "INSERT INTO cbsa_counties (cbsa_code, cbsa_title, state_fips, county_fips) "
+        "VALUES ('35300', 'New Haven, CT', '09', '170')"
+    )
+    conn.execute(
+        "INSERT INTO houses (house_id, address, city, state, tract_fips) "
+        "VALUES ('h-ct', '1 Elm', 'New Haven', 'CT', '09170141600')"
+    )
+
+    schema_ddl.repair_ct_tract_codes(conn)
+    assert schema_ddl.backfill_house_msa_codes(conn) == 1
+
+    joined = conn.execute(
+        """
+        SELECT h.house_id, c.cbsa_code
+        FROM houses h
+        JOIN census_tracts ct ON ct.tract_fips = h.tract_fips
+        JOIN cbsa_counties c ON c.state_fips || c.county_fips = LEFT(ct.tract_fips, 5)
+        """
+    ).fetchall()
+    assert joined == [("h-ct", "35300")]
+
+
+def test_load_redfin_fills_msa_code_while_loading_houses(fresh_db, tmp_path, monkeypatch):
+    """The export has no MSA column: the loader must fill the key from tract -> county -> CBSA."""
+    from config import settings
+
+    redfin_dir = tmp_path / "redfin"
+    redfin_dir.mkdir()
+    (redfin_dir / "redfin_2024-01-15.csv").write_text(
+        "address,city,state,zip,price,lat,lon\n"
+        "1 Elm Street,New Haven,CT,06511,250000,41.3083,-72.9279\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "redfin_dir", redfin_dir)
+
+    conn = fresh_db.get_conn()
+    conn.execute(
+        "INSERT INTO cbsa_counties (cbsa_code, cbsa_title, state_fips, county_fips) "
+        "VALUES ('35300', 'New Haven, CT', '09', '170')"
+    )
+
+    class FakeGeo:
+        @staticmethod
+        def assign_tract_fips(frame):
+            out = frame.copy()
+            out["tract_fips"] = "09170141600"  # the geocoder's 2022 planning-region code
+            return out
+
+    assert data_loader.load_redfin(FakeGeo) == 1
+    assert conn.execute("SELECT msa_code FROM houses").fetchall() == [("35300",)]

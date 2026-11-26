@@ -223,6 +223,13 @@ def load_nri() -> int:
         # Also cache the GeoDataFrame so geo_utils can use it for tract resolution
         # without loading anything twice (written to a temp parquet in data/nri/)
         _cache_nri_geometry(gdf, out["tract_fips"])
+        # A long-running server must not keep the pre-refresh GeoDataFrame cached.
+        try:
+            from services import geo_utils
+
+            geo_utils.clear_geometry_cache()
+        except Exception:
+            pass
         return len(out)
 
     # ── Fall back to CSV ──────────────────────────────────────────────────────

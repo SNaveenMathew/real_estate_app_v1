@@ -31,6 +31,7 @@ __all__ = [
     "_infer_crime_city",
     "_clean_numeric",
     "_extract_snapshot_date",
+    "_house_msa_codes",
     "load_redfin",
 ]
 
@@ -137,6 +138,37 @@ def _extract_snapshot_date(filename: str) -> str | None:
             except Exception:
                 continue
     return None
+
+
+def _house_msa_codes(tract_fips: pd.Series) -> pd.Series:
+    """CBSA code per house, derived from its census tract.
+
+    The Redfin export carries no MSA column, so ``houses.msa_code`` is resolved at load time from the
+    geography the loader has already resolved: the tract's county FIPS (the first five digits of
+    ``tract_fips``) looked up in ``cbsa_counties`` - the same CBSA crosswalk ``census_msa`` and the ZHVI
+    metro codes are built from.  Plain equality, no name matching.
+
+    A house whose tract was not resolved, whose county is in no CBSA, or whose crosswalk is not loaded
+    yet gets NULL; ``db.schema_ddl.backfill_house_msa_codes`` fills those rows on the next start once
+    ``cbsa_counties`` exists, so the load order between census and redfin does not decide the result.
+    """
+    blank = pd.Series([None] * len(tract_fips), index=tract_fips.index, dtype=object)
+    try:
+        counties = store.query("SELECT state_fips, county_fips, cbsa_code FROM cbsa_counties")
+    except Exception:
+        counties = None
+    if counties is None or getattr(counties, "empty", True):
+        print("  \u26a0 cbsa_counties is empty: houses load without msa_code, so metro-level joins return nothing.")
+        print("    Load the CBSA crosswalk first: python setup_data.py --only census")
+        print("    (msa_code is backfilled automatically on the next start once the crosswalk exists)")
+        return blank
+    lookup = {
+        str(r.state_fips).zfill(2) + str(r.county_fips).zfill(3): r.cbsa_code
+        for r in counties.itertuples(index=False)
+        if pd.notna(r.state_fips) and pd.notna(r.county_fips) and pd.notna(r.cbsa_code)
+    }
+    keys = [None if pd.isna(t) else str(t)[:5] for t in tract_fips]
+    return pd.Series([lookup.get(k) for k in keys], index=tract_fips.index, dtype=object)
 
 
 def load_redfin(geo_utils=None) -> int:
@@ -289,6 +321,14 @@ def load_redfin(geo_utils=None) -> int:
             combined[col] = None
         if col not in latest.columns:
             latest[col] = None
+
+    # houses.msa_code: the export has no MSA column, so the key comes from the census geography resolved
+    # above.  Only fills what the export left empty, so an export that does carry a code keeps its own.
+    derived_msa = _house_msa_codes(latest["tract_fips"])
+    latest["msa_code"] = [
+        own if own not in (None, "") and not pd.isna(own) else derived
+        for own, derived in zip(latest["msa_code"], derived_msa)
+    ]
 
     # Write: all rows → snapshots, latest → houses table
     store.upsert_houses_with_snapshots(latest, combined)

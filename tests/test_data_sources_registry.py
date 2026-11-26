@@ -100,3 +100,118 @@ def test_direct_download_sources_have_no_leftover_navigation_language():
         assert hit is None, (
             f"{key!r} is direct_download=True but its instructions still say {hit!r}: {source.instructions!r}"
         )
+
+
+def test_every_source_has_a_captured_source_link():
+    missing = [
+        key
+        for key, source in REGISTRY.items()
+        if not source.source_url.startswith(("http://", "https://"))
+    ]
+    assert not missing, f"data sources without a source URL: {missing}"
+
+
+@pytest.mark.parametrize(
+    ("key", "table"),
+    [
+        ("fta_ridership", "transit_ridership"),
+        ("fta_safety", "transit_safety"),
+        ("fta_routes", "transit_routes"),
+    ],
+)
+def test_fta_sources_are_registered_and_uploadable(key, table):
+    source = REGISTRY[key]
+    assert source.table == table
+    assert source.placement == "single"
+    assert source.accept
+    assert source.source_url.startswith("https://")
+    assert callable(source.loader)
+
+
+@pytest.mark.parametrize(
+    ("table", "key"),
+    [
+        ("transit_ridership", "fta_ridership"),
+        ("transit_safety", "fta_safety"),
+        ("transit_routes", "fta_routes"),
+        ("transit_route_zctas", "fta_routes"),
+        ("transit_route_places", "fta_routes"),
+    ],
+)
+def test_fta_sources_appear_on_their_catalog_tables(table, key):
+    assert key in ds.sources_for_table(table)
+
+
+def test_transit_agencies_points_at_the_ridership_workbook():
+    assert "fta_ridership" in ds.sources_for_table("transit_agencies")
+
+
+def test_fta_tables_are_on_a_domain_the_data_page_renders():
+    from db.catalog_seed import SEED_DOMAINS
+    from db.schema_catalog import DOMAIN_LABELS
+
+    for table in (
+        "transit_agencies",
+        "transit_ridership",
+        "transit_safety",
+        "transit_routes",
+        "transit_route_zctas",
+        "transit_route_places",
+    ):
+        assert SEED_DOMAINS[table] in DOMAIN_LABELS
+        assert SEED_DOMAINS[table] == "mobility"
+
+
+def test_fta_workbook_upload_is_staged_under_the_loader_name(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from config import settings
+
+    canonical = tmp_path / "canonical-ridership.xlsx"
+    monkeypatch.setattr(settings, "fta_ridership_file", canonical)
+    source = replace(REGISTRY["fta_ridership"], dest_dir=tmp_path)
+    upload = tmp_path / "September 2026.xlsx"
+    upload.write_bytes(b"xlsx")
+
+    dest, backups, new_files = ds._place_single(source, upload, upload.name)
+
+    assert dest == canonical and canonical.read_bytes() == b"xlsx"
+    assert new_files == [canonical]
+    assert backups == {}
+
+
+def test_fta_routes_zip_is_staged_as_the_loader_shapefile(tmp_path):
+    import zipfile
+
+    release = tmp_path / "release"
+    release.mkdir()
+    for suffix in ("shp", "dbf", "shx"):
+        (release / f"NTM_Routes_2026.{suffix}").write_bytes(suffix.encode())
+    archive = tmp_path / "NTM_Routes_2026.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        for path in release.iterdir():
+            zf.write(path, path.name)
+    dest_dir = tmp_path / "connections"
+    dest_dir.mkdir()
+
+    shp, written = ds._extract_fta_routes_zip(
+        archive, dest_dir, dest_dir / "National_Transit_Map_Routes.shp"
+    )
+
+    assert shp == dest_dir / "National_Transit_Map_Routes.shp"
+    assert (dest_dir / "National_Transit_Map_Routes.dbf").exists()
+    assert len(written) == 3
+
+
+def test_fta_route_uid_is_stable_across_refreshes():
+    from services.loaders.transit import _route_uid
+
+    assert _route_uid("00001", "feed", "R1", "S1") == _route_uid("00001", "feed", "R1", "S1")
+    assert _route_uid("00001", "feed", "R1", "S1") != _route_uid("00001", "feed", "R1", "S2")
+    # Feeds can publish several segments with the same IDs; geometry keeps them distinct.
+    assert _route_uid("00001", "feed", "R1", "S1", "line-a") != _route_uid(
+        "00001", "feed", "R1", "S1", "line-b"
+    )
+    assert _route_uid("00001", "feed", "R1", "S1", "line-a", '{"name":"A"}') != _route_uid(
+        "00001", "feed", "R1", "S1", "line-a", '{"name":"B"}'
+    )

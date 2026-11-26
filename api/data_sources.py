@@ -11,7 +11,7 @@ Threading: the listing is a plain ``def`` handler and runs in FastAPI's worker p
 must stay ``async`` for the upload itself, so its two blocking blocks - writing the file
 and reloading the table - are handed to a worker thread with ``asyncio.to_thread``; a
 Redfin export takes long enough that running it on the loop froze every other request.
-The health check makes up to 15 outbound HTTP requests, but they run concurrently via
+The health check makes one outbound HTTP request per source, but they run concurrently via
 ``asyncio.gather`` (see services/data_sources.py), so it only blocks between awaits.
 
 Uploads are treated as hostile input: the name is sanitized, the size is capped while it
@@ -55,7 +55,7 @@ async def check_data_source_health(keys: Optional[list[str]] = Body(default=None
 def _save_refresh_upload(file: UploadFile, folder: Path) -> tuple[Path, str]:
     name = sanitize_filename(file.filename, fallback="upload")
     dest = folder / name
-    save_stream(file.file, dest, max_bytes=int(getattr(settings, "onboarding_max_upload_mb", 250)) * 1024 * 1024)
+    save_stream(file.file, dest, max_bytes=int(getattr(settings, "onboarding_max_upload_mb", 600)) * 1024 * 1024)
     return dest, name
 
 

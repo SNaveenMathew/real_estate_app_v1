@@ -6,9 +6,10 @@ downloaded, plus an upload control that saves the file into the right place unde
 data/ and re-runs the matching services/data_loader.py function — which already
 writes upsert-safe (see db/duckdb_store.py: upsert_df / upsert_houses_with_snapshots).
 
-Nothing here changes what `python setup_data.py` does — it still reads whatever is
-on disk, exactly as before, and does not touch data_source_log. This module is the
-extra "download link + upload + reload" path the Data page adds on top of that.
+`python setup_data.py` still reads whatever is on disk, and now also records each
+successful setup load in the same `data_source_log` ledger this module uses, so a
+built-in source is never shown as "never refreshed" merely because it was loaded by
+the setup command instead of a Data-page upload.
 
 Placement modes
 ----------------
@@ -165,7 +166,16 @@ def _make_crime_precheck(parser) -> Callable[[Path], tuple[bool, str]]:
 
 
 def _run_nri() -> int:
-    return data_loader.load_nri()
+    n = data_loader.load_nri()
+    if n:
+        # NRI supplies the tract geometry used by the bike route/tract bridge.
+        # Rebuild it in the same refresh so a piecemeal source update cannot
+        # leave that bridge empty or tied to the previous geometry snapshot.
+        try:
+            data_loader.load_bike_route_tracts()
+        except Exception as exc:
+            print(f"  ⚠ NRI loaded, but bike route/tract bridge was not rebuilt: {exc}")
+    return n
 
 
 def _run_census_tracts() -> int:
@@ -177,11 +187,47 @@ def _run_census_msa() -> int:
 
 
 def _run_cbsa() -> int:
-    return data_loader.load_cbsa_crosswalk()
+    n = data_loader.load_cbsa_crosswalk()
+    if n:
+        # Houses loaded before the crosswalk (or before a crosswalk update) need
+        # the derived code filled immediately, not only on the next process start.
+        from db import schema_ddl
+
+        try:
+            filled = schema_ddl.backfill_house_msa_codes(store.get_conn(), force=True)
+            if filled:
+                print(f"  ✓ Filled msa_code on {filled:,} houses from the refreshed crosswalk")
+        except Exception as exc:
+            print(f"  ⚠ Crosswalk loaded, but house msa_code backfill failed: {exc}")
+    return n
 
 
 def _run_redfin() -> int:
-    return data_loader.load_redfin(None)
+    n = data_loader.load_redfin(None)
+    if n:
+        _refresh_missing_commutes()
+    return n
+
+
+def _refresh_missing_commutes() -> None:
+    """Best-effort commute catch-up after a Redfin refresh adds houses.
+
+    The Redfin loader deliberately does not promise commute values (they depend on a
+    configured work location and a routing service), but a source refresh must not leave
+    a newly loaded house silently without a row until someone remembers the CLI step.
+    """
+    try:
+        from services import commute
+
+        if commute.get_work() is None:
+            return
+        import asyncio
+
+        snap = asyncio.run(commute.refresh_now("missing"))
+        if snap.get("state") == "done":
+            print(f"  ✓ {snap.get('message', 'Commute estimates refreshed')}")
+    except Exception as exc:
+        print(f"  ⚠ Redfin loaded, but commute catch-up was skipped: {exc}")
 
 
 def _run_sold() -> int:
@@ -196,7 +242,42 @@ def _run_crime() -> int:
 
 
 def _run_bike() -> int:
-    return data_loader.load_bike_routes()
+    n = data_loader.load_bike_routes()
+    # Keep every route bridge in step with a bike refresh; each builder clears
+    # its bridge when the corresponding boundary layer is not installed.
+    data_loader.load_bike_route_tracts()
+    data_loader.load_bike_route_zctas()
+    data_loader.load_bike_route_places()
+    return n
+
+
+def _run_tiger_zcta() -> int:
+    return data_loader.load_tiger_zcta5()
+
+
+def _run_tiger_places() -> int:
+    return data_loader.load_tiger_places()
+
+
+def _run_fta_ridership() -> int:
+    """Refresh the agency directory and ridership from the same workbook."""
+    data_loader.load_transit_agencies()
+    return data_loader.load_transit_ridership()
+
+
+def _run_fta_safety() -> int:
+    return data_loader.load_transit_safety()
+
+
+def _run_fta_routes() -> int:
+    n = data_loader.load_transit_routes()
+    # A route snapshot refresh must keep its geographic bridges in step.  The
+    # bridge builder leaves the old bridge untouched when a boundary layer is
+    # unavailable, so a failed/partial boundary state cannot erase good rows.
+    if n:
+        data_loader.load_transit_route_zctas()
+        data_loader.load_transit_route_places()
+    return n
 
 
 def _run_zhvi() -> int:
@@ -304,6 +385,38 @@ def _detect_census_tracts(columns: list[str]) -> bool:
 
 def _detect_cbsa(columns: list[str]) -> bool:
     return _has_all(columns, [["CBSA Code"], ["CBSA Title"], ["FIPS State Code", "FIPS State"]])
+
+
+def _detect_tiger_zcta(columns: list[str]) -> bool:
+    """TIGER ZCTA shapefiles carry ZCTA5CE20 plus GEOID20."""
+    normed = {_norm(c) for c in columns}
+    return any(c.startswith("zcta5") for c in normed) and "geoid20" in normed
+
+
+def _detect_tiger_place(columns: list[str]) -> bool:
+    """TIGER Place shapefiles have GEOID/PLACEFP/STATEFP/NAME and no ZCTA key."""
+    return _has_all(columns, [["GEOID"], ["PLACEFP"], ["STATEFP"], ["NAME"]]) and not _detect_tiger_zcta(columns)
+
+
+def _make_tiger_precheck(kind: str) -> Callable[[Path], tuple[bool, str]]:
+    """Read only the shapefile schema, then apply the same detector the generic
+    upload flow uses. This rejects a renamed non-TIGER zip before the old layer
+    is displaced."""
+
+    def _check(path: Path) -> tuple[bool, str]:
+        try:
+            columns = data_loader.boundary_columns(path)
+        except Exception as e:
+            return False, f"Could not read this shapefile/zip: {e}"
+        detect = _detect_tiger_zcta if kind == "zcta" else _detect_tiger_place
+        if not columns:
+            return False, "No shapefile attributes were found in this file."
+        if not detect(columns):
+            expected = "ZCTA5CE20 and GEOID20" if kind == "zcta" else "GEOID, PLACEFP, STATEFP and NAME"
+            return False, f"This doesn't look like a TIGER {kind} shapefile; expected {expected}."
+        return True, ""
+
+    return _check
 
 
 def _make_crime_detector(parser) -> Callable[[list[str]], bool]:
@@ -479,6 +592,120 @@ _STATIC_SOURCES: list[DataSource] = [
         direct_download=False,
         precheck=_precheck_zillow_file,
     ),
+    DataSource(
+        key="tiger_zcta",
+        label="Census ZCTA5 boundaries (ZIP Code Tabulation Areas)",
+        category="Geography",
+        table="zcta_boundaries",
+        dest_dir=settings.tiger_dir,
+        placement="single",
+        accept=".zip",
+        source_url="https://www2.census.gov/geo/tiger/TIGER2026/ZCTA520/tl_2026_us_zcta520.zip",
+        instructions="This is the nationwide TIGER/Line ZCTA5 shapefile zip (about 505 MB). Download "
+        "it and upload it as-is; the loader reads the .shp inside the zip and replaces "
+        "zcta_boundaries in one transaction.",
+        loader=_run_tiger_zcta,
+        match_globs=(
+            "**/*zcta*.zip",
+            "**/*zcta*.shp",
+            "**/*zcta*.shx",
+            "**/*zcta*.dbf",
+            "**/*zcta*.prj",
+            "**/*zcta*.cpg",
+        ),
+        row_count_sql="SELECT COUNT(*) FROM zcta_boundaries",
+        detect=_detect_tiger_zcta,
+        direct_download=True,
+        precheck=_make_tiger_precheck("zcta"),
+        notes="A ZCTA is the Census Bureau's statistical area for ZIP Code service areas, not an "
+        "exact USPS ZIP boundary and not a substitute for a ZIP+4 address range. ZCTA5 values "
+        "are 5-digit strings and leading zeros are preserved.",
+    ),
+    DataSource(
+        key="tiger_places",
+        label="Census Place boundaries (cities, towns, villages)",
+        category="Geography",
+        table="place_boundaries",
+        dest_dir=settings.tiger_dir,
+        placement="append",
+        accept=".zip",
+        source_url="https://www2.census.gov/geo/tiger/GENZ2025/shp/cb_2025_us_place_500k.zip",
+        instructions="This is the nationwide Census Cartographic Boundary File for Places (about 22 MB, "
+        "1:500,000 generalized). Download it and upload it as-is; the loader replaces "
+        "place_boundaries in one transaction. Per-state TIGER/Line Place zips can be added "
+        "later when full boundary precision matters; duplicate GEOIDs keep the newest file.",
+        loader=_run_tiger_places,
+        row_count_sql="SELECT COUNT(*) FROM place_boundaries",
+        detect=_detect_tiger_place,
+        direct_download=True,
+        precheck=_make_tiger_precheck("place"),
+        notes="Census Place boundaries are incorporated places and Census designated places, not "
+        "ZIP Code areas. They are the legal/statistical municipal boundary used for city-limit "
+        "questions. The national cartographic file is generalized for mapping; per-state "
+        "TIGER/Line files retain full precision.",
+    ),
+    DataSource(
+        key="fta_ridership",
+        label="FTA monthly ridership (raw UPT)",
+        category="Transit",
+        table="transit_ridership",
+        dest_dir=settings.fta_dir,
+        placement="single",
+        accept=".xlsx",
+        source_url="https://www.transit.dot.gov/ntd/data-product/monthly-module-raw-data-release",
+        instructions="This page links the current Raw Monthly Ridership workbook. Download it and "
+        "upload it as-is; the loader also refreshes transit_agencies from the Master sheet, then "
+        "upserts ridership by (ntd_id, mode, tos, date).",
+        loader=_run_fta_ridership,
+        match_globs=(settings.fta_ridership_file.name,),
+        row_count_sql="SELECT COUNT(*) FROM transit_ridership",
+        detect=None,
+        direct_download=False,
+        notes="Unadjusted UPT by agency, mode, type of service and month. The filename changes "
+        "with every FTA release, so the upload is stored under the loader's canonical name.",
+    ),
+    DataSource(
+        key="fta_safety",
+        label="FTA Safety & Security time series",
+        category="Transit",
+        table="transit_safety",
+        dest_dir=settings.fta_dir,
+        placement="single",
+        accept=".xlsx",
+        source_url="https://www.transit.dot.gov/ntd/data-product/safety-security-time-series-data",
+        instructions="This page links the current Safety & Security Time Series workbook. Download "
+        "it and upload it as-is; the loader replaces transit_safety from the Data sheet.",
+        loader=_run_fta_safety,
+        match_globs=(settings.fta_safety_file.name,),
+        row_count_sql="SELECT COUNT(*) FROM transit_safety",
+        detect=None,
+        direct_download=False,
+        notes="Threshold-adjusted monthly counts by agency, mode and year. The table is replaced "
+        "on every load, so removed rows do not linger.",
+    ),
+    DataSource(
+        key="fta_routes",
+        label="National Transit Map routes (BTS)",
+        category="Transit",
+        table="transit_routes",
+        dest_dir=settings.fta_routes_shp.parent,
+        placement="single",
+        accept=".zip",
+        source_url="https://www.bts.gov/national-transit-map",
+        instructions="This BTS page links the National Transit Map Routes dataset in the NTAD. "
+        "Download the shapefile zip and upload it as-is; the loader extracts it as "
+        "National_Transit_Map_Routes.shp, replaces transit_routes from that snapshot, and rebuilds "
+        "the transit_route_zctas / transit_route_places bridges.",
+        loader=_run_fta_routes,
+        match_globs=("*.shp", "*.shx", "*.dbf", "*.prj", "*.cpg"),
+        row_count_sql="SELECT COUNT(*) FROM transit_routes",
+        detect=None,
+        direct_download=False,
+        notes="A full national snapshot, replaced rather than appended so removed routes do not "
+        "linger. route_uid is a deterministic hash of the feature's IDs, geometry and attributes, "
+        "so only exact duplicate features collapse. The route-to-area bridges are rebuilt after the "
+        "snapshot; a missing boundary layer leaves the previous bridge untouched.",
+    ),
 ]
 
 
@@ -619,10 +846,38 @@ def get_source(key: str) -> Optional[DataSource]:
     return REGISTRY.get(key)
 
 
+# Tables that a source also rebuilds even though the source's primary table is
+# different. The FTA ridership workbook refreshes the agency directory from its
+# Master sheet before loading ridership.
+_TABLE_SOURCE_ALIASES = {
+    "transit_agencies": ("fta_ridership",),
+    "transit_route_agencies": ("fta_routes",),
+    "transit_route_zctas": ("fta_routes",),
+    "transit_route_places": ("fta_routes",),
+    "bike_route_tracts": ("bike",),
+    "bike_route_zctas": ("bike",),
+    "bike_route_places": ("bike",),
+    "crime_city_year": (
+        "crime_baltimore",
+        "crime_boston",
+        "crime_buffalo",
+        "crime_chicago",
+        "crime_indianapolis",
+        "crime_minneapolis",
+        "crime_philadelphia",
+        "crime_pittsburgh",
+    ),
+}
+
+
 def sources_for_table(table: str) -> list[str]:
     """Keys of every registered source that feeds `table` — used by the schema-map
     inspector to know which sources to offer when a table node is selected."""
-    return [k for k, s in REGISTRY.items() if s.table == table]
+    keys = [k for k, s in REGISTRY.items() if s.table == table]
+    for alias in _TABLE_SOURCE_ALIASES.get(table, ()):
+        if alias in REGISTRY and alias not in keys:
+            keys.append(alias)
+    return keys
 
 
 def _current_row_count(source: DataSource) -> int:
@@ -694,15 +949,22 @@ async def _check_one_link(client: httpx.AsyncClient, source: "DataSource") -> di
             "error": str(e),
         }
     ok = resp.status_code < 400
+    # FTA and BTS answer 403 to automated clients but load normally in a
+    # browser. The server was reached, so don't report a valid source link as
+    # broken; surface the distinction instead (the UI labels it separately).
+    blocked = resp.status_code == 403
+    if blocked:
+        ok = True
     redirected = str(resp.url)
     return {
         "key": source.key,
         "label": source.label,
         "url": source.source_url,
         "ok": ok,
+        "blocked": blocked,
         "status": resp.status_code,
         "redirected_to": redirected if redirected != source.source_url else None,
-        "error": None if ok else f"HTTP {resp.status_code}",
+        "error": f"HTTP {resp.status_code} \u2014 reachable, but it blocks automated checks." if blocked else (None if ok else f"HTTP {resp.status_code}"),
     }
 
 
@@ -718,8 +980,9 @@ async def check_source_links(keys: Optional[list[str]] = None) -> list[dict]:
     load would make the page feel slow for no benefit, and a stale link is a
     maintenance-timescale problem, not a per-visit one.
 
-    Every check runs concurrently (not one after another), so checking all 15
-    still returns in roughly one request's worth of time rather than fifteen's.
+    Every check runs concurrently (not one after another), so checking every
+    source still returns in roughly one request's worth of time rather than one
+    request per source in sequence.
     Returns one dict per source: {key, label, url, ok, status, redirected_to,
     error}. `ok` is None (not False) when a source has no URL at all — that's a
     registry gap, not a broken link, and the UI should say so differently.
@@ -748,11 +1011,20 @@ def detect_source_for_columns(columns: list[str]) -> Optional[str]:
 
 
 def peek_header_candidates(path: Path, ext: str) -> list[list[str]]:
-    """Cheap header-only reads for the formats our detectable sources use
-    (csv/xlsx/xls), tried at a couple of skiprows offsets since one source (the
-    CBSA crosswalk) ships with 2 junk rows before its real header. Returns []
-    rather than raising, so the caller can just skip detection on any read error
-    or unsupported format."""
+    """Cheap header-only reads for the formats our detectable sources use.
+
+    CSV/XLSX get a couple of skiprows offsets since one source (the CBSA
+    crosswalk) ships with 2 junk rows before its real header. Shapefiles and
+    zipped shapefiles expose their attribute schema through the same TIGER
+    reader the loader uses, so a generic upload can route to a boundary refresh.
+    Returns [] rather than raising, so the caller can just skip detection on any
+    read error or unsupported format."""
+    if ext in (".shp", ".zip"):
+        try:
+            columns = data_loader.boundary_columns(path)
+        except Exception:
+            return []
+        return [columns] if columns else []
     if ext not in (".csv", ".xlsx", ".xls"):
         return []
     candidates = []
@@ -908,6 +1180,17 @@ def _place_single(source: DataSource, tmp_path: Path, orig_filename: str) -> tup
         if source.key == "nri":
             shp_path, written = _extract_nri_zip(tmp_path, source.dest_dir)
             return shp_path, backups, written
+        if source.key == "fta_ridership":
+            dest = source.dest_dir / settings.fta_ridership_file.name
+            shutil.copyfile(tmp_path, dest)
+            return dest, backups, [dest]
+        if source.key == "fta_safety":
+            dest = source.dest_dir / settings.fta_safety_file.name
+            shutil.copyfile(tmp_path, dest)
+            return dest, backups, [dest]
+        if source.key == "fta_routes":
+            shp_path, written = _extract_fta_routes_zip(tmp_path, source.dest_dir, settings.fta_routes_shp)
+            return shp_path, backups, written
 
         name = _safe_filename(orig_filename)
         if source.key == "census_tracts" and "DECENNIALPL2020" not in name:
@@ -954,6 +1237,57 @@ def _extract_nri_zip(tmp_path: Path, dest_dir: Path) -> tuple[Path, list[Path]]:
             if out_path.suffix.lower() == ".shp":
                 shp_out = out_path
     return (shp_out or written[0]), written
+
+
+def _extract_fta_routes_zip(tmp_path: Path, dest_dir: Path, expected_shp: Path) -> tuple[Path, list[Path]]:
+    """Extract a BTS National Transit Map Routes zip under the loader's canonical name.
+
+    The NTAD release filename changes and the shapefile can be nested in a
+    folder, while ``load_transit_routes()`` reads one fixed path. Rename the
+    shapefile and its same-stem sidecars; keep every other member as-is.
+    """
+    expected_stem = expected_shp.stem
+    written: list[Path] = []
+    shp_out: Path | None = None
+    try:
+        with zipfile.ZipFile(tmp_path) as zf:
+            members = [
+                member
+                for member in zf.namelist()
+                if not member.endswith("/")
+                and "__MACOSX" not in Path(member).parts
+                and not Path(member).name.startswith("._")
+            ]
+            shp_members = [member for member in members if member.lower().endswith(".shp")]
+            if not shp_members:
+                raise ValueError(
+                    "This zip doesn't contain a .shp file — expected the National Transit Map Routes shapefile zip."
+                )
+            stem_in_zip = Path(shp_members[0]).stem.lower()
+            for member in members:
+                base = Path(member).name
+                if not base:
+                    continue
+                member_stem, ext = Path(base).stem, Path(base).suffix
+                out_name = (
+                    f"{expected_stem}{ext.lower()}" if member_stem.lower() == stem_in_zip and ext else base
+                )
+                out_path = dest_dir / out_name
+                with zf.open(member) as src, open(out_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                written.append(out_path)
+                if out_path.suffix.lower() == ".shp":
+                    shp_out = out_path
+        if shp_out is None:
+            raise ValueError("This zip doesn't contain a usable .shp file.")
+        return shp_out, written
+    except Exception:
+        for path in written:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        raise
 
 
 # ── Placement: "append" sources ─────────────────────────────────────────────

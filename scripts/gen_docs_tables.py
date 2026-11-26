@@ -12,7 +12,7 @@ function registry in ``agents/capabilities.py``, and the eval set itself.
 
 This script renders them:
 
-    docs/REFERENCE.md          endpoints, approved functions, settings
+    docs/REFERENCE.md          endpoints, approved functions, data sources, settings
     eval/CAPABILITY_MATRIX.md  catalog tables x fixture rows x golden examples
 
 Usage
@@ -101,6 +101,34 @@ def capability_rows() -> list[list[str]]:
     return [[f"`{row['name']}`", row["tags"], row["deadline"], row["description"]] for row in describe()]
 
 
+def data_source_rows() -> list[list[str]]:
+    """Built-in refresh registry: source link, target table, and file handling."""
+    from services.data_sources import REGISTRY
+
+    rows = []
+    for source in sorted(REGISTRY.values(), key=lambda s: (s.category, s.label)):
+        link = "—"
+        if source.source_url:
+            label = "Direct download" if source.direct_download else "Download page"
+            link = f"[{label}]({source.source_url})"
+        handling = (
+            "Replaces the canonical file; reloads its table"
+            if source.placement == "single"
+            else "Adds a file; loader upserts by key"
+        )
+        rows.append(
+            [
+                f"`{source.key}`",
+                source.label,
+                source.category,
+                f"`{source.table}`",
+                link,
+                handling,
+            ]
+        )
+    return rows
+
+
 def config_rows() -> list[list[str]]:
     """Settings from ``config.py``: name, default and the trailing comment that documents it."""
     source = (ROOT / "config.py").read_text(encoding="utf-8")
@@ -181,6 +209,18 @@ def render_reference() -> str:
         "deadline it runs under (`agents/capabilities.py`).",
         "",
         _table(["Function", "Tags", "Deadline", "What it does"], capability_rows()),
+        "",
+        "## Data sources",
+        "",
+        "The built-in refresh registry behind `/data` (`services/data_sources.py`). Every row is also an upload",
+        "target on the Data page: a **single** source replaces its canonical file and reloads its table; an",
+        "**append** source keeps each upload and upserts by primary key. Redfin marks houses missing from a",
+        "refreshed export as removed from favorites; sold-homes and crime drop rows no longer present.",
+        "",
+        _table(
+            ["Key", "Source", "Category", "Loads into", "Latest data", "File handling"],
+            data_source_rows(),
+        ),
         "",
         "## Settings",
         "",

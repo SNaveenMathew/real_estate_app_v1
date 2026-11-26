@@ -137,6 +137,19 @@ def load_census_tracts() -> int:
         conn.execute("ROLLBACK")
         raise
     print(f"  ✓ Loaded {len(out):,} census tract populations")
+    # Connecticut moved from 8 counties to 9 planning regions in 2022 and the tract GEOIDs moved with them
+    # (090xx -> 091xx), while this 2020-vintage file keeps the old prefix. Re-key from nri_tracts (current
+    # vintage) so tract -> county -> CBSA -> MSA -> ZHVI keeps Connecticut houses.
+    from db.schema_ddl import repair_ct_tract_codes
+
+    rekeyed = repair_ct_tract_codes(conn)
+    if rekeyed:
+        print(f"  ✓ Re-keyed {rekeyed:,} Connecticut tracts to 2022 planning-region codes")
+    legacy = conn.execute("SELECT COUNT(*) FROM census_tracts WHERE tract_fips LIKE '090%'").fetchone()[0]
+    if legacy:
+        print(f"  ⚠ {legacy:,} Connecticut tracts are still on pre-2022 county codes (090xx):")
+        print("    load NRI first (python setup_data.py --only nri) and re-run census, or start the app -")
+        print("    the repair re-keys them from nri_tracts as soon as that table has Connecticut rows.")
     return len(out)
 
 

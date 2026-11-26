@@ -239,6 +239,22 @@ def test_zhvi_concepts_pin_the_join_their_level_needs():
     assert "join" in concepts["zhvi_neighborhood"] and not concepts["zhvi_neighborhood"]["join"]
 
 
+def test_market_heat_concepts_pin_one_level_and_the_house_join_uses_metro():
+    concepts = [c for c in seed.SEMANTIC_GLOSSARY.values() if "market_heat_index.heat_index" in c["columns"]]
+    assert {"market_heat_index", "market_heat_index_country"} <= {c["key"] for c in concepts}
+
+    levels = {}
+    for concept in concepts:
+        pinned = [f for f in concept["filters"] if "market_heat_index.region_type" in f]
+        assert len(pinned) == 1, f"{concept['key']} must pin exactly one region_type"
+        level = pinned[0].split("'")[1]
+        assert level not in levels, f"{concept['key']} and {levels[level]} both pin {level}"
+        levels[level] = concept["key"]
+
+    assert levels == {"metro": "market_heat_index", "country": "market_heat_index_country"}
+    assert set(concepts[0]["join"]) <= {r.join_key() for r in seed.RELATIONSHIPS}
+
+
 # ─── 4. CBSA / MSA Resolution Tests ──────────────────────────────────────────
 
 
