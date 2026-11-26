@@ -72,7 +72,13 @@ TABLES = {
             ColumnNote("bike_score", "Current Bike Score; NULL means missing."),
             ColumnNote("transit_score", "Current Transit Score; NULL means missing."),
             ColumnNote("tract_fips", "11-digit tract FIPS; reliable tract-level join key."),
-            ColumnNote("msa_code", "Usually NULL in Redfin exports; not a complete house-to-MSA key."),
+            ColumnNote(
+                "msa_code",
+                "CBSA code, resolved at load time from tract_fips via cbsa_counties (state_fips || county_fips = "
+                "LEFT(tract_fips, 5)) because the Redfin export carries no MSA column. NULL when the tract is "
+                "unknown or its county is in no CBSA; db/schema_ddl.py backfills rows loaded before the "
+                "crosswalk existed. Join houses.msa_code = zhvi.msa_code (region_type='metro').",
+            ),
             ColumnNote(
                 "is_favorite", "Explicit saved/favorite flag. Do not infer it from ordinary 'my houses' wording."
             ),
@@ -117,7 +123,12 @@ TABLES = {
         "2020 Census population records for MSA/micropolitan statistical areas.",
         grain="one row per MSA/micropolitan area",
         column_notes=(
-            ColumnNote("msa_code", "Real CBSA code when matched; X-prefixed placeholder when unresolved."),
+            ColumnNote(
+                "msa_code",
+                "Real 5-digit CBSA code when matched. X-prefixed placeholder for the areas whose 2024 delineation "
+                "name is absent from the loaded 2023 cbsa_counties crosswalk (new metros and small micro areas); an "
+                "X code never matches another table, and db/join_health.py reports that vintage gap.",
+            ),
             ColumnNote("name", "Human-readable MSA display name, typically '<city>, <state> Metro Area'."),
             ColumnNote("population", "Census population for the MSA/micropolitan area."),
         ),
@@ -133,6 +144,68 @@ TABLES = {
                 "county_fips",
                 "3-digit zero-padded county FIPS; concatenate state_fips || county_fips to reach 5-digit county FIPS.",
             ),
+        ),
+    ),
+    "zcta_boundaries": TableMeta(
+        "zcta_boundaries",
+        "Census TIGER/Line ZCTA5 boundary polygons. A ZCTA is the Census Bureau's statistical area for "
+        "ZIP Code service areas, not an exact USPS ZIP boundary.",
+        grain="one row per 5-digit ZCTA",
+        hidden_columns=("properties_json",),
+        column_notes=(
+            ColumnNote("zcta5", "5-digit zero-padded Census ZCTA code; primary key."),
+            ColumnNote("geo_id", "TIGER GEOID for the ZCTA; for ZCTA5 records this is normally the 5-digit code."),
+            ColumnNote(
+                "land_area_sq_mi",
+                "Total land area in square miles, derived from TIGER ALAND20 (square metres).",
+            ),
+            ColumnNote("water_area_sq_mi", "Water area in square miles, derived from TIGER AWATER20."),
+            ColumnNote("lat", "Representative-point latitude in EPSG:4326; not a population-weighted centroid."),
+            ColumnNote("lon", "Representative-point longitude in EPSG:4326."),
+            ColumnNote("geometry_json", "ZCTA boundary as a GeoJSON Polygon/MultiPolygon; used by the map layer."),
+            ColumnNote("properties_json", "Every original TIGER attribute, preserved as JSON for provenance."),
+        ),
+    ),
+    "place_boundaries": TableMeta(
+        "place_boundaries",
+        "Census Place boundary polygons: incorporated places and Census designated places "
+        "(cities, towns, villages, boroughs, townships and CDPs). The national layer uses the "
+        "1:500,000 Census Cartographic Boundary File, so shapes are generalized; per-state "
+        "TIGER/Line files add full boundary precision.",
+        grain="one row per Census Place",
+        hidden_columns=("properties_json",),
+        column_notes=(
+            ColumnNote("place_geoid", "7-digit state+place GEOID; primary key."),
+            ColumnNote("place_fips", "5-digit place code within the state."),
+            ColumnNote("state_fips", "2-digit zero-padded state FIPS."),
+            ColumnNote(
+                "name",
+                "Census NAME as published (e.g. 'Pittsburgh' or, in some vintages, 'Pittsburgh city'); "
+                "NAMELSAD carries the full legal label.",
+            ),
+            ColumnNote(
+                "short_name",
+                "NAME with a trailing legal suffix removed when present (e.g. 'Pittsburgh'); useful for "
+                "display and name matching, while name/namelsad retain the official Census label.",
+            ),
+            ColumnNote("namelsad", "TIGER NAMELSAD (name plus legal/statistical area description)."),
+            ColumnNote("lsad", "Two-digit Census legal/statistical area description code; may be NULL."),
+            ColumnNote(
+                "classfp",
+                "Census CLASSFP classification; NULL for rows from the national cartographic file, which omits it.",
+            ),
+            ColumnNote(
+                "funcstat",
+                "Census functional status; NULL for rows from the national cartographic file, which omits it.",
+            ),
+            ColumnNote("land_area_sq_mi", "Total land area in square miles, derived from TIGER ALAND."),
+            ColumnNote("water_area_sq_mi", "Water area in square miles, derived from TIGER AWATER."),
+            ColumnNote("aland", "Land area from the source TIGER/Census file, in square metres."),
+            ColumnNote("awater", "Water area from the source TIGER/Census file, in square metres."),
+            ColumnNote("lat", "Representative-point latitude in EPSG:4326; not a population-weighted centroid."),
+            ColumnNote("lon", "Representative-point longitude in EPSG:4326."),
+            ColumnNote("geometry_json", "Place boundary as a GeoJSON Polygon/MultiPolygon; used by the map layer."),
+            ColumnNote("properties_json", "Every original TIGER attribute, preserved as JSON for provenance."),
         ),
     ),
     "sold_homes": TableMeta(
@@ -152,7 +225,58 @@ TABLES = {
         ),
     ),
     "crime_incidents": TableMeta("crime_incidents", "Standardized crime incidents.", grain="one row per incident"),
+    "crime_city_year": TableMeta(
+        "crime_city_year",
+        "City/year crime summary derived from crime_incidents. One row per city and year; safe to join to houses "
+        "at the latest loaded year without multiplying by raw incidents.",
+        grain="one row per city per year",
+        domain="safety",
+        column_notes=(
+            ColumnNote("city", "Normalized crime city; joins houses.crime_city."),
+            ColumnNote("year", "Calendar year of the incidents."),
+            ColumnNote("incidents", "Count of incidents in the city/year."),
+            ColumnNote("severity_weighted", "Sum of severity_weight across the city/year's incidents."),
+        ),
+    ),
     "bike_routes": TableMeta("bike_routes", "BikePGH-style line features.", grain="one row per line feature"),
+    "bike_route_tracts": TableMeta(
+        "bike_route_tracts",
+        "Spatial bridge from bike routes to census tracts; one row per positive-length route/tract overlap. "
+        "A route may have several rows, including rows in different counties or states.",
+        grain="one row per route-tract overlap",
+        column_notes=(
+            ColumnNote("route_id", "Bike route that overlaps the tract; joins bike_routes.route_id."),
+            ColumnNote("tract_fips", "11-digit Census tract FIPS; joins census_tracts.tract_fips."),
+            ColumnNote(
+                "overlap_m",
+                "Length in meters of the route geometry inside the tract, measured in the local UTM CRS. "
+                "A route can have several rows, so use COUNT(DISTINCT route_id) for route counts; summing overlap_m "
+                "measures route length covered by the selected tracts, not a count of routes.",
+            ),
+        ),
+    ),
+    "bike_route_zctas": TableMeta(
+        "bike_route_zctas",
+        "Spatial bridge from bike routes to Census ZCTA5 boundaries; one row per positive-length overlap. "
+        "A route can cross several ZCTAs.",
+        grain="one row per route-ZCTA overlap",
+        column_notes=(
+            ColumnNote("route_id", "Bike route that overlaps the ZCTA; joins bike_routes.route_id."),
+            ColumnNote("zcta5", "5-digit Census ZCTA; joins zcta_boundaries.zcta5."),
+            ColumnNote("overlap_m", "Length in meters of the route inside the ZCTA, measured in local UTM."),
+        ),
+    ),
+    "bike_route_places": TableMeta(
+        "bike_route_places",
+        "Spatial bridge from bike routes to Census Place boundaries; one row per positive-length overlap. "
+        "A route can cross several places.",
+        grain="one row per route-Place overlap",
+        column_notes=(
+            ColumnNote("route_id", "Bike route that overlaps the Place; joins bike_routes.route_id."),
+            ColumnNote("place_geoid", "7-digit Census Place GEOID; joins place_boundaries.place_geoid."),
+            ColumnNote("overlap_m", "Length in meters of the route inside the Place, measured in local UTM."),
+        ),
+    ),
     "zhvi": TableMeta(
         "zhvi",
         "Zillow Home Value Index (ZHVI) — smoothed, seasonally-adjusted typical home value, by region and month. Several geography levels share this table (region_type), so a query must name its level; the catalog concepts do.",
@@ -192,7 +316,9 @@ TABLES = {
             ),
             ColumnNote(
                 "region_name",
-                "For region_type='zip' this is a clean 5-digit zip, normalized the same way as houses.zip (see zhvi.region_name note).",
+                "Display name for the region. Only the levels present in the downloaded export exist: the Metro "
+                "Market Heat Index file supplies metro and country rows and no zip rows, even though the loader "
+                "normalizes a zip-level file the same way as houses.zip (see zhvi.region_name note).",
             ),
             ColumnNote(
                 "heat_index",
@@ -219,6 +345,7 @@ TABLES = {
         "transit_agencies",
         "Federal Transit Administration (FTA) National Transit Database (NTD) transit agencies, modes, service statistics, expenses, and fares.",
         grain="one row per transit agency, mode, and type of service",
+        domain="mobility",
         column_notes=(
             ColumnNote("ntd_id", "5-digit zero-padded NTD agency ID."),
             ColumnNote("agency", "Transit agency name, e.g. 'Pittsburgh Regional Transit' or 'King County Metro'."),
@@ -242,6 +369,7 @@ TABLES = {
         "transit_ridership",
         "Monthly transit ridership (unlinked passenger trips - UPT) by agency, mode, and month (2002–2026).",
         grain="one row per agency, mode, type of service, and month",
+        domain="mobility",
         column_notes=(
             ColumnNote("ntd_id", "5-digit zero-padded NTD agency ID; joins transit_agencies.ntd_id."),
             ColumnNote("agency", "Transit agency name."),
@@ -260,6 +388,7 @@ TABLES = {
         "transit_safety",
         "FTA NTD Safety and Security (S&S) time series: threshold-adjusted monthly/annual safety incidents, collisions, injuries, and fatalities.",
         grain="one row per year, agency, mode, and type of service",
+        domain="mobility",
         column_notes=(
             ColumnNote("year", "Observation calendar year."),
             ColumnNote("ntd_id", "5-digit zero-padded NTD agency ID; joins transit_agencies.ntd_id."),
@@ -285,6 +414,7 @@ TABLES = {
         "transit_routes",
         "National Transit Map nationwide transit routes with geospatial line features (bus, rail, subway, light rail, ferry).",
         grain="one row per route shape line feature",
+        domain="mobility",
         column_notes=(
             ColumnNote("route_uid", "Unique identifier for this route shape feature."),
             ColumnNote("route_id", "Agency route identifier (e.g. '61C', 'Blue Line')."),
@@ -293,6 +423,50 @@ TABLES = {
             ColumnNote("route_long_name", "Route full descriptive name."),
             ColumnNote("route_type_name", "Transit mode: Bus, Rail, Tram/Light rail, Subway/Metro, Ferry, etc."),
             ColumnNote("route_color", "Hex color code representing the transit route on maps."),
+        ),
+    ),
+    "transit_route_agencies": TableMeta(
+        "transit_route_agencies",
+        "Bridge from each transit route shape to every NTD agency named in its multi-valued ntd_id field. "
+        "One row per route/agency membership; unmatched agency IDs remain in the bridge for coverage measurement.",
+        grain="one row per route-agency membership",
+        domain="mobility",
+        column_notes=(
+            ColumnNote("route_uid", "Transit route shape feature; joins transit_routes.route_uid."),
+            ColumnNote("ntd_id", "One 5-digit NTD agency ID split out of transit_routes.ntd_id."),
+            ColumnNote("raw_ntd_id", "Original multi-valued transit_routes.ntd_id for provenance."),
+        ),
+    ),
+    "transit_route_zctas": TableMeta(
+        "transit_route_zctas",
+        "Spatial bridge from transit route linework to Census ZCTA5 boundaries; one row per positive-length overlap. "
+        "A route can cross several ZCTAs and a ZCTA can contain several routes.",
+        grain="one row per transit route-ZCTA overlap",
+        domain="mobility",
+        column_notes=(
+            ColumnNote("route_uid", "Transit route shape feature that overlaps the ZCTA; joins transit_routes.route_uid."),
+            ColumnNote("zcta5", "Census ZCTA5 code; joins zcta_boundaries.zcta5. A ZCTA approximates a ZIP service area."),
+            ColumnNote("overlap_m", "Length in metres of the route inside the ZCTA, measured in EPSG:5070."),
+            ColumnNote(
+                "route_fraction",
+                "overlap_m divided by the route's total length, 0..1. Fractions need not sum to 1 when boundary coverage is incomplete.",
+            ),
+        ),
+    ),
+    "transit_route_places": TableMeta(
+        "transit_route_places",
+        "Spatial bridge from transit route linework to Census Place boundaries; one row per positive-length overlap. "
+        "Coverage follows the installed Census Place layer; generalized cartographic polygons can shift overlap lengths.",
+        grain="one row per transit route-Census Place overlap",
+        domain="mobility",
+        column_notes=(
+            ColumnNote("route_uid", "Transit route shape feature that overlaps the Place; joins transit_routes.route_uid."),
+            ColumnNote("place_geoid", "Census Place GEOID; joins place_boundaries.place_geoid."),
+            ColumnNote("overlap_m", "Length in metres of the route inside the Place, measured in EPSG:5070."),
+            ColumnNote(
+                "route_fraction",
+                "overlap_m divided by the route's total length, 0..1. Fractions need not sum to 1 when Place coverage is incomplete.",
+            ),
         ),
     ),
 }
@@ -315,6 +489,89 @@ RELATIONSHIPS = [
         "Direct house-to-Census tract identity join.",
         "many-to-one",
         grain_effect="house -> tract",
+    ),
+    Relationship(
+        "bike_route_tracts",
+        "route_id",
+        "bike_routes",
+        "route_id",
+        "Route-to-tract bridge. One route can cross several tracts; do not assume a single tract per route.",
+        "many-to-one",
+        bridge=True,
+        grain_effect="route-tract overlap -> route",
+    ),
+    Relationship(
+        "bike_route_tracts",
+        "tract_fips",
+        "census_tracts",
+        "tract_fips",
+        "Tract side of the bike-route bridge; the existing tract -> county -> CBSA relationships continue from here.",
+        "many-to-one",
+        bridge=True,
+        grain_effect="route-tract overlap -> tract",
+    ),
+    Relationship(
+        "bike_route_zctas",
+        "route_id",
+        "bike_routes",
+        "route_id",
+        "Route side of the bike-route/ZCTA bridge. One route can cross several ZCTAs.",
+        "many-to-one",
+        bridge=True,
+        grain_effect="route-ZCTA overlap -> route",
+    ),
+    Relationship(
+        "bike_route_zctas",
+        "zcta5",
+        "zcta_boundaries",
+        "zcta5",
+        "ZCTA side of the bike-route bridge.",
+        "many-to-one",
+        bridge=True,
+        grain_effect="route-ZCTA overlap -> ZCTA",
+    ),
+    Relationship(
+        "bike_route_places",
+        "route_id",
+        "bike_routes",
+        "route_id",
+        "Route side of the bike-route/Place bridge. One route can cross several places.",
+        "many-to-one",
+        bridge=True,
+        grain_effect="route-Place overlap -> route",
+    ),
+    Relationship(
+        "bike_route_places",
+        "place_geoid",
+        "place_boundaries",
+        "place_geoid",
+        "Place side of the bike-route bridge; city limits are measured from TIGER polygons, not bike_routes.city.",
+        "many-to-one",
+        bridge=True,
+        grain_effect="route-Place overlap -> Place",
+    ),
+    Relationship(
+        "houses",
+        "zip",
+        "zcta_boundaries",
+        "zcta5",
+        "House ZIP to Census ZCTA boundary. This is a statistical ZIP-area approximation, not an exact "
+        "USPS delivery boundary; use it for map/reference joins, not parcel-level containment.",
+        "many-to-one",
+        confidence="medium",
+        preferred=False,
+        grain_effect="house -> ZCTA boundary",
+    ),
+    Relationship(
+        "sold_homes",
+        "zip",
+        "zcta_boundaries",
+        "zcta5",
+        "Sold-home ZIP to Census ZCTA boundary (statistical ZIP-area approximation, not USPS delivery geography).",
+        "many-to-one",
+        confidence="medium",
+        preferred=False,
+        grain_effect="sale -> ZCTA boundary",
     ),
     Relationship(
         "sold_homes",
@@ -376,12 +633,27 @@ RELATIONSHIPS = [
     Relationship(
         "houses",
         "crime_city",
+        "crime_city_year",
+        "city",
+        "City-level contextual relationship to the latest loaded crime year. The raw incident table is incident "
+        "grain and must not be joined to houses without aggregation; this view is one row per city/year.",
+        "many-to-one",
+        confidence="medium",
+        scope={"on": ["crime_city_year.year = (SELECT MAX(c.year) FROM crime_city_year c)"]},
+        grain_effect="house -> city crime summary (latest year)",
+    ),
+    Relationship(
         "crime_incidents",
         "city",
-        "City-level contextual relationship; not spatial.",
+        "crime_city_year",
+        "city",
+        "Incident rows to the city/year summary. This is a many-to-many path because the view keeps every "
+        "loaded year; filter crime_city_year.year or aggregate before joining houses. The preferred house "
+        "path is houses.crime_city = crime_city_year.city with the catalog's latest-year scope.",
         "many-to-many",
         confidence="medium",
         preferred=False,
+        grain_effect="incident -> city/year summary (requires year filter)",
     ),
     Relationship(
         "house_commute",
@@ -406,7 +678,29 @@ RELATIONSHIPS = [
         "region_name",
         "House ZIP to zip-level ZHVI (filter zhvi.region_type = 'zip'). Both sides are normalized to a clean 5-digit zip at load time.",
         "one-to-many",
+        scope={
+            "on": [
+                "zhvi.region_type = 'zip'",
+                "zhvi.date = (SELECT MAX(z.date) FROM zhvi z WHERE z.region_type = 'zip')",
+            ]
+        },
         grain_effect="house -> zip-month series",
+    ),
+    Relationship(
+        "sold_homes",
+        "zip",
+        "zhvi",
+        "region_name",
+        "Sold-home ZIP to zip-level ZHVI (filter zhvi.region_type = 'zip'), for comparing a recorded sale with the "
+        "index at its ZIP. Loader keeps both sides as clean 5-digit zips, leading zeros included.",
+        "one-to-many",
+        scope={
+            "on": [
+                "zhvi.region_type = 'zip'",
+                "zhvi.date = (SELECT MAX(z.date) FROM zhvi z WHERE z.region_type = 'zip')",
+            ]
+        },
+        grain_effect="sale -> zip-month series",
     ),
     Relationship(
         "houses",
@@ -415,6 +709,13 @@ RELATIONSHIPS = [
         "msa_code",
         "House metro to metro-level ZHVI (filter zhvi.region_type = 'metro'), for when the house's own zip has no zip-level ZHVI row.",
         "one-to-many",
+        preferred=False,
+        scope={
+            "on": [
+                "zhvi.region_type = 'metro'",
+                "zhvi.date = (SELECT MAX(z.date) FROM zhvi z WHERE z.region_type = 'metro')",
+            ]
+        },
         grain_effect="house -> metro-month series",
     ),
     Relationship(
@@ -424,6 +725,13 @@ RELATIONSHIPS = [
         "msa_code",
         "MSA to metro-level ZHVI (filter zhvi.region_type = 'metro').",
         "one-to-many",
+        preferred=False,
+        scope={
+            "on": [
+                "zhvi.region_type = 'metro'",
+                "zhvi.date = (SELECT MAX(z.date) FROM zhvi z WHERE z.region_type = 'metro')",
+            ]
+        },
         grain_effect="MSA -> metro-month series",
     ),
     Relationship(
@@ -431,8 +739,17 @@ RELATIONSHIPS = [
         "zip",
         "market_heat_index",
         "region_name",
-        "House ZIP to zip-level Market Heat Index (filter market_heat_index.region_type = 'zip').",
+        "House ZIP to zip-level Market Heat Index (filter market_heat_index.region_type = 'zip'). Only usable when "
+        "a zip-level Market Heat Index export has been loaded; the Metro export has no zip rows, so this join "
+        "matches nothing on a metro-only load (db/join_health.py reports it).",
         "one-to-many",
+        preferred=False,
+        scope={
+            "on": [
+                "market_heat_index.region_type = 'zip'",
+                "market_heat_index.date = (SELECT MAX(m.date) FROM market_heat_index m WHERE m.region_type = 'zip')",
+            ]
+        },
         grain_effect="house -> zip-month series",
     ),
     Relationship(
@@ -442,6 +759,12 @@ RELATIONSHIPS = [
         "msa_code",
         "House metro to metro-level Market Heat Index (filter market_heat_index.region_type = 'metro').",
         "one-to-many",
+        scope={
+            "on": [
+                "market_heat_index.region_type = 'metro'",
+                "market_heat_index.date = (SELECT MAX(m.date) FROM market_heat_index m WHERE m.region_type = 'metro')",
+            ]
+        },
         grain_effect="house -> metro-month series",
     ),
     Relationship(
@@ -451,35 +774,96 @@ RELATIONSHIPS = [
         "msa_code",
         "MSA to metro-level Market Heat Index (filter market_heat_index.region_type = 'metro').",
         "one-to-many",
+        scope={
+            "on": [
+                "market_heat_index.region_type = 'metro'",
+                "market_heat_index.date = (SELECT MAX(m.date) FROM market_heat_index m WHERE m.region_type = 'metro')",
+            ]
+        },
         grain_effect="MSA -> metro-month series",
     ),
     # Transit relationships
     Relationship(
+        "transit_route_agencies",
+        "route_uid",
         "transit_routes",
+        "route_uid",
+        "Route side of the route-to-agency bridge. One route may name several NTD agencies in its source field; "
+        "the bridge records each split membership once.",
+        "many-to-one",
+        bridge=True,
+        grain_effect="route-agency membership -> route",
+    ),
+    Relationship(
+        "transit_route_agencies",
         "ntd_id",
         "transit_agencies",
         "ntd_id",
-        "Route to agency identity join.",
+        "Agency side of the route-to-agency bridge. transit_agencies still repeats NTD ID once per mode and type "
+        "of service; aggregate those reporting units before summing over routes.",
+        "many-to-many",
+        bridge=True,
+        grain_effect="route-agency membership -> agency reporting units",
+    ),
+    Relationship(
+        "transit_route_zctas",
+        "route_uid",
+        "transit_routes",
+        "route_uid",
+        "Route side of the transit-route/ZCTA bridge. One route can cross several ZCTAs.",
         "many-to-one",
-        grain_effect="route -> agency",
+        bridge=True,
+        grain_effect="route-ZCTA overlap -> route",
+    ),
+    Relationship(
+        "transit_route_zctas",
+        "zcta5",
+        "zcta_boundaries",
+        "zcta5",
+        "ZCTA side of the transit-route/ZCTA bridge. One ZCTA can contain many route features.",
+        "many-to-one",
+        bridge=True,
+        grain_effect="route-ZCTA overlap -> ZCTA",
+    ),
+    Relationship(
+        "transit_route_places",
+        "route_uid",
+        "transit_routes",
+        "route_uid",
+        "Route side of the transit-route/Place bridge. One route can cross several Places.",
+        "many-to-one",
+        bridge=True,
+        grain_effect="route-Place overlap -> route",
+    ),
+    Relationship(
+        "transit_route_places",
+        "place_geoid",
+        "place_boundaries",
+        "place_geoid",
+        "Place side of the transit-route/Place bridge. Coverage follows the installed Census Place layer.",
+        "many-to-one",
+        bridge=True,
+        grain_effect="route-Place overlap -> Place",
     ),
     Relationship(
         "transit_ridership",
-        "ntd_id",
+        "ntd_id || ':' || mode || ':' || tos",
         "transit_agencies",
-        "ntd_id",
-        "Monthly ridership to agency identity join.",
+        "ntd_id || ':' || mode || ':' || tos",
+        "Monthly ridership to the agency reporting unit (same NTD ID, mode and type of service). Joining on "
+        "ntd_id alone fans out: transit_agencies has one row per agency, mode and type of service.",
         "many-to-one",
-        grain_effect="ridership series -> agency",
+        grain_effect="ridership series -> agency reporting unit",
     ),
     Relationship(
         "transit_safety",
-        "ntd_id",
+        "ntd_id || ':' || mode || ':' || tos",
         "transit_agencies",
-        "ntd_id",
-        "Safety time series to agency identity join.",
+        "ntd_id || ':' || mode || ':' || tos",
+        "Safety time series to the agency reporting unit (same NTD ID, mode and type of service). Joining on "
+        "ntd_id alone fans out: transit_agencies has one row per agency, mode and type of service.",
         "many-to-one",
-        grain_effect="safety series -> agency",
+        grain_effect="safety series -> agency reporting unit",
     ),
     Relationship(
         "transit_agencies",
@@ -520,10 +904,11 @@ RELATIONSHIPS = [
     ),
     Relationship(
         "houses",
-        "city",
+        "lower(trim(city))",
         "transit_agencies",
-        "hq_city",
-        "Contextual city-level link between houses and transit agency headquarters.",
+        "lower(trim(hq_city))",
+        "Contextual city-level link between houses and transit agency headquarters. Agency labels are stored in "
+        "mixed/upper case, so both sides are case-folded; it is not a service-area relationship.",
         "many-to-many",
         confidence="medium",
         preferred=False,
@@ -932,6 +1317,7 @@ SEMANTIC_GLOSSARY.update(
             grain="zip-month",
             entity_types=("zip",),
             join=("houses.zip=zhvi.region_name",),
+            level=True,
         ),
         "zhvi_metro": _concept(
             "zhvi_metro",
@@ -949,6 +1335,7 @@ SEMANTIC_GLOSSARY.update(
             grain="metro-month",
             entity_types=("MSA",),
             join=("houses.msa_code=zhvi.msa_code", "census_msa.msa_code=zhvi.msa_code"),
+            level=True,
         ),
         "zhvi_neighborhood": _concept(
             "zhvi_neighborhood",
@@ -965,12 +1352,15 @@ SEMANTIC_GLOSSARY.update(
             filters=("zhvi.region_type = 'neighborhood'",),
             grain="neighborhood-month",
             join=(),
+            level=True,
         ),
         "market_heat_index": _concept(
             "market_heat_index",
             ["market_heat_index"],
             ["market heat index", "zillow heat index", "buyer's market", "seller's market", "market temperature"],
-            "Zillow Market Heat Index: buyer/seller market temperature (~0-100+) by region and month; higher is more seller-favorable. Mixed geography levels — filter region_type for a single level.",
+            "Zillow Market Heat Index at metro level: buyer/seller market temperature (~0-100+) by CBSA and month; "
+            "higher is more seller-favorable. The table also has a country level; use market_heat_index_country "
+            "for that, so a metro join never silently mixes grains.",
             columns=("market_heat_index.heat_index",),
             operations=(
                 AVG("market_heat_index.heat_index"),
@@ -980,7 +1370,32 @@ SEMANTIC_GLOSSARY.update(
                 RANK_DESC("market_heat_index.heat_index"),
                 RANK_ASC("market_heat_index.heat_index"),
             ),
-            grain="region-month",
+            filters=("market_heat_index.region_type = 'metro'",),
+            grain="metro-month",
+            entity_types=("MSA",),
+            join=("houses.msa_code=market_heat_index.msa_code", "census_msa.msa_code=market_heat_index.msa_code"),
+            level=True,
+        ),
+        "market_heat_index_country": _concept(
+            "market_heat_index_country",
+            ["market_heat_index"],
+            [
+                "national market heat index",
+                "country market heat",
+                "us market temperature",
+                "national buyer seller market",
+            ],
+            "Zillow Market Heat Index for the country as a whole. This level has no house join; use it for a "
+            "national market-temperature answer.",
+            columns=("market_heat_index.heat_index",),
+            operations=(
+                AVG("market_heat_index.heat_index"),
+                MIN("market_heat_index.heat_index"),
+                MAX("market_heat_index.heat_index"),
+            ),
+            filters=("market_heat_index.region_type = 'country'",),
+            grain="country-month",
+            level=True,
         ),
         # Transit concepts
         "transit_ridership": _concept(
@@ -1107,6 +1522,352 @@ SEMANTIC_GLOSSARY.update(
                 },
             ),
             grain="route",
+        ),
+        "transit_route_agencies": _concept(
+            "transit_route_agencies",
+            ["transit_route_agencies"],
+            [
+                "transit route agencies",
+                "agencies operating a route",
+                "route agency membership",
+                "multi-agency transit route",
+            ],
+            "Bridge from route shape features to each NTD agency named in the route's multi-valued ntd_id "
+            "field. Use the bridge rather than equality on transit_routes.ntd_id.",
+            columns=("transit_route_agencies.route_uid", "transit_route_agencies.ntd_id"),
+            operations=(COUNT("transit_route_agencies.route_uid"),),
+            grain="route-agency membership",
+        ),
+        "transit_routes_by_agency": _concept(
+            "transit_routes_by_agency",
+            ["transit_routes", "transit_route_agencies", "transit_agencies"],
+            [
+                "transit routes by agency",
+                "routes per agency",
+                "agency route count",
+                "how many transit routes are operated by each transit agency",
+                "which transit agency operates the most routes",
+                "transit routes operated by agency",
+                "bus routes by agency",
+            ],
+            "Distinct route shape features grouped by the NTD agency that operates them, through the "
+            "route/agency bridge that expands semicolon-separated ntd_id values. COUNT(DISTINCT route_uid) "
+            "is required because one route may list several agencies.",
+            columns=("transit_routes.route_uid", "transit_routes.route_short_name", "transit_agencies.agency"),
+            operations=(
+                COUNT("DISTINCT transit_routes.route_uid"),
+                _op(
+                    "count",
+                    ["how many routes", "number of routes", "route count"],
+                    "DISTINCT transit_routes.route_uid",
+                ),
+                _op(
+                    "distinct",
+                    ["which agencies", "list of agencies"],
+                    "transit_agencies.agency",
+                ),
+            ),
+            grain="route-agency membership",
+            groupings=("transit_agencies.agency",),
+            join=(
+                "transit_route_agencies.route_uid=transit_routes.route_uid",
+                "transit_route_agencies.ntd_id=transit_agencies.ntd_id",
+            ),
+        ),
+        "crime_city_summary": _concept(
+            "crime_city_summary",
+            ["crime_city_year"],
+            [
+                "crime by city",
+                "city crime summary",
+                "annual crime count",
+                "severity weighted crime",
+                "crime incidents by city",
+            ],
+            "City/year crime counts and severity-weighted totals, derived from the raw incident table. "
+            "The house relationship uses the latest loaded year; use this table directly for trends.",
+            columns=("crime_city_year.incidents", "crime_city_year.severity_weighted"),
+            operations=(
+                SUM("crime_city_year.incidents"),
+                AVG("crime_city_year.incidents"),
+                SUM("crime_city_year.severity_weighted"),
+                RANK_DESC("SUM(crime_city_year.incidents)", group_by="crime_city_year.city"),
+            ),
+            grain="city-year",
+            groupings=("crime_city_year.city", "crime_city_year.year"),
+            join=("houses.crime_city=crime_city_year.city",),
+        ),
+        "transit_routes_in_zcta": _concept(
+            "transit_routes_in_zcta",
+            ["zcta_boundaries", "transit_route_zctas"],
+            [
+                "transit routes serve zip",
+                "transit routes serve zcta",
+                "transit routes in zip",
+                "transit routes in zcta",
+                "bus routes in zip",
+                "routes serving zip",
+            ],
+            "Distinct transit route shape features whose linework has a positive-length overlap with a Census ZCTA. "
+            "A route crossing several ZCTAs is counted in each; use route_uid for shape features, not route_id, so "
+            "duplicate shapes from different feeds do not collapse silently.",
+            columns=("transit_route_zctas.route_uid",),
+            operations=(
+                {
+                    "op": "count",
+                    "aliases": ["how many transit routes", "number of transit routes", "how many bus routes", "route count"],
+                    "expr": "DISTINCT transit_route_zctas.route_uid",
+                },
+            ),
+            grain="route-ZCTA overlap",
+            entity_types=("zip",),
+            requires_entity=["zip"],
+            groupings=("zcta_boundaries.zcta5",),
+        ),
+        "transit_route_miles_in_zcta": _concept(
+            "transit_route_miles_in_zcta",
+            ["zcta_boundaries", "transit_route_zctas"],
+            [
+                "transit route miles in zip",
+                "transit route-miles in zcta",
+                "route miles in zip",
+                "route-miles in a zip",
+                "miles of transit in zip",
+            ],
+            "Transit route-miles inside a Census ZCTA, from the positive-length linework overlap measured in metres.",
+            columns=("transit_route_zctas.overlap_m",),
+            operations=(
+                {
+                    "op": "sum",
+                    "aliases": ["route miles", "route-miles", "transit route miles", "miles of transit"],
+                    "expr": "transit_route_zctas.overlap_m / 1609.344",
+                },
+            ),
+            grain="route-ZCTA overlap",
+            entity_types=("zip",),
+            requires_entity=["zip"],
+            groupings=("zcta_boundaries.zcta5",),
+        ),
+        "transit_routes_in_place": _concept(
+            "transit_routes_in_place",
+            ["place_boundaries", "transit_route_places"],
+            [
+                "transit routes serve city",
+                "transit routes in city",
+                "transit routes inside city limits",
+                "transit routes through city",
+                "bus routes in city",
+                "city limits",
+            ],
+            "Distinct transit route shape features whose linework has a positive-length overlap with a Census Place. "
+            "Coverage follows the installed Census Place layer; generalized cartographic polygons can shift overlap "
+            "lengths, so treat route-miles as an approximation when that layer is in use.",
+            columns=("transit_route_places.route_uid",),
+            operations=(
+                {
+                    "op": "count",
+                    "aliases": ["how many transit routes", "number of transit routes", "how many bus routes", "route count"],
+                    "expr": "DISTINCT transit_route_places.route_uid",
+                },
+            ),
+            grain="route-Place overlap",
+            entity_types=("place",),
+            requires_entity=["place"],
+            required_terms=["transit", "routes"],
+            groupings=("place_boundaries.place_geoid",),
+        ),
+        "transit_route_miles_in_place": _concept(
+            "transit_route_miles_in_place",
+            ["place_boundaries", "transit_route_places"],
+            [
+                "transit route miles in city",
+                "transit route-miles inside city",
+                "route miles in city",
+                "route-miles in a city",
+                "miles of transit in city",
+                "route miles in city limits",
+            ],
+            "Transit route-miles inside a Census Place, from the positive-length linework overlap measured in metres. "
+            "Coverage follows the installed Census Place layer; generalized cartographic polygons can shift lengths.",
+            columns=("transit_route_places.overlap_m",),
+            operations=(
+                {
+                    "op": "sum",
+                    "aliases": ["route miles", "route-miles", "transit route miles", "miles of transit"],
+                    "expr": "transit_route_places.overlap_m / 1609.344",
+                },
+            ),
+            grain="route-Place overlap",
+            entity_types=("place",),
+            requires_entity=["place"],
+            required_terms=["transit", "route"],
+            groupings=("place_boundaries.place_geoid",),
+        ),
+    }
+)
+
+# Bike-route bridge semantics.  These mirror the transit bridge concepts: one route can overlap
+# several tracts/ZCTAs/places, so counts are DISTINCT route_id and lengths sum the measured
+# overlap.  The bridge tables are agent-visible physical tables, so leaving them without a
+# concept would make the ontology's table coverage incomplete even though their joins exist.
+SEMANTIC_GLOSSARY.update(
+    {
+        "bike_routes_in_tract": _concept(
+            "bike_routes_in_tract",
+            ["census_tracts", "bike_route_tracts"],
+            [
+                "bike routes serve tract",
+                "bike routes in tract",
+                "bike lanes in tract",
+                "cycling routes in tract",
+                "bike routes in census tract",
+            ],
+            "Distinct bike route features with a positive-length overlap with a census tract. A route crossing "
+            "several tracts is counted in each; use route_id so multi-row bridge overlaps stay distinct.",
+            columns=("bike_route_tracts.route_id",),
+            operations=(
+                {
+                    "op": "count",
+                    "aliases": ["how many bike routes", "number of bike routes", "bike route count"],
+                    "expr": "DISTINCT bike_route_tracts.route_id",
+                },
+            ),
+            grain="route-tract overlap",
+            entity_types=("tract_fips",),
+            requires_entity=["tract_fips"],
+            required_terms=["bike"],
+            overrides=["bike_routes"],
+            groupings=("census_tracts.tract_fips",),
+        ),
+        "bike_route_miles_in_tract": _concept(
+            "bike_route_miles_in_tract",
+            ["census_tracts", "bike_route_tracts"],
+            [
+                "bike route miles in tract",
+                "bike lane miles in tract",
+                "cycling route miles in tract",
+                "miles of bike routes in tract",
+            ],
+            "Bike route-miles inside a census tract, from the positive-length linework overlap measured in meters.",
+            columns=("bike_route_tracts.overlap_m",),
+            operations=(
+                {
+                    "op": "sum",
+                    "aliases": ["bike route miles", "bike lane miles", "miles of bike routes"],
+                    "expr": "bike_route_tracts.overlap_m / 1609.344",
+                },
+            ),
+            grain="route-tract overlap",
+            entity_types=("tract_fips",),
+            requires_entity=["tract_fips"],
+            required_terms=["bike"],
+            overrides=["bike_routes"],
+            groupings=("census_tracts.tract_fips",),
+        ),
+        "bike_routes_in_zcta": _concept(
+            "bike_routes_in_zcta",
+            ["zcta_boundaries", "bike_route_zctas"],
+            [
+                "bike routes serve zip",
+                "bike routes in zip",
+                "bike lanes in zip",
+                "cycling routes in zip",
+                "bike routes in zcta",
+            ],
+            "Distinct bike route features with a positive-length overlap with a Census ZCTA. A route crossing "
+            "several ZCTAs is counted in each.",
+            columns=("bike_route_zctas.route_id",),
+            operations=(
+                {
+                    "op": "count",
+                    "aliases": ["how many bike routes", "number of bike routes", "bike route count"],
+                    "expr": "DISTINCT bike_route_zctas.route_id",
+                },
+            ),
+            grain="route-ZCTA overlap",
+            entity_types=("zip",),
+            requires_entity=["zip"],
+            required_terms=["bike"],
+            overrides=["bike_routes"],
+            groupings=("zcta_boundaries.zcta5",),
+        ),
+        "bike_route_miles_in_zcta": _concept(
+            "bike_route_miles_in_zcta",
+            ["zcta_boundaries", "bike_route_zctas"],
+            [
+                "bike route miles in zip",
+                "bike lane miles in zip",
+                "cycling route miles in zip",
+                "miles of bike routes in zip",
+            ],
+            "Bike route-miles inside a Census ZCTA, from the positive-length linework overlap measured in meters.",
+            columns=("bike_route_zctas.overlap_m",),
+            operations=(
+                {
+                    "op": "sum",
+                    "aliases": ["bike route miles", "bike lane miles", "miles of bike routes"],
+                    "expr": "bike_route_zctas.overlap_m / 1609.344",
+                },
+            ),
+            grain="route-ZCTA overlap",
+            entity_types=("zip",),
+            requires_entity=["zip"],
+            required_terms=["bike"],
+            overrides=["bike_routes"],
+            groupings=("zcta_boundaries.zcta5",),
+        ),
+        "bike_routes_in_place": _concept(
+            "bike_routes_in_place",
+            ["place_boundaries", "bike_route_places"],
+            [
+                "bike routes serve city",
+                "bike routes in city",
+                "bike lanes in city",
+                "cycling routes in city",
+                "bike routes inside city limits",
+            ],
+            "Distinct bike route features with a positive-length overlap with a Census Place. Coverage follows "
+            "the installed Census Place layer; generalized cartographic polygons can shift overlap lengths.",
+            columns=("bike_route_places.route_id",),
+            operations=(
+                {
+                    "op": "count",
+                    "aliases": ["how many bike routes", "number of bike routes", "bike route count"],
+                    "expr": "DISTINCT bike_route_places.route_id",
+                },
+            ),
+            grain="route-Place overlap",
+            entity_types=("place",),
+            requires_entity=["place"],
+            required_terms=["bike"],
+            overrides=["bike_routes"],
+            groupings=("place_boundaries.place_geoid",),
+        ),
+        "bike_route_miles_in_place": _concept(
+            "bike_route_miles_in_place",
+            ["place_boundaries", "bike_route_places"],
+            [
+                "bike route miles in city",
+                "bike lane miles in city",
+                "cycling route miles in city",
+                "miles of bike routes in city",
+            ],
+            "Bike route-miles inside a Census Place, from the positive-length linework overlap measured in meters. "
+            "Coverage follows the installed Census Place layer; generalized cartographic polygons can shift lengths.",
+            columns=("bike_route_places.overlap_m",),
+            operations=(
+                {
+                    "op": "sum",
+                    "aliases": ["bike route miles", "bike lane miles", "miles of bike routes"],
+                    "expr": "bike_route_places.overlap_m / 1609.344",
+                },
+            ),
+            grain="route-Place overlap",
+            entity_types=("place",),
+            requires_entity=["place"],
+            required_terms=["bike"],
+            overrides=["bike_routes"],
+            groupings=("place_boundaries.place_geoid",),
         ),
     }
 )
@@ -1508,11 +2269,54 @@ SEMANTIC_GLOSSARY.update(
             "BikePGH-style bike route line features, one row per route segment.",
             columns=("bike_routes.route_id", "bike_routes.city"),
             operations=(
-                COUNT("bike_routes.route_id"),
+                # DISTINCT is required after the route-tract bridge: a route can have several bridge
+                # rows (several tracts/counties), and COUNT(route_id) would count overlaps, not routes.
+                COUNT("DISTINCT bike_routes.route_id"),
                 _op("distinct", ["which cities", "cities", "list of cities"], "bike_routes.city"),
             ),
             grain="route",
+            entity_types=("county", "MSA", "tract_fips", "zip", "place"),
             groupings=("bike_routes.city",),
+        ),
+        "zcta_boundary_area": _concept(
+            "zcta_boundary_area",
+            ["zcta_boundaries"],
+            ["ZCTA land area", "ZCTA area", "ZIP code area", "ZIP Code Tabulation Area area"],
+            "Land area of Census ZCTA5 boundary polygons in square miles. A ZCTA is a statistical "
+            "approximation of a ZIP Code service area, not an exact USPS delivery boundary.",
+            columns=("zcta_boundaries.land_area_sq_mi",),
+            operations=(
+                AVG("zcta_boundaries.land_area_sq_mi"),
+                MEDIAN("zcta_boundaries.land_area_sq_mi"),
+                SUM("zcta_boundaries.land_area_sq_mi"),
+                MIN("zcta_boundaries.land_area_sq_mi"),
+                MAX("zcta_boundaries.land_area_sq_mi"),
+            ),
+            grain="ZCTA",
+            entity_types=("zip",),
+            groupings=("zcta_boundaries.zcta5",),
+            overrides=["census_land_area"],
+            default_operation="avg",
+        ),
+        "place_boundary_area": _concept(
+            "place_boundary_area",
+            ["place_boundaries"],
+            ["place land area", "Census Place area", "city limits area", "municipal land area"],
+            "Land area of Census Place boundary polygons (incorporated places and Census designated "
+            "places), in square miles. The boundary is the legal/statistical city or town limit, not a ZIP area.",
+            columns=("place_boundaries.land_area_sq_mi",),
+            operations=(
+                AVG("place_boundaries.land_area_sq_mi"),
+                MEDIAN("place_boundaries.land_area_sq_mi"),
+                SUM("place_boundaries.land_area_sq_mi"),
+                MIN("place_boundaries.land_area_sq_mi"),
+                MAX("place_boundaries.land_area_sq_mi"),
+            ),
+            grain="Place",
+            entity_types=("place",),
+            groupings=("place_boundaries.short_name",),
+            overrides=["census_land_area"],
+            default_operation="avg",
         ),
     }
 )
@@ -1807,6 +2611,70 @@ COLUMN_ROLES: dict[str, tuple[str, str]] = {
     "bike_routes.max_lat": ("geo", "decimal degrees"),
     "bike_routes.geometry_json": ("other", ""),
     "bike_routes.properties_json": ("other", ""),
+    # bike_route_tracts
+    "bike_route_tracts.route_id": ("key", ""),
+    "bike_route_tracts.tract_fips": ("key", ""),
+    "bike_route_tracts.overlap_m": ("measure", "meters"),
+    # zcta_boundaries
+    "zcta_boundaries.zcta5": ("key", ""),
+    "zcta_boundaries.geo_id": ("key", ""),
+    "zcta_boundaries.classfp": ("dimension", ""),
+    "zcta_boundaries.mtfcc": ("dimension", ""),
+    "zcta_boundaries.funcstat": ("dimension", ""),
+    "zcta_boundaries.aland": ("measure", "square metres"),
+    "zcta_boundaries.awater": ("measure", "square metres"),
+    "zcta_boundaries.land_area_sq_mi": ("measure", "sq miles"),
+    "zcta_boundaries.water_area_sq_mi": ("measure", "sq miles"),
+    "zcta_boundaries.lat": ("geo", "decimal degrees"),
+    "zcta_boundaries.lon": ("geo", "decimal degrees"),
+    "zcta_boundaries.min_lon": ("geo", "decimal degrees"),
+    "zcta_boundaries.min_lat": ("geo", "decimal degrees"),
+    "zcta_boundaries.max_lon": ("geo", "decimal degrees"),
+    "zcta_boundaries.max_lat": ("geo", "decimal degrees"),
+    "zcta_boundaries.geometry_json": ("other", "GeoJSON"),
+    "zcta_boundaries.properties_json": ("other", "JSON"),
+    "zcta_boundaries.source_file": ("other", ""),
+    # place_boundaries
+    "place_boundaries.place_geoid": ("key", ""),
+    "place_boundaries.place_fips": ("key", ""),
+    "place_boundaries.state_fips": ("key", ""),
+    "place_boundaries.name": ("label", ""),
+    "place_boundaries.short_name": ("label", ""),
+    "place_boundaries.namelsad": ("label", ""),
+    "place_boundaries.lsad": ("dimension", ""),
+    "place_boundaries.classfp": ("dimension", ""),
+    "place_boundaries.funcstat": ("dimension", ""),
+    "place_boundaries.aland": ("measure", "square metres"),
+    "place_boundaries.awater": ("measure", "square metres"),
+    "place_boundaries.land_area_sq_mi": ("measure", "sq miles"),
+    "place_boundaries.water_area_sq_mi": ("measure", "sq miles"),
+    "place_boundaries.lat": ("geo", "decimal degrees"),
+    "place_boundaries.lon": ("geo", "decimal degrees"),
+    "place_boundaries.min_lon": ("geo", "decimal degrees"),
+    "place_boundaries.min_lat": ("geo", "decimal degrees"),
+    "place_boundaries.max_lon": ("geo", "decimal degrees"),
+    "place_boundaries.max_lat": ("geo", "decimal degrees"),
+    "place_boundaries.geometry_json": ("other", "GeoJSON"),
+    "place_boundaries.properties_json": ("other", "JSON"),
+    "place_boundaries.source_file": ("other", ""),
+    # bike_route_zctas
+    "bike_route_zctas.route_id": ("key", ""),
+    "bike_route_zctas.zcta5": ("key", ""),
+    "bike_route_zctas.overlap_m": ("measure", "meters"),
+    # bike_route_places
+    "bike_route_places.route_id": ("key", ""),
+    "bike_route_places.place_geoid": ("key", ""),
+    "bike_route_places.overlap_m": ("measure", "meters"),
+    # transit_route_zctas
+    "transit_route_zctas.route_uid": ("key", ""),
+    "transit_route_zctas.zcta5": ("key", ""),
+    "transit_route_zctas.overlap_m": ("measure", "meters"),
+    "transit_route_zctas.route_fraction": ("measure", "fraction of route"),
+    # transit_route_places
+    "transit_route_places.route_uid": ("key", ""),
+    "transit_route_places.place_geoid": ("key", ""),
+    "transit_route_places.overlap_m": ("measure", "meters"),
+    "transit_route_places.route_fraction": ("measure", "fraction of route"),
     # cbsa_counties
     "cbsa_counties.cbsa_code": ("key", ""),
     "cbsa_counties.cbsa_title": ("label", ""),
@@ -1921,7 +2789,7 @@ COLUMN_NOTES: dict[str, dict[str, str]] = {
         "county_name": "County name as published with the NRI record.",
         "nri_id": "FEMA's own National Risk Index identifier for this tract (NRI_ID).",
         "risk_ratng": "FEMA's composite Risk Index rating band (e.g. 'Relatively Low', 'Very High'), derived from the score's percentile.",
-        "risk_npctl": "Composite Risk Index state percentile (RISK_SPCTL in the 2023+ shapefile; stored under the older RISK_NPCTL name).",
+        "risk_npctl": "State percentile of the NRI Risk Index (RISK_SPCTL in the 2023+ shapefile; stored under the older RISK_NPCTL name).",
         "eal_score": "Expected Annual Loss score: national percentile of the tract's EAL value (0-100).",
         "eal_ratng": "FEMA's Expected Annual Loss rating band.",
         "eal_valt": "Expected Annual Loss, total: the average dollar loss per year from natural hazards across buildings, population and agriculture.",
@@ -2048,6 +2916,61 @@ COLUMN_NOTES: dict[str, dict[str, str]] = {
         "geometry_json": "Feature geometry as GeoJSON (stored as text), so viewport queries need no shapefile at runtime.",
         "properties_json": "All remaining shapefile attributes as JSON.",
     },
+    "bike_route_tracts": {
+        "route_id": "Route whose line intersects the tract.",
+        "tract_fips": "11-digit Census tract FIPS; county is LEFT(tract_fips, 5), never a column on bike_routes.",
+        "overlap_m": "Length of the route line inside the tract in meters; a route may have several rows.",
+    },
+    "bike_route_zctas": {
+        "route_id": "Route whose line intersects the ZCTA.",
+        "zcta5": "Census ZCTA5 boundary code; joins zcta_boundaries.zcta5.",
+        "overlap_m": "Length of the route line inside the ZCTA in meters; a route may have several rows.",
+    },
+    "bike_route_places": {
+        "route_id": "Route whose line intersects the Place.",
+        "place_geoid": "Census Place GEOID; joins place_boundaries.place_geoid.",
+        "overlap_m": "Length of the route line inside the Place in meters; a route may have several rows.",
+    },
+    "zcta_boundaries": {
+        "zcta5": "5-digit Census ZCTA code. A ZCTA approximates a USPS ZIP service area; it is not the ZIP's delivery boundary and is not a ZIP+4 range.",
+        "classfp": "TIGER CLASSFP code for the ZCTA (B5 = 5-digit ZCTA).",
+        "mtfcc": "TIGER MTFCC feature class (G6350 = statistical area).",
+        "funcstat": "TIGER functional status; ZCTAs are statistical (S).",
+        "aland": "Land area from TIGER ALAND20 in square metres; NULL only when the source omitted it.",
+        "awater": "Water area from TIGER AWATER20 in square metres.",
+        "land_area_sq_mi": "Total land area: ALAND20 divided by 2,589,988.110336.",
+        "water_area_sq_mi": "AWATER20 divided by 2,589,988.110336.",
+        "lat": "TIGER INTPTLAT20 representative point, or a geometry representative point when that field is absent. Approximate for polygons.",
+        "lon": "TIGER INTPTLON20 representative point, or a geometry representative point when that field is absent.",
+        "min_lon": "Western edge of the ZCTA's EPSG:4326 bounding box; the map layer's viewport filter uses these bbox columns.",
+        "min_lat": "Southern edge of the ZCTA's EPSG:4326 bounding box.",
+        "max_lon": "Eastern edge of the ZCTA's EPSG:4326 bounding box.",
+        "max_lat": "Northern edge of the ZCTA's EPSG:4326 bounding box.",
+        "geometry_json": "ZCTA polygon as GeoJSON text (Polygon/MultiPolygon), reprojected to EPSG:4326.",
+        "properties_json": "Every original TIGER attribute, preserved as JSON so nothing is lost.",
+        "source_file": "TIGER .shp or .zip under data/tiger/ that contributed this row; later duplicate ZCTA files win.",
+    },
+    "place_boundaries": {
+        "place_geoid": "7-digit state FIPS + 5-digit place FIPS (Census GEOID).",
+        "place_fips": "Census PLACEFP: 5-digit place code unique only within its state.",
+        "state_fips": "2-digit zero-padded state FIPS from Census STATEFP.",
+        "name": "Census NAME as published (e.g. 'Pittsburgh' or, in some vintages, 'Pittsburgh city'); NAMELSAD carries the full legal label.",
+        "short_name": "NAME with a trailing city/town/village/borough/township/municipality/CDP suffix removed when present. A display convenience; name remains authoritative.",
+        "namelsad": "Census NAMELSAD, the name plus legal/statistical area description.",
+        "classfp": "Census CLASSFP classification; NULL for rows from the national cartographic file, which omits it.",
+        "funcstat": "Census functional status; NULL for rows from the national cartographic file, which omits it.",
+        "land_area_sq_mi": "Total land area: ALAND divided by 2,589,988.110336.",
+        "water_area_sq_mi": "AWATER divided by 2,589,988.110336.",
+        "lat": "Census INTPTLAT representative point, or a geometry representative point when that field is absent (the national cartographic file omits it). Approximate for polygons.",
+        "lon": "Census INTPTLON representative point, or a geometry representative point when that field is absent (the national cartographic file omits it).",
+        "min_lon": "Western edge of the Place's EPSG:4326 bounding box; the map layer's viewport filter uses these bbox columns.",
+        "min_lat": "Southern edge of the Place's EPSG:4326 bounding box.",
+        "max_lon": "Eastern edge of the Place's EPSG:4326 bounding box.",
+        "max_lat": "Northern edge of the Place's EPSG:4326 bounding box.",
+        "geometry_json": "Place boundary as GeoJSON text (Polygon/MultiPolygon), reprojected to EPSG:4326. This is the legal/statistical municipal boundary, not a ZIP area; the national 1:500,000 cartographic file is generalized.",
+        "properties_json": "Every original TIGER attribute, preserved as JSON so nothing is lost.",
+        "source_file": "Census .shp or .zip under data/tiger/ or a matching data/ folder that contributed this row; multiple files are merged, and duplicate GEOIDs keep the newest vintage (TIGER/Line over cartographic on a tie).",
+    },
     "cbsa_counties": {
         "cbsa_title": "Full CBSA title as published (e.g. 'Pittsburgh, PA Metropolitan Statistical Area').",
         "msa_type": "Metropolitan or Micropolitan statistical area, as the delineation file declares.",
@@ -2100,7 +3023,11 @@ def _with_column_metadata(name: str, meta: TableMeta) -> TableMeta:
         if table != name:
             continue
         current = merged.get(column)
-        merged[column] = ColumnNote(column, "") if current is None else replace(current, role=role, unit=unit)
+        merged[column] = (
+            ColumnNote(column, "", role=role, unit=unit)
+            if current is None
+            else replace(current, role=role, unit=unit)
+        )
     return replace(meta, column_notes=tuple(merged.values()))
 
 
@@ -2202,6 +3129,15 @@ ENTITY_DOMAINS = (
         ),
     ),
     EntityDomain(
+        "county_name",
+        "cbsa_counties",
+        "county_name",
+        "county",
+        "County names from the CBSA delineation crosswalk",
+        match_mode="exact_or_prefix",
+        preferred_for=(),
+    ),
+    EntityDomain(
         "tract_fips",
         "census_tracts",
         "tract_fips",
@@ -2275,6 +3211,24 @@ ENTITY_DOMAINS = (
     # into a filter.  (``exact`` is not a live value-match mode - 11-digit tract FIPS goes through its own
     # literal path - so declaring it here would be a silent no-op.)
     EntityDomain(
+        "zcta5",
+        "zcta_boundaries",
+        "zcta5",
+        "zip",
+        "Census ZCTA5 boundary codes (statistical ZIP areas, not USPS delivery boundaries)",
+        match_mode="exact_or_prefix",
+        preferred_for=(),
+    ),
+    EntityDomain(
+        "place_name",
+        "place_boundaries",
+        "short_name",
+        "place",
+        "Census Place boundary names (cities, towns, villages, boroughs, townships and CDPs)",
+        match_mode="exact_or_prefix",
+        preferred_for=(),
+    ),
+    EntityDomain(
         "house_address",
         "houses",
         "address",
@@ -2300,13 +3254,22 @@ SEED_DOMAINS = {
     "census_tracts": "geography",
     "census_msa": "geography",
     "cbsa_counties": "geography",
+    "zcta_boundaries": "geography",
+    "place_boundaries": "geography",
+    "bike_route_tracts": "mobility",
+    "bike_route_zctas": "mobility",
+    "bike_route_places": "mobility",
     "sold_homes": "sales",
     "crime_incidents": "safety",
+    "crime_city_year": "safety",
     "bike_routes": "mobility",
-    "transit_agencies": "transit",
-    "transit_ridership": "transit",
-    "transit_safety": "transit",
-    "transit_routes": "transit",
+    "transit_agencies": "mobility",
+    "transit_ridership": "mobility",
+    "transit_safety": "mobility",
+    "transit_routes": "mobility",
+    "transit_route_agencies": "mobility",
+    "transit_route_zctas": "mobility",
+    "transit_route_places": "mobility",
     "zhvi": "housing",
     "market_heat_index": "housing",
     "geocode_cache": "system",

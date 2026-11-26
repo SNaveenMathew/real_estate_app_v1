@@ -193,6 +193,8 @@ def reload() -> str:
                 bridge=bool(r.get("bridge")),
                 preferred=bool(r.get("preferred")),
                 grain_effect=r.get("grain_effect") or "",
+                transform=_json(r.get("transform_json"), {}),
+                scope=_json(r.get("scope_json"), {}),
                 origin=r.get("origin") or "builtin",
                 dataset_id=r.get("dataset_id") or "",
             )
@@ -376,7 +378,24 @@ def qualify_join_expr(table: str, expr: str) -> str:
             return token  # function name, e.g. LEFT( - not a column
         return f"{table}.{token}"
 
-    return re.sub(r"(?<!\.)\b[A-Za-z_][A-Za-z0-9_]*\b", _replace, expr)
+    # Leave double-quoted identifiers alone: ``"city"`` is one identifier, and prefixing inside
+    # the quotes would produce ``"houses.city"`` (a single, nonexistent column name).
+    parts = re.split(r'("(?:[^"]|"")*")', expr)
+    for i in range(0, len(parts), 2):
+        parts[i] = re.sub(r"(?<!\.)\b[A-Za-z_][A-Za-z0-9_]*\b", _replace, parts[i])
+    return "".join(parts)
+
+
+def relationship_scope_sql(rel: Relationship) -> list[str]:
+    """Extra, already-qualified ON predicates that make ``rel`` true at its catalog grain.
+
+    A key equality alone is not always the relationship the catalog means: the Zillow
+    series are one row per region *per month* and hold several geography levels.  The
+    scope keeps those relationships at the level/period the notes describe instead of
+    multiplying every house by hundreds of monthly observations.
+    """
+    scope = getattr(rel, "scope", None) or {}
+    return [str(x).strip() for x in scope.get("on", ()) if str(x).strip()]
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +456,9 @@ def house_link_plan(table: str) -> dict | None:
                 f"{qualify_join_expr(rel.left_table, rel.left_expr)} = "
                 f"{qualify_join_expr(rel.right_table, rel.right_expr)}"
             )
+            scope = relationship_scope_sql(rel)
+            if scope:
+                on += " AND " + " AND ".join(scope)
             joins.append(f"JOIN {new} ON {on}")
             connected.add(new)
             remaining.remove(rel)
@@ -556,6 +578,7 @@ def describe_catalog() -> dict:
                 "preferred": r.preferred,
                 "note": r.note,
                 "grain_effect": r.grain_effect,
+                "transform": r.transform,
                 "origin": r.origin,
                 "dataset_id": r.dataset_id,
                 "approved_at": str(meta.get("approved_at") or ""),
@@ -752,6 +775,11 @@ def availability_report():
 
 
 def _fetch_values(table: str, column: str, limit: int = 5000):
+    # Boundary names/codes are high-cardinality but deliberately bounded: unlike a 12M-row
+    # ZHVI label column, a national ZCTA or Place table is small enough to resolve an exact
+    # ZIP or city-limit entity without truncating the value list at 5,000.
+    if table in {"zcta_boundaries", "place_boundaries"}:
+        limit = max(limit, 50_000)
     try:
         df = store.query(
             f"SELECT DISTINCT {column} AS value FROM {table} WHERE {column} IS NOT NULL LIMIT {int(limit)}"
@@ -759,6 +787,17 @@ def _fetch_values(table: str, column: str, limit: int = 5000):
         return [str(v) for v in df["value"].tolist()]
     except Exception:
         return []
+
+
+def _value_exists(table: str, column: str, value: str) -> bool:
+    if not re.match(r"^[A-Za-z_]\w*$", table) or not re.match(r"^[A-Za-z_]\w*$", column):
+        return False
+    try:
+        return not store.query(
+            f"SELECT 1 FROM {table} WHERE {column} = ? LIMIT 1", [value]
+        ).empty
+    except Exception:
+        return False
 
 
 # Match modes that compare request text with the live VALUES of a column.  "exact" domains (tract FIPS) are resolved
@@ -772,8 +811,9 @@ def _literal_tract_entities(domains, query: str) -> list[dict]:
     for d in domains:
         if d.entity_type == "tract_fips":
             for fips in re.findall(r"\b\d{11}\b", query):
-                values = _fetch_values(d.table, d.column)
-                if fips in values:
+                # Do not rely on _fetch_values: it stops at 5,000 distinct values, so a valid
+                # tract later in a national census table would be reported as unknown.
+                if _value_exists(d.table, d.column, fips):
                     out.append(
                         {
                             "entity_type": d.entity_type,
@@ -787,11 +827,27 @@ def _literal_tract_entities(domains, query: str) -> list[dict]:
     return out
 
 
+_PLACE_NAME_STOPWORDS = frozenset(
+    """
+    a an the and or but if then than that this these those there here
+    how what when where which who why many much more most some any all each every
+    no not other same such as at by for from in into of on onto over under with without
+    within about after before during across inside outside between through to up down
+    city town village borough township place limits boundary area zip zcta transit route routes
+    """.split()
+)
+
+
 def _value_entities(d: EntityDomain, values, t: str, msa_context: bool) -> list[dict]:
     """``exact_or_prefix`` / ``prefix`` matching of normalized request text ``t`` against live values."""
     out = []
     for value in values:
         nv = _normalize(value)
+        # Census Place names include ordinary English words ("Many" is a real place).
+        # A grammatical word in a question is not a place reference; without this, a
+        # "how many ... city limits" question anchors both Pittsburgh and Many.
+        if d.name == "place_name" and nv in _PLACE_NAME_STOPWORDS:
+            continue
         if d.match_mode == "exact_or_prefix":
             if _alias_matches(t, nv):
                 out.append(

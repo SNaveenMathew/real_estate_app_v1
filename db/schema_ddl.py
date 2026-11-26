@@ -35,6 +35,72 @@ BIKE_ROUTES = """
         )
     """
 
+BIKE_ROUTE_TRACTS = """
+        CREATE TABLE IF NOT EXISTS bike_route_tracts (
+            route_id    VARCHAR,
+            tract_fips  VARCHAR,
+            overlap_m   DOUBLE,
+            PRIMARY KEY (route_id, tract_fips)
+        )
+    """
+
+BIKE_ROUTE_ZCTAS = """
+        CREATE TABLE IF NOT EXISTS bike_route_zctas (
+            route_id  VARCHAR,
+            zcta5     VARCHAR,
+            overlap_m DOUBLE,
+            PRIMARY KEY (route_id, zcta5)
+        )
+    """
+
+BIKE_ROUTE_PLACES = """
+        CREATE TABLE IF NOT EXISTS bike_route_places (
+            route_id    VARCHAR,
+            place_geoid VARCHAR,
+            overlap_m   DOUBLE,
+            PRIMARY KEY (route_id, place_geoid)
+        )
+    """
+
+TRANSIT_ROUTE_ZCTAS = """
+        CREATE TABLE IF NOT EXISTS transit_route_zctas (
+            route_uid      VARCHAR,
+            zcta5          VARCHAR,
+            overlap_m      DOUBLE,
+            route_fraction DOUBLE,
+            PRIMARY KEY (route_uid, zcta5)
+        )
+    """
+
+TRANSIT_ROUTE_PLACES = """
+        CREATE TABLE IF NOT EXISTS transit_route_places (
+            route_uid      VARCHAR,
+            place_geoid    VARCHAR,
+            overlap_m      DOUBLE,
+            route_fraction DOUBLE,
+            PRIMARY KEY (route_uid, place_geoid)
+        )
+    """
+
+TRANSIT_ROUTE_AGENCIES = """
+        CREATE TABLE IF NOT EXISTS transit_route_agencies (
+            route_uid   VARCHAR,
+            ntd_id      VARCHAR,
+            raw_ntd_id  VARCHAR,
+            PRIMARY KEY (route_uid, ntd_id)
+        )
+    """
+
+CRIME_CITY_YEAR = """
+        CREATE OR REPLACE VIEW crime_city_year AS
+        SELECT city,
+               year,
+               COUNT(*) AS incidents,
+               SUM(COALESCE(severity_weight, 0)) AS severity_weighted
+        FROM crime_incidents
+        WHERE city IS NOT NULL AND year IS NOT NULL
+        GROUP BY city, year
+    """
 CBSA_COUNTIES = """
         CREATE TABLE IF NOT EXISTS cbsa_counties (
             cbsa_code       VARCHAR,
@@ -44,6 +110,56 @@ CBSA_COUNTIES = """
             county_fips     VARCHAR,
             county_name     VARCHAR,
             state_name      VARCHAR
+        )
+    """
+
+ZCTA_BOUNDARIES = """
+        CREATE TABLE IF NOT EXISTS zcta_boundaries (
+            zcta5           VARCHAR PRIMARY KEY,  -- 5-digit Census ZCTA (not an exact USPS ZIP boundary)
+            geo_id          VARCHAR,
+            classfp         VARCHAR,
+            mtfcc           VARCHAR,
+            funcstat        VARCHAR,
+            aland           BIGINT,               -- land area, square metres (TIGER ALAND20)
+            awater          BIGINT,               -- water area, square metres (TIGER AWATER20)
+            land_area_sq_mi DOUBLE,
+            water_area_sq_mi DOUBLE,
+            lat             DOUBLE,               -- representative point latitude (EPSG:4326)
+            lon             DOUBLE,
+            min_lon         DOUBLE,
+            min_lat         DOUBLE,
+            max_lon         DOUBLE,
+            max_lat         DOUBLE,
+            geometry_json   VARCHAR,              -- GeoJSON Polygon / MultiPolygon
+            properties_json VARCHAR,               -- every original TIGER field, for provenance
+            source_file     VARCHAR
+        )
+    """
+
+PLACE_BOUNDARIES = """
+        CREATE TABLE IF NOT EXISTS place_boundaries (
+            place_geoid     VARCHAR PRIMARY KEY,  -- 7-digit state+place GEOID
+            place_fips      VARCHAR,              -- 5-digit place code within the state
+            state_fips      VARCHAR,
+            name            VARCHAR,              -- TIGER NAME, e.g. "Pittsburgh city"
+            short_name      VARCHAR,              -- legal suffix removed, e.g. "Pittsburgh"
+            namelsad        VARCHAR,
+            lsad            VARCHAR,
+            classfp         VARCHAR,
+            funcstat        VARCHAR,
+            aland           BIGINT,
+            awater          BIGINT,
+            land_area_sq_mi DOUBLE,
+            water_area_sq_mi DOUBLE,
+            lat             DOUBLE,
+            lon             DOUBLE,
+            min_lon         DOUBLE,
+            min_lat         DOUBLE,
+            max_lon         DOUBLE,
+            max_lat         DOUBLE,
+            geometry_json   VARCHAR,              -- GeoJSON Polygon / MultiPolygon
+            properties_json VARCHAR,
+            source_file     VARCHAR
         )
     """
 
@@ -448,6 +564,8 @@ def create_geo_tables(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute(CENSUS_TRACTS)
     conn.execute(CENSUS_MSA)
     conn.execute(CBSA_COUNTIES)
+    conn.execute(ZCTA_BOUNDARIES)
+    conn.execute(PLACE_BOUNDARIES)
     conn.execute(ZHVI)
     conn.execute(MARKET_HEAT_INDEX)
     # Same upgrade path for msa_code, which earlier zhvi/market_heat_index tables lack.
@@ -461,11 +579,15 @@ def create_geo_tables(conn: duckdb.DuckDBPyConnection) -> None:
 def create_crime_tables(conn: duckdb.DuckDBPyConnection) -> None:
     """Standardized crime incidents (one row per offence, with the taxonomy's severity weight)."""
     conn.execute(CRIME_INCIDENTS)
+    conn.execute(CRIME_CITY_YEAR)
 
 
 def create_bike_tables(conn: duckdb.DuckDBPyConnection) -> None:
-    """BikePGH line geometry, stored as GeoJSON plus a bounding box so viewport queries stay cheap."""
+    """BikePGH line geometry plus its route-to-tract spatial bridge."""
     conn.execute(BIKE_ROUTES)
+    conn.execute(BIKE_ROUTE_TRACTS)
+    conn.execute(BIKE_ROUTE_ZCTAS)
+    conn.execute(BIKE_ROUTE_PLACES)
 
 
 def create_transit_tables(conn: duckdb.DuckDBPyConnection) -> None:
@@ -474,6 +596,9 @@ def create_transit_tables(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute(TRANSIT_RIDERSHIP)
     conn.execute(TRANSIT_SAFETY)
     conn.execute(TRANSIT_ROUTES)
+    conn.execute(TRANSIT_ROUTE_ZCTAS)
+    conn.execute(TRANSIT_ROUTE_PLACES)
+    conn.execute(TRANSIT_ROUTE_AGENCIES)
 
 
 def create_sales_tables(conn: duckdb.DuckDBPyConnection) -> None:
@@ -526,6 +651,8 @@ _INDEXES = (
     ("nri_tracts", "county_fips"),
     ("cbsa_counties", "county_fips"),
     ("cbsa_counties", "cbsa_code"),
+    ("place_boundaries", "state_fips"),
+    ("place_boundaries", "short_name"),
     ("crime_incidents", "city"),
     ("crime_incidents", "year"),
     ("crime_incidents", "category"),
@@ -533,6 +660,12 @@ _INDEXES = (
     ("sold_homes", "county_fips"),
     ("sold_homes", "city"),
     ("bike_routes", "city"),
+    ("bike_route_zctas", "zcta5"),
+    ("bike_route_places", "place_geoid"),
+    ("transit_route_zctas", "zcta5"),
+    ("transit_route_places", "place_geoid"),
+    ("transit_route_agencies", "route_uid"),
+    ("transit_route_agencies", "ntd_id"),
     ("transit_routes", "ntd_id"),
     ("transit_ridership", "ntd_id"),
     ("transit_ridership", "year"),
@@ -598,6 +731,85 @@ def repair_zip_codes(conn: duckdb.DuckDBPyConnection, *, force: bool = False) ->
     return changed
 
 
+def repair_ct_tract_codes(conn: duckdb.DuckDBPyConnection, *, force: bool = False) -> int:
+    """Re-key Connecticut census tracts onto the 2022 planning-region county codes.
+
+    Connecticut replaced its eight counties with nine planning regions in 2022, and the tract GEOIDs moved
+    with them: the tract number stayed, the five-digit county-equivalent prefix went from 090xx to 091xx
+    (09009141600 -> 09170141600).  ``census_tracts`` is loaded from a 2020-vintage file and keeps the old
+    prefix, while the house geocoder, ``nri_tracts`` and the ``cbsa_counties`` crosswalk all use the new
+    one, so every Connecticut house silently dropped out of tract -> county -> CBSA -> MSA -> ZHVI
+    (measured: 43 of 1,778 houses, all in CT).
+
+    The prefix is not derivable from the tract number alone - a planning region spans several old counties
+    (09140 covers 09001/09003/09005/09009) and two tract numbers repeat across counties - so the map comes
+    from ``nri_tracts``, which is published on the current tract set and loaded before census in the full
+    setup.  A number that is ambiguous there, or absent, is left exactly as it is and never guessed.
+    Idempotent: only rows still on 090xx move, and only to a key that does not already exist.
+    """
+    try:
+        if not conn.execute("SELECT 1 FROM nri_tracts WHERE state_fips = '09' LIMIT 1").fetchone():
+            return 0  # no current-vintage source yet: retried on the next start rather than guessed
+        moves = conn.execute(
+            """
+            SELECT ct.tract_fips AS old_fips, m.region || RIGHT(ct.tract_fips, 6) AS new_fips
+            FROM census_tracts ct
+            JOIN (
+                SELECT RIGHT(tract_fips, 6) AS num, MIN(LEFT(tract_fips, 5)) AS region
+                FROM nri_tracts
+                WHERE state_fips = '09' AND LEFT(tract_fips, 5) LIKE '091%'
+                GROUP BY 1
+                HAVING COUNT(DISTINCT LEFT(tract_fips, 5)) = 1
+            ) m ON m.num = RIGHT(ct.tract_fips, 6)
+            WHERE ct.tract_fips LIKE '090%'
+              AND NOT EXISTS (SELECT 1 FROM census_tracts t2 WHERE t2.tract_fips = m.region || RIGHT(ct.tract_fips, 6))
+            """
+        ).fetchall()
+        if not moves:
+            return 0
+        conn.executemany("UPDATE census_tracts SET tract_fips = ? WHERE tract_fips = ?", [[new, old] for old, new in moves])
+        return len(moves)
+    except Exception:
+        return 0  # a table this build does not have
+
+
+def backfill_house_msa_codes(conn: duckdb.DuckDBPyConnection, *, force: bool = False) -> int:
+    """Fill ``houses.msa_code`` from the census geography when a load could not.
+
+    The Redfin export has no MSA column (see ``services/loaders/redfin.py``), so the loader derives the
+    code from ``tract_fips`` -> county -> ``cbsa_counties``.  A load that ran before that crosswalk
+    existed - or a house loaded without tract resolution - leaves the column NULL, and the metro ZHVI join
+    then matches nothing.  This fills those rows from the same crosswalk.
+
+    Deliberately unmarked: it runs only when there is something to fill *and* a crosswalk to fill it from,
+    so loading census after redfin heals the column on the next start, and a later reload can never be
+    swallowed by a "done" marker.  The two guards are one indexed probe each.
+    """
+    try:
+        if not conn.execute("SELECT 1 FROM cbsa_counties LIMIT 1").fetchone():
+            return 0
+        pending = conn.execute(
+            "SELECT COUNT(*) FROM houses WHERE msa_code IS NULL AND tract_fips IS NOT NULL"
+        ).fetchone()[0]
+        if not pending:
+            return 0
+        conn.execute(
+            """
+            UPDATE houses SET msa_code = c.cbsa_code
+            FROM cbsa_counties c
+            WHERE houses.msa_code IS NULL
+              AND houses.tract_fips IS NOT NULL
+              AND c.state_fips || c.county_fips = LEFT(houses.tract_fips, 5)
+            """
+        )
+        left = conn.execute(
+            "SELECT COUNT(*) FROM houses WHERE msa_code IS NULL AND tract_fips IS NOT NULL"
+        ).fetchone()[0]
+        return int(pending - left)
+    except Exception:
+        return 0
+
+
 def initialize(conn: duckdb.DuckDBPyConnection) -> None:
     """Create every table this app owns, in dependency-free order."""
     drop_legacy_views(conn)
@@ -610,3 +822,5 @@ def initialize(conn: duckdb.DuckDBPyConnection) -> None:
     create_app_tables(conn)
     create_indexes(conn)  # last: chat_session_turns is created inside create_app_tables
     repair_zip_codes(conn)  # after app_settings exists: it records its marker there
+    repair_ct_tract_codes(conn)  # CT moved to planning regions in 2022; heal 2020-vintage tract codes
+    backfill_house_msa_codes(conn)  # tract -> county -> CBSA, once that crosswalk has been loaded

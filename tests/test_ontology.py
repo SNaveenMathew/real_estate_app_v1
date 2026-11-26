@@ -13,6 +13,7 @@ import db.ontology as ontology
 import db.schema_catalog as schema
 from db import catalog_lint
 from db.catalog_model import Relationship
+from db import transforms as tx
 
 
 def _ids(doc: dict) -> set[str]:
@@ -255,3 +256,115 @@ def test_the_ontology_is_memoised_against_the_catalog_version(reference_data):
     # The document is derived from the store, never a private copy of it.
     rows = catalog_store.load_all(store.get_conn())
     assert any(r["key"] == "cache_buster" for r in rows["concepts"])
+
+
+# ---------------------------------------------------------------------------
+# Join transformations and coverage
+# ---------------------------------------------------------------------------
+
+
+def test_join_transformations_are_first_class_nodes_and_edges(reference_data):
+    doc = ontology.build_ontology()
+    nodes = {n["id"]: n for n in doc["classes"] + doc["properties"]}
+
+    for kind in (*tx.KINDS, "expression"):
+        node = nodes[f"transform:{kind}"]
+        assert node["kind"] == "transform"
+        assert node["label"] and node["description"] and node["sql_pattern"]
+        assert isinstance(node["needs_width"], bool)
+
+    city = next(
+        e
+        for e in doc["edges"]
+        if e["predicate"] == "joins" and e.get("left_expr") == "lower(trim(city))"
+    )
+    assert city["join_key"] == "houses.lower(trim(city))=transit_agencies.lower(trim(hq_city))"
+    assert city["transform"]["left"] == {
+        "kind": "lower",
+        "column": "city",
+        "expr": "lower(trim(city))",
+    }
+    assert city["transform"]["right"]["column"] == "hq_city"
+    assert "lower case" in city["transform_rule"]
+    assert any(
+        e["predicate"] == "transformed_by"
+        and e["source"] == "table:houses"
+        and e["target"] == "transform:lower"
+        and e["side"] == "left"
+        and e["relationship"] == city["key"]
+        for e in doc["edges"]
+    )
+
+    # A composite key is still represented honestly, as the expression transform rather than a
+    # guessed simple rule; the expression remains authoritative for query generation.
+    composite = next(e for e in doc["edges"] if e["predicate"] == "joins" and "state_fips || county_fips" in e["left_expr"])
+    assert composite["transform"]["left"]["kind"] == "expression"
+    assert any(
+        e["predicate"] == "transformed_by"
+        and e["target"] == "transform:expression"
+        and e["relationship"] == composite["key"]
+        for e in doc["edges"]
+    )
+    assert any(
+        item["relationship"] == composite["join_key"] for item in doc["coverage"]["custom_expressions"]
+    )
+
+
+def test_rich_table_column_concept_and_entity_metadata_is_preserved(reference_data):
+    doc = ontology.build_ontology()
+    nodes = {n["id"]: n for n in doc["classes"] + doc["properties"]}
+
+    table = nodes["table:houses"]
+    assert "setup_hint" in table and "filter_hint" in table
+    assert isinstance(table["hidden_columns"], list)
+
+    column = next(p for p in doc["properties"] if p["table"] == "houses" and p["primary_key"])
+    assert column["not_null"] is True and isinstance(column["ordinal"], int)
+
+    concept = next(n for n in doc["classes"] if n["kind"] == "concept" and n.get("filters"))
+    assert isinstance(concept["filters"], list)
+    assert isinstance(concept["required_terms"], list)
+    assert "default_operation" in concept and "rollup_spec" in concept
+
+    entity = next(n for n in doc["classes"] if n["kind"] == "entity_type" and n.get("columns"))
+    source = entity["columns"][0]
+    assert "description" in source and "preferred_for" in source and "origin" in source
+
+
+def test_coverage_is_measured_for_every_table_and_has_no_visible_gaps(reference_data):
+    doc = ontology.build_ontology()
+    coverage = doc["coverage"]
+    assert {t["table"] for t in coverage["tables"]} == set(schema._tables())
+    assert coverage["totals"]["columns"] == doc["stats"]["columns"]
+    assert coverage["totals"]["relationships"] == doc["stats"]["relationships"]
+    assert coverage["totals"]["relationships_with_transform"] == doc["stats"]["relationships_with_transform"]
+
+    assert coverage["gaps"] == []
+    for entry in coverage["tables"]:
+        if entry["agent_visible"]:
+            assert entry["concepts"], entry["table"]
+            assert entry["joins"], entry["table"]
+
+
+def test_graph_and_jsonld_keep_the_transformation_context(reference_data):
+    import main
+
+    client = TestClient(main.app)
+    overview = client.get("/api/ontology/graph?detail=overview").json()
+    assert not any(n["kind"] == "transform" for n in overview["nodes"])
+
+    standard = client.get("/api/ontology/graph?detail=standard").json()
+    assert any(n["kind"] == "transform" for n in standard["nodes"])
+    assert any(e["predicate"] == "transformed_by" for e in standard["edges"])
+    ids = {n["id"] for n in standard["nodes"]}
+    assert all(e["source"] in ids and e["target"] in ids for e in standard["edges"])
+
+    linked = client.get("/api/ontology?format=jsonld").json()
+    assert linked["coverage"]["gaps"] == []
+    assert len(linked["transformations"]) == len(tx.KINDS) + 1
+    city = next(
+        item
+        for item in linked["@graph"]
+        if item.get("predicate") == "joins" and "lower(trim(city))" in item.get("join_key", "")
+    )
+    assert city["transform"]["left"]["kind"] == "lower"

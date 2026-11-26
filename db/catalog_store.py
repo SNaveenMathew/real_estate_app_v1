@@ -31,6 +31,7 @@ import uuid
 from contextlib import contextmanager
 from typing import Any, Iterable, Iterator
 
+from db import transforms as tx
 from db.catalog_model import EntityDomain, Relationship, TableMeta
 
 USER_ORD_BASE = 1_000_000
@@ -53,6 +54,7 @@ _DDL = [
         rel_key VARCHAR PRIMARY KEY, left_table VARCHAR, left_expr VARCHAR,
         right_table VARCHAR, right_expr VARCHAR, note VARCHAR, cardinality VARCHAR,
         confidence VARCHAR, bridge BOOLEAN, preferred BOOLEAN, grain_effect VARCHAR,
+        transform_json VARCHAR, scope_json VARCHAR,
         origin VARCHAR, dataset_id VARCHAR, status VARCHAR DEFAULT 'approved', evidence VARCHAR,
         ord INTEGER, seed_hash VARCHAR, user_modified BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, approved_at TIMESTAMP)""",
@@ -89,6 +91,16 @@ _DDL = [
 def ensure_tables(conn) -> None:
     for stmt in _DDL:
         conn.execute(stmt)
+    # Upgrade an existing catalog in place: older databases predate the structured transform
+    # record.  DuckDB supports ADD COLUMN IF NOT EXISTS; the fallback keeps very old builds working.
+    try:
+        conn.execute("ALTER TABLE catalog_relationships ADD COLUMN IF NOT EXISTS transform_json VARCHAR")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE catalog_relationships ADD COLUMN IF NOT EXISTS scope_json VARCHAR")
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +227,8 @@ def _rel_row(rel: Relationship, *, origin: str, dataset_id: str, evidence: dict,
         "bridge": bool(rel.bridge),
         "preferred": bool(rel.preferred),
         "grain_effect": rel.grain_effect,
+        "transform_json": _dumps(rel.transform or tx.relationship(rel.left_expr, rel.right_expr)),
+        "scope_json": _dumps(rel.scope or {}),
         "origin": origin,
         "dataset_id": dataset_id or "",
         "status": status,
@@ -315,6 +329,18 @@ def sync_seed(conn) -> bool:
             _replace(conn, "catalog_relationships", row)
             changed = True
 
+    # A relationship's key contains its two key expressions, so editing an expression creates a NEW row and leaves
+    # the old definition behind forever (the catalog then advertises both the corrected join and the broken one).
+    # Retire built-in relationships the seed no longer defines; rows a user added or edited are never touched.
+    seed_keys = {rel.key() for rel in seed.RELATIONSHIPS}
+    for rel_key, cur in have.items():
+        if rel_key in seed_keys or cur["origin"] != "builtin" or cur["user_modified"]:
+            continue
+        conn.execute("DELETE FROM catalog_relationships WHERE rel_key = ?", [rel_key])
+        changed = True
+
+    changed = backfill_transforms(conn) or changed
+
     have = {r["key"]: r for r in _rows(conn, "SELECT key, origin, seed_hash, user_modified FROM catalog_concepts")}
     for i, (key, item) in enumerate(seed.SEMANTIC_GLOSSARY.items()):
         definition = _dumps(item)
@@ -355,6 +381,57 @@ def sync_seed(conn) -> bool:
     return changed
 
 
+def backfill_transforms(conn) -> int:
+    """Give every existing relationship its structured transform record (once).
+
+    Built-ins are read back from their SQL expressions (``lower(trim(city))`` -> case-insensitive
+    city match).  Uploaded relationships usually key on a materialised ``*_norm`` column, which no
+    parser can understand, so their approved proposal's ``derive.transform`` is used instead.
+    Rows that already carry a record are never touched.
+    """
+    proposed: dict[str, dict] = {}
+    for row in _rows(
+        conn, "SELECT payload_json FROM catalog_proposals WHERE kind = 'relationship' AND status = 'approved'"
+    ):
+        pl = _loads(row.get("payload_json"), {})
+        if not isinstance(pl, dict) or not pl.get("left_table"):
+            continue
+        rel_key = f"{pl.get('left_table')}:{pl.get('left_expr')}={pl.get('right_table')}:{pl.get('right_expr')}"
+        meta = pl.get("transform")
+        derive = pl.get("derive") if isinstance(pl.get("derive"), dict) else None
+        if not meta and derive and derive.get("kind") == "address_house":
+            meta = {
+                "left": {"kind": "address", "column": derive.get("column") or "house_id"},
+                "right": {"kind": "identity", "column": "house_id"},
+                "rule": derive.get("rule", ""),
+            }
+        if not meta and derive and isinstance(derive.get("transform"), dict):
+            spec = derive["transform"]
+            target = tx.column_of(pl.get("right_expr") or "")
+            if spec.get("kind") == "address":
+                continue
+            meta = tx.pair(spec, derive.get("from") or pl.get("left_expr") or "", target)
+        if isinstance(meta, dict) and meta.get("left"):
+            proposed[rel_key] = meta
+    changed = 0
+    for r in _rows(conn, "SELECT rel_key, left_expr, right_expr, transform_json FROM catalog_relationships"):
+        existing = _loads(r.get("transform_json"), {}) if (r.get("transform_json") or "").strip() else {}
+        meta = proposed.get(r["rel_key"]) or tx.relationship(r["left_expr"], r["right_expr"])
+        if existing:
+            # A record already exists.  Only upgrade one that is still opaque and is now
+            # understood (the registry gained a pattern); never rewrite an understood rule.
+            if (existing.get("left") or {}).get("kind") != "expression" or meta["left"]["kind"] == "expression":
+                continue
+        conn.execute(
+            "UPDATE catalog_relationships SET transform_json = ? WHERE rel_key = ?",
+            [_dumps(meta), r["rel_key"]],
+        )
+        changed += 1
+    if changed:
+        audit(conn, "backfill_transforms", "relationship", "*", {"updated": changed})
+    return changed
+
+
 # ---------------------------------------------------------------------------
 # Load
 # ---------------------------------------------------------------------------
@@ -369,9 +446,10 @@ def load_all(conn) -> dict:
             "SELECT c.* FROM catalog_columns c JOIN catalog_tables t ON t.name = c.table_name "
             "WHERE t.status = 'active' ORDER BY c.table_name, c.ord, c.column_name",
         ),
-        "relationships": _rows(
-            conn, "SELECT * FROM catalog_relationships WHERE status = 'approved' ORDER BY ord, rel_key"
-        ),
+        "relationships": [
+            {**r, "transform": _loads(r.get("transform_json"), {})}
+            for r in _rows(conn, "SELECT * FROM catalog_relationships WHERE status = 'approved' ORDER BY ord, rel_key")
+        ],
         "concepts": _rows(conn, "SELECT * FROM catalog_concepts WHERE status = 'active' ORDER BY ord, key"),
         "entity_domains": _rows(
             conn, "SELECT * FROM catalog_entity_domains WHERE status = 'active' ORDER BY ord, name"

@@ -244,6 +244,22 @@ def lint_catalog(include_info: bool = True) -> list[Issue]:
                             f"requires_entity names {et!r}, but no entity domain has "
                             "that entity_type, so the concept can never apply",
                         )
+        if item.get("level"):
+            # The knob says "this filter selects a dataset level"; without an equality filter there is nothing to
+            # probe, so the declaration could never fire.
+            pinned = [
+                f
+                for f in item.get("filters", ())
+                if isinstance(f, str) and re.match(r"^[A-Za-z_]\w*\.[A-Za-z_]\w*\s*=\s*'[^']*'$", f.strip())
+            ]
+            if not pinned:
+                add(
+                    "error",
+                    "level_without_pin",
+                    key,
+                    "level=True marks a concept that pins a dataset level, but it declares no "
+                    "`table.column = 'value'` filter for the availability check to probe",
+                )
         for knob in ("derived", "derived_support"):
             spec = item.get(knob)
             if spec is None:

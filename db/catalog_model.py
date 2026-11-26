@@ -49,16 +49,21 @@ class Relationship:
     grain_effect: str = ""
     origin: str = "builtin"
     dataset_id: str = ""
+    #: Structured record of the key normalisations on each side (see db/transforms.py).  The
+    #: SQL expressions above stay authoritative for query generation; this is the readable,
+    #: selectable form the Data page and the relation inspector show.
+    transform: dict = field(default_factory=dict, compare=False, hash=False)
+    #: Extra join predicates that make the relationship true at the loaded data's grain.
+    #: ``{"on": ["zhvi.region_type = 'zip'", "zhvi.date = (SELECT MAX(...))"]}``.
+    #: The key expressions stay authoritative; this closes the gap between a raw key
+    #: equality and the level/period the catalog actually means.
+    scope: dict = field(default_factory=dict, compare=False, hash=False)
 
     def involves(self, tables: set[str]) -> bool:
         return self.left_table in tables and self.right_table in tables
 
     def key(self) -> str:
         return f"{self.left_table}:{self.left_expr}={self.right_table}:{self.right_expr}"
-
-    def join_key(self) -> str:
-        """The join as plans and a concept's ``join`` knob write it: ``houses.zip=zhvi.region_name``."""
-        return f"{self.left_table}.{self.left_expr}={self.right_table}.{self.right_expr}"
 
     def join_key(self) -> str:
         """The join as plans and a concept's ``join`` knob write it: ``houses.zip=zhvi.region_name``."""
@@ -76,6 +81,9 @@ class Relationship:
             extra.append(self.note)
         if self.grain_effect:
             extra.append("Grain: " + self.grain_effect)
+        scope = (self.scope or {}).get("on") or []
+        if scope:
+            extra.append("Scope: " + "; ".join(str(x) for x in scope))
         return f"{self.left_table}.{self.left_expr} = {self.right_table}.{self.right_expr} [{' ; '.join(attrs)}]" + (
             " Note: " + " ".join(extra) if extra else ""
         )
@@ -118,6 +126,10 @@ CONCEPT_KNOBS = {
     "because they are not expressible as SQL over the stored tables (e.g. polygon-derived land area).",
     "derived_support": "{provider, measures} - this concept's measure can ALSO be supplied by the provider when the "
     "derived path is already running for another concept; ignored otherwise (SQL stays authoritative).",
+    "level": "True - the concept's filters pin a LEVEL of a dataset that stores several levels in one table (for "
+    "example zhvi.region_type='metro'). When no row carries that level the request is stopped before any SQL is "
+    "generated and answered with data_unavailable naming the levels that ARE loaded: an empty aggregate returns NULL, "
+    "not an error, and a NULL invites a guess. Requires a `table.column = 'value'` filter (db/catalog_lint.py).",
     "join": "list[str] - the relationship keys (`left.col=right.col`, see Relationship.join_key) this concept's "
     "grain is read at. Only those edges may connect the concept's table to another table, so a table holding several "
     "geography levels never gets another level's join key. An empty list declares a grain nothing joins to (a "
