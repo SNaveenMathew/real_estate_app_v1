@@ -6,7 +6,7 @@ overview and complete technical and setup documentation, see the [README](README
 > **About the screenshots in this guide.** These were captured from the local application
 > and database on September 27, 2026 (with transit routing and layers, and the thinking-process panel, added in November 2026).
 > At capture time the database contained 1,778 houses, 85,154 NRI records, 450 bike routes,
-> ~5.9 M ZHVI rows, ~80 K Market Heat Index rows, and 76,687 National Transit Map routes.
+> ~5.9 M ZHVI rows, ~80 K Market Heat Index rows, and 76,000+ National Transit Map routes.
 > Your screens will vary with the data loaded in your own database. Some views below
 > reflect data or services that were unavailable in this local run; those states are called
 > out where they appear.
@@ -233,6 +233,10 @@ Beyond routing, General Chat can query national and agency-level ridership and s
 - *"Which transit agency had the highest ridership in 2025?"*
 - *"Show me safety incidents and derailments for Pittsburgh Regional Transit over time."*
 - *"Compare monthly ridership trends between Boston MBTA and Chicago CTA."*
+
+The Data model includes `transit_route_zctas` and `transit_route_places`, which measure where route linework enters Census ZCTAs or Places. They support questions such as *"How many transit routes serve ZIP 15213?"* and *"How many route-miles of transit are inside Pittsburgh city limits?"*; the map still draws `transit_routes` as its line overlay, and the bridges are analytical tables rather than map layers.
+
+These bridges do not create route-level ridership or safety: FTA reports those by agency, mode, service type and month/year. Place coverage follows the installed Census Place layer; generalized cartographic boundaries can shift overlap lengths, and agency `hq_city` is a headquarters location, not a service area. Route-only counts remain valid even when a National Transit Map NTD ID has no matching agency record.
 
 ---
 

@@ -191,6 +191,7 @@ real_estate_app/
     ├── crime/        ← one folder per city, e.g. crime/chicago/, crime/pittsburgh/
     ├── bike/         ← BikePGH route layers by city
     ├── fta/          ← FTA ridership, safety time series, and National Transit Map routes
+    ├── tiger/        ← Census ZCTA5 and Place boundary files
     ├── shapefiles/   ← TIGER/Line tract shapefiles (optional but recommended)
     └── chroma/       ← vector DB working files
 ```
@@ -241,6 +242,10 @@ llama-server -hf unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL -c 24576 \
   --cache-type-k q8_0 --cache-type-v q8_0 -ngl -1 -fa on --port 8080
 ```
 
+```
+llama-server -hf unsloth/GLM-4.7-Flash-GGUF:UD-IQ3_XXS --alias glm-4.7-flash --host 127.0.0.1 --port 8080 -c 28672 -ngl 999 -fa on --cache-type-k q8_0 --cache-type-v q8_0 --jinja --parallel 1 --repeat-penalty 1.0
+```
+
 If you prefer Ollama, it remains supported as an alternative. Update the relevant
 settings in `.env` / `config.py` and run:
 
@@ -276,6 +281,8 @@ Open **http://localhost:8000** in your browser.
 ---
 
 ## Data Sources
+
+The authoritative table of every built-in source — its latest-data link, target table and refresh behavior — is generated from `services/data_sources.py` in [docs/REFERENCE.md § Data sources](docs/REFERENCE.md#data-sources). Every listed source can be refreshed from `/data` → **Data sources**: open the source, use its download link, then upload the file. The upload stages the file, runs the same loader as `setup_data.py`, and upserts by the table's primary key; full-snapshot sources replace their table. Redfin marks houses missing from a refreshed export as removed from favorites; sold-homes and crime drop rows no longer present in the refreshed file.
 
 ### Recent data-source improvements
 
@@ -327,6 +334,15 @@ Without shapefiles, the app uses the Census Geocoder API to resolve each house's
 3. Unzip into **`data/shapefiles/`** (one or multiple states)
 4. Re-run: `python setup_data.py --resolve-tracts`
 
+### Census ZCTA5 and Place boundaries
+
+The boundary layers live under **`data/tiger/`**. Both the original Census `.zip` and an extracted `.shp` set are accepted, and discovery also checks any top-level folder under `data/` whose name contains `zcta` or `place` (for example an extracted `data/cb_2025_us_place_500k/`), so a national download does not have to be moved. The loader reprojects EPSG:4269 to EPSG:4326 and stores GeoJSON plus bounding boxes for the map. For Places, the national cartographic file is the fastest route to nationwide coverage; its polygons are generalized, so route-overlap lengths differ slightly from full TIGER/Line geometry, while land and water area still come from the Census ALAND/AWATER attributes. When files overlap, the newest Census vintage year wins, then full TIGER/Line over the cartographic file, then the newest file; a zip and its extracted copy are read once.
+
+- **ZCTA5 (national):** https://www2.census.gov/geo/tiger/TIGER2026/ZCTA520/tl_2026_us_zcta520.zip (about 505 MB)
+- **Place (all states in one file):** https://www2.census.gov/geo/tiger/GENZ2025/shp/cb_2025_us_place_500k.zip (about 22 MB). This is the Census Cartographic Boundary File at 1:500,000, generalized for mapping; per-state TIGER/Line files such as https://www2.census.gov/geo/tiger/TIGER2026/PLACE/tl_2026_42_place.zip remain available when full boundary precision matters.
+
+Run `python setup_data.py --only tiger` for both, or `--only zcta` / `--only places` separately. The ingested tables are `zcta_boundaries` and `place_boundaries`; route overlaps are materialised in `bike_route_zctas` and `bike_route_places`, so route counts stay distinct when a route crosses a boundary. Both layers appear in the Data model, ontology, map layer panel, and Data sources page, where uploading a replacement zip refreshes/upserts the table. A ZCTA is the Census Bureau's statistical ZIP service-area approximation, not an exact USPS ZIP delivery boundary.
+
 ### BikePGH route data (optional but required for local bike routing)
 
 The route planner uses the locally ingested BikePGH network from the DuckDB `bike_routes` table and its source data under `data/bike/`.
@@ -342,22 +358,26 @@ No external road-routing engine is used for the route graph itself; the service 
 
 ### Federal Transit Administration (FTA) Data (Transit ridership, safety & National Transit Map)
 
-The app ingests national transit data from the Federal Transit Administration (FTA) and Bureau of Transportation Statistics (BTS) located under `data/fta/`:
+The app ingests national transit data from the Federal Transit Administration (FTA) and Bureau of Transportation Statistics (BTS) located under `data/fta/`. Download the latest releases from the [FTA Safety & Security Time Series](https://www.transit.dot.gov/ntd/data-product/safety-security-time-series-data), [FTA Raw Monthly Ridership](https://www.transit.dot.gov/ntd/data-product/monthly-module-raw-data-release), and [BTS National Transit Map](https://www.bts.gov/national-transit-map); the same three sources are listed on `/data` → Data sources for upload and upsert.
 
 - **Safety & Security Time Series**: `data/fta/S&S Time Series-July 2026_261102.xlsx`
   - Monthly threshold-adjusted safety incidents, collisions, derailments, transit worker assaults, fatalities, and injuries across US transit agencies and modes (2014–2026; 24,888 records).
 - **Monthly Raw Ridership**: `data/fta/September 2026 Raw Monthly Ridership (no adjustments or estimates)_261102.xlsx`
   - Unadjusted monthly Unlinked Passenger Trips (UPT) by transit agency, mode (bus, heavy rail, light rail, commuter rail, trolleybus, etc.), and service type (2002–2026; 369,310 unpivoted records).
 - **National Transit Map Routes**: `data/fta/connections/National_Transit_Map_Routes.shp`
-  - Nationwide geospatial shapefile of 76,687 transit routes across all participating US transit agencies with 2D LineString/MultiLineString geometries and precomputed spatial bounding box coordinates.
+  - Nationwide geospatial shapefile of 76,000+ transit routes across all participating US transit agencies with 2D LineString/MultiLineString geometries and precomputed spatial bounding box coordinates.
 
 Ingested into DuckDB as:
 - `transit_agencies`: Agency directory (2,359 agencies) with NTD IDs, names, city, state, reporter types, and primary modes.
 - `transit_ridership`: Unpivoted monthly time series for ridership trend queries and cross-agency comparisons.
 - `transit_safety`: Monthly incident, collision, derailment, worker assault, fatality, and injury metrics.
 - `transit_routes`: Spatial route geometries with precomputed bounding coordinates, route short/long names, types, and agency links.
+- `transit_route_zctas`: Route linework intersected with national Census ZCTA5 boundaries; one row per positive-length overlap, with metres and the route's overlapping fraction.
+- `transit_route_places`: The same route-to-boundary bridge for Census Places. Coverage follows the installed Census Place layer; generalized cartographic polygons can shift overlap lengths.
 
-Run `python setup_data.py --only transit` to ingest or refresh these datasets.
+Refreshing ridership also rebuilds `transit_agencies` from the workbook's Master sheet; safety and routes are loaded as full snapshots. A route refresh rebuilds both route bridges, and a ZCTA/Place refresh rebuilds its matching bridge. Run `python setup_data.py --only transit` to ingest or refresh these datasets, or download and upload each file from `/data` → Data sources. If a boundary layer is missing, the bridge is left untouched rather than cleared. A route that only touches a boundary is not counted as serving it.
+
+FTA geography has deliberate limits: ridership and safety are reported by agency, mode, service type and month/year, never by individual route; `hq_city` is an agency headquarters, not a service area; and 516 route NTD IDs in the National Transit Map do not match the current FTA agency master (9,378 route features). Route-only counts remain valid, but agency attribution for those features is unavailable without an external crosswalk.
 
 ### Sold Homes (optional)
 
@@ -519,6 +539,9 @@ python setup_data.py --only zhvi              # just Zillow Home Value Index
 python setup_data.py --only market_heat_index # just Zillow Market Heat Index
 python setup_data.py --only bike      # just BikePGH route data
 python setup_data.py --only transit   # FTA ridership, safety, and transit routes
+python setup_data.py --only tiger     # TIGER ZCTA5 + Place boundaries
+python setup_data.py --only zcta      # TIGER ZCTA5 boundaries only
+python setup_data.py --only places    # TIGER Place boundaries only
 python setup_data.py --only census    # CBSA crosswalk + tract/MSA populations
 python setup_data.py --only geocode   # retry pending sold-home geocodes
 python setup_data.py --only match     # link sold records to houses
@@ -707,7 +730,7 @@ of your file:
 | Crime | heat | overlay | weighted by `severity_weight` (769,286 rows); filter by year dropdown or animate across years with a constant density scale |
 | Sold Homes | heat | overlay | uniform count (no weight-like column on this table) |
 | Bike Routes | lines | overlay | its own overlap-resolution logic, unchanged (see below) |
-| Transit Routes | lines | overlay | 76,687 nationwide routes from National Transit Map; draws as blue lines (`#2563eb`) with route names, types, and agency details |
+| Transit Routes | lines | overlay | 76,000+ nationwide routes from National Transit Map; draws as blue lines (`#2563eb`) with route names, types, and agency details |
 | Commute time to work | decoration on Houses | overlay | needs a work location set in the Commute tab |
 
 Not shown, on purpose: `bike_lanes` is a real, populated-looking table left over from before this catalog
@@ -844,7 +867,7 @@ keeps the evidence it was approved on. Lanes are ordered to keep linked tables c
 - Single-user, local. DuckDB hands every thread its own cursor on the shared database
   (`db/duckdb_store.py`), so a request handler that only blocks is a plain `def` and runs in the API's worker
   pool - a slow map layer no longer stalls the chats. Dataset ingest (upload, profile, enrich, analyze) is
-  offloaded explicitly, so a 250 MB parse holds neither the loop nor a request thread. Caps:
+  offloaded explicitly, so a large parse holds neither the loop nor a request thread. Caps:
   `ONBOARDING_MAX_UPLOAD_MB`, `ONBOARDING_GEOCODE_ROW_CAP`, `ONBOARDING_API_ROW_CAP`, and
   `PHOTO_MAX_UPLOAD_MB` (10) for house photos.
 - Uploads are hostile input: the client's filename is reduced to a sanitized basename (no traversal, no
@@ -1108,6 +1131,7 @@ data/
   crime/<city>/       Drop each city's raw crime export here
   bike/               BikePGH network sources used by the local router
   fta/                FTA ridership, safety time series, and National Transit Map routes
+  tiger/              Census ZCTA5 and Place boundary files
   shapefiles/         TIGER/Line tract shapefiles (optional)
 ```
 
@@ -1233,7 +1257,9 @@ The browser uses these main endpoints:
 `run_eval.py` runs a small golden set (`eval/golden_set.py`) against the real
 agents — the same `run_general_chat` / `run_house_chat` the app itself calls
 — on a dedicated, deterministic evaluation database (`eval/fixtures.py`), not
-your real data.
+your real data. Model-vs-model comparison rounds, with per-case verdicts and
+failure-path analysis, are written up in
+[`docs/MODEL_EVALUATION.md`](docs/MODEL_EVALUATION.md).
 
 ```bash
 python run_eval.py                 # full run against your configured model

@@ -8,7 +8,7 @@ are the facts — add a route, a setting or an approved function and re-run the 
 
 ## HTTP endpoints
 
-56 routes, from `main.app`.
+59 routes, from `main.app`.
 
 | Method | Path | Summary (first docstring line) | Handler |
 |---|---|---|---|
@@ -57,12 +57,15 @@ are the facts — add a route, a setting or an approved function and re-run the 
 | PUT | `/api/onboarding/datasets/{dataset_id}` |  | sync |
 | GET | `/api/onboarding/datasets` |  | sync |
 | POST | `/api/onboarding/datasets` | Stage the upload, then ingest it in a background job. | async |
+| GET | `/api/onboarding/health` | Physical + semantic onboarding health, separate from metadata completeness. | sync |
 | POST | `/api/onboarding/llm/selftest` |  | async |
 | GET | `/api/onboarding/llm/status` |  | async |
 | POST | `/api/onboarding/proposals/{proposal_id}/decision` |  | async |
+| POST | `/api/onboarding/proposals/{proposal_id}/transform` | Re-measure a pending link with the chosen transformation; nothing is applied yet. | sync |
 | POST | `/api/onboarding/relationships/revoke` |  | async |
+| GET | `/api/onboarding/transforms` | The simple key transformations the Data page may offer (see db/transforms.py). | sync |
 | GET | `/api/ontology/graph` | The page's model: only the node kinds the level includes, and only edges between them. | sync |
-| GET | `/api/ontology` |  | sync |
+| GET | `/api/ontology` | Classes, properties, typed edges, transform vocabulary, coverage and structural issues. | sync |
 | GET | `/api/stats` |  | sync |
 | POST | `/api/transit/route` | Find a public transit route between place names or addresses. | async |
 | GET | `/cache` | Historical URL for the same page; the issue called it the cache/connectedness page. | sync |
@@ -84,6 +87,38 @@ deadline it runs under (`agents/capabilities.py`).
 | `retrieve_data_model_context` | database, metadata, local | 30s | Plan plus targeted schema and vector metadata for one question. |
 | `search_all_house_descriptions` | local, retrieval | 30s | Vector search over saved house descriptions. |
 
+## Data sources
+
+The built-in refresh registry behind `/data` (`services/data_sources.py`). Every row is also an upload
+target on the Data page: a **single** source replaces its canonical file and reloads its table; an
+**append** source keeps each upload and upserts by primary key. Redfin marks houses missing from a
+refreshed export as removed from favorites; sold-homes and crime drop rows no longer present.
+
+| Key | Source | Category | Loads into | Latest data | File handling |
+|---|---|---|---|---|---|
+| `bike` | Bike infrastructure (BikePGH) | Bike infrastructure | `bike_routes` | [Download page](https://data.wprdc.org/dataset/shape-files-for-bikepgh-s-pittsburgh-bike-map) | Adds a file; loader upserts by key |
+| `crime_baltimore` | Crime — Baltimore, MD | Crime | `crime_incidents` | [Download page](https://data.baltimorecity.gov/datasets/baltimore::part1-crime-data) | Adds a file; loader upserts by key |
+| `crime_boston` | Crime — Boston, MA | Crime | `crime_incidents` | [Download page](https://data.boston.gov/dataset/crime-incident-reports-august-2015-to-date-source-new-system) | Adds a file; loader upserts by key |
+| `crime_buffalo` | Crime — Buffalo, NY | Crime | `crime_incidents` | [Direct download](https://data.buffalony.gov/resource/d6g9-xbgu.csv) | Adds a file; loader upserts by key |
+| `crime_chicago` | Crime — Chicago, IL | Crime | `crime_incidents` | [Direct download](https://data.cityofchicago.org/resource/ijzp-q8t2.csv) | Adds a file; loader upserts by key |
+| `crime_indianapolis` | Crime — Indianapolis, IN | Crime | `crime_incidents` | [Download page](https://data.indy.gov) | Adds a file; loader upserts by key |
+| `crime_minneapolis` | Crime — Minneapolis, MN | Crime | `crime_incidents` | [Download page](http://opendata.minneapolismn.gov/) | Adds a file; loader upserts by key |
+| `crime_philadelphia` | Crime — Philadelphia, PA | Crime | `crime_incidents` | [Download page](https://opendataphilly.org/datasets/crime-incidents/) | Adds a file; loader upserts by key |
+| `crime_pittsburgh` | Crime — Pittsburgh, PA | Crime | `crime_incidents` | [Download page](https://data.wprdc.org/dataset/uniform-crime-reporting-data/resource/044f2016-1dfd-4ab0-bc1e-065da05fca2e) | Adds a file; loader upserts by key |
+| `tiger_places` | Census Place boundaries (cities, towns, villages) | Geography | `place_boundaries` | [Direct download](https://www2.census.gov/geo/tiger/GENZ2025/shp/cb_2025_us_place_500k.zip) | Adds a file; loader upserts by key |
+| `tiger_zcta` | Census ZCTA5 boundaries (ZIP Code Tabulation Areas) | Geography | `zcta_boundaries` | [Direct download](https://www2.census.gov/geo/tiger/TIGER2026/ZCTA520/tl_2026_us_zcta520.zip) | Replaces the canonical file; reloads its table |
+| `zhvi` | Zillow Home Value Index (ZHVI) | Housing market | `zhvi` | [Download page](https://www.zillow.com/research/data/) | Adds a file; loader upserts by key |
+| `market_heat_index` | Zillow Market Heat Index | Housing market | `market_heat_index` | [Download page](https://www.zillow.com/research/data/) | Adds a file; loader upserts by key |
+| `redfin` | Redfin favorites | Redfin | `houses` | [Download page](https://www.redfin.com) | Adds a file; loader upserts by key |
+| `cbsa` | CBSA → county crosswalk | Reference data | `cbsa_counties` | [Download page](https://www.census.gov/geographies/reference-files/time-series/demo/metro-micro/delineation-files.html) | Replaces the canonical file; reloads its table |
+| `census_msa` | Census MSA population (Eg: DECENNIALPL2020.P1-2026-03-25T232220.csv) | Reference data | `census_msa` | [Download page](https://data.census.gov/table/DECENNIALPL2020.P1) | Replaces the canonical file; reloads its table |
+| `census_tracts` | Census tract population (Eg: DECENNIALPL2020.P1-Data.csv) | Reference data | `census_tracts` | [Download page](https://data.census.gov/table/DECENNIALPL2020.P1) | Replaces the canonical file; reloads its table |
+| `nri` | FEMA National Risk Index | Reference data | `nri_tracts` | [Download page](https://hazards.fema.gov/nri/data-resources) | Replaces the canonical file; reloads its table |
+| `sold` | Sold homes (Allegheny County, PA) | Sold homes | `sold_homes` | [Download page](https://data.wprdc.org/dataset/real-estate-sales) | Adds a file; loader upserts by key |
+| `fta_safety` | FTA Safety & Security time series | Transit | `transit_safety` | [Download page](https://www.transit.dot.gov/ntd/data-product/safety-security-time-series-data) | Replaces the canonical file; reloads its table |
+| `fta_ridership` | FTA monthly ridership (raw UPT) | Transit | `transit_ridership` | [Download page](https://www.transit.dot.gov/ntd/data-product/monthly-module-raw-data-release) | Replaces the canonical file; reloads its table |
+| `fta_routes` | National Transit Map routes (BTS) | Transit | `transit_routes` | [Download page](https://www.bts.gov/national-transit-map) | Replaces the canonical file; reloads its table |
+
 ## Settings
 
 Every field of `config.Settings` with its default and the comment that documents it.
@@ -91,7 +126,7 @@ Every field of `config.Settings` with its default and the comment that documents
 | Setting | Default | Documented as |
 |---|---|---|
 | `llama_server_base_url` | `'http://127.0.0.1:8080/v1'` |  |
-| `llama_server_model` | `'DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M'` | options: DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M, unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL, llama3.2, mistral, etc. |
+| `llama_server_model` | `'DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M'` | options: DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M, unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL, glm-4.7-flash, llama3.2, mistral, etc. |
 | `agent_max_tokens` | `2048` | ReAct agent turn: reasoning + tool call + final answer |
 | `code_agent_max_tokens` | `1500` | SQL Code Agent: raised from 700 — see "Round 2" above |
 | `llm_request_timeout` | `120.0` | seconds, per HTTP request to llama-server |
@@ -143,13 +178,14 @@ Every field of `config.Settings` with its default and the comment that documents
 | `zhvi_dir` | `BASE_DIR / 'data' / 'zhvi'` | ZHVI ("Home Values" -> ZHVI) |
 | `market_heat_dir` | `BASE_DIR / 'data' / 'market_heat_index'` | Market Heat Index |
 | `shapefile_dir` | `BASE_DIR / 'data' / 'shapefiles'` |  |
+| `tiger_dir` | `BASE_DIR / 'data' / 'tiger'` |  |
 | `fta_dir` | `BASE_DIR / 'data' / 'fta'` |  |
 | `fta_safety_file` | `BASE_DIR / 'data' / 'fta' / 'S&S Time Series-July 2026_261102.xlsx'` |  |
 | `fta_ridership_file` | `BASE_DIR / 'data' / 'fta' / 'September 2026 Raw Monthly Ridership (no adjustments or estimates)_261102.xlsx'` |  |
 | `fta_routes_shp` | `BASE_DIR / 'data' / 'fta' / 'connections' / 'National_Transit_Map_Routes.shp'` |  |
 | `uploads_dir` | `BASE_DIR / 'uploads'` |  |
 | `photo_max_upload_mb` | `10` | house photos, not datasets: a much smaller cap than |
-| `onboarding_max_upload_mb` | `250` |  |
+| `onboarding_max_upload_mb` | `600` |  |
 | `onboarding_sample_rows` | `8` |  |
 | `onboarding_geocode_row_cap` | `2000` | rows sent to the Census geocoder per run |
 | `onboarding_api_row_cap` | `500` | rows allowed through the per-point Census API when no tract geometry is loaded |
@@ -182,8 +218,8 @@ Every field of `config.Settings` with its default and the comment that documents
 | `nominatim_countrycodes` | `'us'` | empty = worldwide |
 | `duckdb_path` | `BASE_DIR / 'data' / 'real_estate.duckdb'` |  |
 | `chroma_dir` | `BASE_DIR / 'data' / 'chroma'` |  |
-| `judge_llama_server_base_url` | `'http://127.0.0.1:8080/v1'` |  |
-| `judge_llama_server_model` | `'DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M'` |  |
+| `judge_llama_server_base_url` | `'http://127.0.0.1:8081/v1'` |  |
+| `judge_llama_server_model` | `'unsloth/Qwen3.5-4B-GGUF:Q8_0'` | CPU judge; independent of the Gemma agent |
 | `eval_fixture_duckdb_path` | `BASE_DIR / 'eval' / 'fixture_data' / 'eval_fixture.duckdb'` |  |
 | `eval_reports_dir` | `BASE_DIR / 'eval' / 'reports'` |  |
 | `eval_traces_dir` | `BASE_DIR / 'eval' / 'traces'` |  |

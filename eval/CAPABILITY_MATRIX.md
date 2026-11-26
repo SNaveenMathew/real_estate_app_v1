@@ -12,21 +12,30 @@ but no fixture rows** is an example that cannot pass until the fixture grows. `p
 
 | Table | Fixture rows | Golden examples | Status |
 |---|---|---|---|
+| `bike_route_places` | 0 | 0 | empty |
+| `bike_route_tracts` | 0 | 0 | empty |
+| `bike_route_zctas` | 0 | 0 | empty |
 | `bike_routes` | 4 | 2 | covered |
 | `cbsa_counties` | 4 | 15 | covered |
 | `census_msa` | 5 | 19 | covered |
 | `census_tracts` | 4 | 3 | covered |
+| `crime_city_year` | 3 | 0 | rows, no examples |
 | `crime_incidents` | 5 | 4 | covered |
 | `house_commute` | 2 | 2 | covered |
 | `house_snapshots` | 6 | 0 | rows, no examples |
 | `houses` | 6 | 43 | covered |
 | `market_heat_index` | 0 | 0 | empty |
 | `nri_tracts` | 4 | 14 | covered |
+| `place_boundaries` | 0 | 0 | empty |
 | `sold_homes` | 6 | 7 | covered |
 | `transit_agencies` | 2 | 1 | covered |
 | `transit_ridership` | 4 | 2 | covered |
+| `transit_route_agencies` | 0 | 0 | empty |
+| `transit_route_places` | 0 | 0 | empty |
+| `transit_route_zctas` | 0 | 0 | empty |
 | `transit_routes` | 2 | 1 | covered |
 | `transit_safety` | 0 | 0 | empty |
+| `zcta_boundaries` | 0 | 0 | empty |
 | `zhvi` | 0 | 0 | empty |
 
-**12 of 16 agent-visible tables are covered by at least one example.**
+**12 of 25 agent-visible tables are covered by at least one example.**

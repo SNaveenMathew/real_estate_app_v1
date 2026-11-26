@@ -1167,8 +1167,10 @@ metro areas:
 
 ### 11.9 Known boundaries and sharp edges
 
-- **Metro scope, not city limits.** A city name resolves to the metro/micropolitan area that contains it; figures describe
-  the whole metro area. The answer says so. There is no city-boundary geometry.
+- **Metro scope unless a Place boundary is asked for.** A city name resolves to the metro/micropolitan area that contains it;
+  metro figures describe the whole metro area, and the answer says so. Census Place city-limit polygons are available in
+  `place_boundaries` (and ZCTAs in `zcta_boundaries`) for boundary and land-area questions; there is no parcel-level city
+  assignment.
 - **Only metro areas have derived measures.** No county, state or ZIP roll-ups yet; add a provider (or extend this one).
   Ranking *every* metro by area or density is declined (`MAX_METROS = 25`) rather than attempted.
 - **"Land area" is polygon area.** If the tract polygons include water bodies the figure can exceed an official land-only
@@ -1459,15 +1461,24 @@ whole design rests on.
 it that way) draws the document `db/ontology.py` derives from the live catalog: classes (subject
 areas, datasets, tables, semantic concepts, entity types), properties (every column, with role and
 unit) and typed relations (`in_domain`, `in_dataset`, `in_table`, `uses_table`, `measures`, `about`,
-`requires_entity`, `subclass_of`, `overrides`, `joins`, `identified_by`, `derived_from`).
+`requires_entity`, `subclass_of`, `overrides`, `joins`, `transformed_by`, `identified_by`,
+`derived_from`).  Join-key transformations are first-class `transform` classes generated from
+`db/transforms.py` (identity, trim, case rules, zero-padding, slicing, digits and the honest
+`expression` fallback for composite keys).  Every `joins` edge carries the full structured rule for
+both sides, including the starting column, recorded expression, width, target-side normalization and
+the human-readable rule, so the graph does not reduce a join to a bare equality.
 
 Three granularities are three projections of the same document, so they cannot disagree: **overview**
-(areas, datasets, concepts, entity types — the higher-level abstractions), **model** (+ tables and
-the approved joins), **full** (+ every column and the measure/identity edges). Every endpoint of
+(areas, datasets, concepts, entity types — the higher-level abstractions), **model** (+ tables,
+approved joins and join-key rules), **full** (+ every column and the measure/identity edges). Every endpoint of
 every edge is a class or property in the same document; `issues` reports dangling endpoints,
 duplicate identifiers, `broader` cycles and stale column notes instead of hiding them.
 
-The catalog is the only source. A dataset approved on the Data page registers its table, columns,
+The document also includes a measured `coverage` audit: every table reports its columns,
+documented columns, roles, concepts, joins and entity types, and `coverage.gaps` names visible tables
+that lack a concept or an approved join.  Composite/custom expressions are listed separately under
+`coverage.custom_expressions` because they are represented, not missing.  The catalog is the only
+source. A dataset approved on the Data page registers its table, columns,
 concepts, entity domain and links in one transaction, so the next request includes it with no code
 change and no migration (`tests/test_ontology.py` proves this with an approved upload). The one
 declared hierarchy is the optional `broader` concept knob, validated for unknown targets and cycles by
