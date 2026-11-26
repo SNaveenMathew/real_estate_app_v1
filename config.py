@@ -213,12 +213,12 @@ class Settings(BaseSettings):
     chroma_dir: Path = BASE_DIR / "data" / "chroma"
 
     # ── Evaluation: judge model ─────────────────────────────────────────────
-    # Defaults to the same server/model as the agent under test. Point this at
-    # a different (ideally independent, or stronger) model if you have one
-    # available — a model grading its own answers is weaker evidence than an
-    # independent judge.
-    judge_llama_server_base_url: str = "http://127.0.0.1:8080/v1"
-    judge_llama_server_model: str = "DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M"
+    # Run the judge on its own endpoint so it never shares the agent's GPU
+    # residency. Qwen3.5-4B defaults to thinking; the judge server must disable
+    # it (--reasoning off). Q8_0 is 8-bit, not unquantized: a 4B Q8_0 is
+    # roughly 4.5 GB.
+    judge_llama_server_base_url: str = "http://127.0.0.1:8081/v1"
+    judge_llama_server_model: str = "unsloth/Qwen3.5-4B-GGUF:Q8_0"  # CPU judge; independent of the Gemma agent
 
     # ── Evaluation: fixtures & reports ──────────────────────────────────────
     eval_fixture_duckdb_path: Path = BASE_DIR / "eval" / "fixture_data" / "eval_fixture.duckdb"
