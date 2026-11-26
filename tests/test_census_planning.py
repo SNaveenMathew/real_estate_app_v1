@@ -292,3 +292,29 @@ def test_entities_carry_no_extra_keys_unless_ambiguous(fx):
     """Plan text shown to the SQL model stays identical to before whenever the same places are recognised."""
     p = plan("What is the riverine flood risk for the Pittsburgh metro?")
     assert set(p.resolved_entities[0]) == {"entity_type", "table", "column", "value", "domain", "score"}
+
+
+def test_tradeoff_multi_measure_plan_compiles_grain_safe_ctes(fx):
+    from agents import plan_contract
+    from agents.tools import _compile_sql_from_plan, _validate_sql_against_plan
+
+    q = (
+        "I'm deciding between buying in Pittsburgh or Indianapolis. "
+        "Considering flood risk and metro population, what should I weigh?"
+    )
+    p = plan(q)
+    keys = [m.concept_key for m in p.measures]
+    assert set(keys) == {"msa_population", "nri_riverine_flood"}
+    assert p.grouping == ["census_msa.name"]
+    assert "measures (" in p.render()
+
+    sql = _compile_sql_from_plan(p, request=q)
+    assert sql.upper().startswith("WITH M_0 AS")
+    assert "JOIN M_1 ON" in sql.upper()
+    assert not plan_contract.verify(sql, p)
+    _validate_sql_against_plan(sql, p)
+
+    import db.duckdb_store as store
+
+    rows = store.query(sql)
+    assert len(rows) == 2  # both Indianapolis and Pittsburgh MSAs in census_fixture, without 1:N tract fan-out

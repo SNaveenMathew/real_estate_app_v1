@@ -245,3 +245,82 @@ def test_everything_the_deterministic_compiler_emits_satisfies_the_contract(fx):
             assert not violations, (q, sql, violations)
             checked += 1
     assert checked >= 15  # a meaningful share of the battery really compiles
+
+
+def test_validate_sql_accepts_unqualified_boolean_filter_and_ctes(fx):
+    from agents.query_planner import QueryPlan
+    from agents.tools import _validate_sql_against_plan
+
+    fav_plan = QueryPlan(
+        semantic_keys=["house_favorite", "house_inventory"],
+        required_tables=["houses"],
+        filters=["houses.is_favorite = TRUE"],
+        operation="count",
+        select_expression="houses.house_id",
+    )
+    _validate_sql_against_plan("SELECT COUNT(house_id) FROM houses WHERE is_favorite = TRUE", fav_plan)
+
+
+def test_run_code_query_short_circuits_verified_empty_result(fx, monkeypatch):
+    from agents import tools
+
+    calls = []
+
+    def _fake_generate(request, plan="", focused=False):
+        calls.append(request)
+        return "SELECT houses.address, houses.city FROM houses WHERE LOWER(houses.city) = 'seattle'"
+
+    monkeypatch.setattr(tools, "generate_sql", _fake_generate)
+    sql, result = tools.run_code_query("What houses do I have in Seattle?")
+    assert "seattle" in sql.lower()
+    assert "0 rows" in result
+    assert len(calls) == 1  # must not waste 2 more retries on a verified empty filter
+
+
+def test_paraphrase_and_outlines_action_ir_recovery(fx, monkeypatch):
+    import types
+    import agents.general_agent as ga
+    import agents.house_agent as ha
+    from agents.query_planner import build_query_plan
+    from agents.tools import _compile_sql_from_plan, _validate_sql_against_plan
+
+    # Paraphrases route to concrete executable SQL plans
+    p_cities = build_query_plan("Which metros do I own property in?")
+    assert p_cities.operation == "distinct"
+    sql_cities = _compile_sql_from_plan(p_cities)
+    assert "DISTINCT" in sql_cities.upper()
+    _validate_sql_against_plan(sql_cities, p_cities)
+
+    p_sold = build_query_plan("Order my metros from the priciest market to the cheapest, using sold prices.")
+    assert "sold_price" in p_sold.semantic_keys and p_sold.operation == "rank"
+    _validate_sql_against_plan(_compile_sql_from_plan(p_sold), p_sold)
+
+    p_transit = build_query_plan("How many transit agencies are in the dataset?")
+    assert "transit_agencies" in p_transit.semantic_keys and p_transit.operation == "count"
+
+    # General & House Action IR compile deterministically and rescue invalid free-code output
+    ir_general = ga.GeneralActionIR(action="query_database", request="How many houses are in Pittsburgh?")
+    compiled_g = ga._compile_action_ir(
+        ir_general, "How many houses are in Pittsburgh?", build_query_plan("How many houses are in Pittsburgh?")
+    )
+    assert "query_database(" in compiled_g
+    ga._validate_program(compiled_g)
+
+    ir_house = ha.HouseActionIR(action="estimate_price_with_code")
+    compiled_h = ha._compile_house_action_ir(ir_house, "Estimate price")
+    assert compiled_h == "final_result = estimate_price_with_code()"
+
+    monkeypatch.setattr(
+        ga,
+        "_get_code_agent",
+        lambda: types.SimpleNamespace(invoke=lambda *a, **k: types.SimpleNamespace(content="not valid python :::")),
+    )
+    monkeypatch.setattr(
+        ga,
+        "_get_structured_code_agent",
+        lambda: types.SimpleNamespace(
+            invoke=lambda *a, **k: types.SimpleNamespace(content=ir_general.model_dump_json(), parsed=ir_general)
+        ),
+    )
+    rescued = ga._generate_program("How many houses are in Pittsburgh?", None)
+    assert "query_database(" in rescued

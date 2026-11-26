@@ -326,6 +326,49 @@ def _limit(ins: si.Inspection, plan) -> list[Violation]:
     return []
 
 
+def _measures(sql: str, ins: si.Inspection, plan) -> list[Violation]:
+    """Verify multi-measure queries actually include every planned measure and comparison grouping."""
+    measures = getattr(plan, "measures", None) or ()
+    if len(measures) <= 1:
+        return []
+    out: list[Violation] = []
+    low = sql.lower()
+    planned_tables = {str(t).lower() for t in (getattr(plan, "required_tables", None) or ())}
+    for t in sorted(planned_tables - ins.tables):
+        out.append(
+            Violation(
+                "missing_measure_table",
+                f"Multi-measure request requires data from table `{t}` (missing from SQL).",
+            )
+        )
+    for m in measures:
+        expr = str(getattr(m, "expr", "") or "")
+        cols = [
+            col.split(".")[-1].lower()
+            for col in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\b", expr)
+        ]
+        if cols and not any(re.search(rf"\b{re.escape(c)}\b", low) for c in cols):
+            out.append(
+                Violation(
+                    "missing_measure",
+                    f"Multi-measure request omitted planned measure `{getattr(m, 'concept_key', '')}` ({expr}). "
+                    "Compute every planned measure using per-grain CTEs joined on the group key.",
+                )
+            )
+    grouping = getattr(plan, "grouping", None) or ()
+    if grouping:
+        group_col = str(grouping[0]).split(".")[-1].lower()
+        if group_col and not re.search(rf"\bgroup\s+by\b[^;]*\b{re.escape(group_col)}\b", low, re.I | re.S):
+            if not re.search(r"\bgroup_key\b", low):
+                out.append(
+                    Violation(
+                        "missing_grouping",
+                        f"Multi-measure comparison requires grouping by `{grouping[0]}`.",
+                    )
+                )
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -341,6 +384,7 @@ def verify(sql: str, plan, view: CatalogView | None = None) -> list[Violation]:
     out += _filters(ins, _required_equalities(getattr(plan, "entity_filters", None)), "entity")
     out += _filters(ins, _required_equalities(getattr(plan, "scope_filters", None)), "scope")
     out += _limit(ins, plan)
+    out += _measures(sql, ins, plan)
     return out
 
 

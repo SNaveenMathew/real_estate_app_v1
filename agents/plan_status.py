@@ -59,6 +59,11 @@ def _expressions(plan) -> list[str]:
         out.extend(str(v) for v in (getattr(plan, attr, None) or ()))
     rollup = getattr(plan, "rollup_spec", None) or {}
     out.extend(str(v) for v in rollup.values() if isinstance(v, str))
+    for m in getattr(plan, "measures", None) or ():
+        for val in (getattr(m, "expr", None), getattr(m, "group_key", None)):
+            if val:
+                out.append(str(val))
+        out.extend(str(f) for f in (getattr(m, "filters", None) or ()))
     return out
 
 

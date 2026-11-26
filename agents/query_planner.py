@@ -7,6 +7,22 @@ import db.schema_catalog as schema
 from agents import plan_status, query_scope
 
 
+@dataclass(frozen=True)
+class MeasureSpec:
+    """One semantic measure inside a (potentially multi-measure) ``QueryPlan``."""
+
+    concept_key: str
+    expr: str
+    operation: str
+    tables: tuple[str, ...] = ()
+    source_grain: str = ""
+    target_grain: str = ""
+    group_key: str = ""
+    rollup_spec: dict = field(default_factory=dict)
+    filters: tuple[str, ...] = ()
+    null_policy: str = ""
+
+
 @dataclass
 class QueryPlan:
     question_type: str = "analytical"
@@ -29,6 +45,7 @@ class QueryPlan:
     scope_filters: list[str] = field(
         default_factory=list
     )  # mandatory, set by code (agents/query_scope.py), never by the model
+    measures: list[MeasureSpec] = field(default_factory=list)
 
     def to_dict(self):
         return asdict(self)
@@ -55,6 +72,14 @@ class QueryPlan:
         if self.scope_filters:  # only when set, so every plan without a scope renders exactly as before
             lines.append(
                 f"scope_filters (MANDATORY - the SQL must contain each as a positive condition): {' | '.join(self.scope_filters)}"
+            )
+        if len(self.measures) > 1:  # keep single-measure plans identical to golden plan_battery expectations
+            rendered_measures = "; ".join(
+                f"{m.concept_key}: {m.operation.upper()}({m.expr}) [grain={m.source_grain or '?'} -> {m.target_grain or m.source_grain or '?'}, group_key={m.group_key or 'none'}]"
+                for m in self.measures
+            )
+            lines.append(
+                f"measures (MULTI-MEASURE CTE REQUIRED - compute each measure at its own grain in a separate CTE and join on group key): {rendered_measures}"
             )
         return "\n".join(lines)
 
@@ -98,19 +123,172 @@ def _top_n(text):
     return n if 1 <= n <= 1000 else None
 
 
+def _concept_explicit_op(concept: dict, text_low: str):
+    """Return ``(score, op_dict, alias)`` for the longest operation alias matching ``text_low``, or ``None``."""
+    best = None
+    for op in concept.get("operations", []):
+        for alias in op.get("aliases", []):
+            if schema._alias_matches(text_low, alias):
+                score = len(alias.split())
+                if best is None or score > best[0]:
+                    best = (score, op, alias)
+    return best
+
+
+def _alias_occurrences(text_low: str, alias: str) -> list[tuple[int, int]]:
+    """Every whole-word occurrence span of ``alias`` in ``text_low``."""
+    pattern = r"(?<![a-z0-9])" + re.escape(alias.lower()) + r"(?![a-z0-9])"
+    return [(m.start(), m.end()) for m in re.finditer(pattern, text_low)]
+
+
+def _alias_is_fully_subsumed(text_low: str, alias: str, longer: str) -> bool:
+    """True when every occurrence of ``alias`` sits inside an occurrence of ``longer``.
+
+    ``"how many transit routes"`` contains the generic COUNT alias ``"how many"``: that is one
+    request, not two measures.  A question that names both ("how many houses and how many
+    transit routes") still has an uncovered ``"how many"``, so the shorter concept keeps its
+    own measure.
+    """
+    short_spans = _alias_occurrences(text_low, alias)
+    long_spans = _alias_occurrences(text_low, longer)
+    if not short_spans or not long_spans:
+        return False
+    return all(any(ls <= s and e <= le for ls, le in long_spans) for s, e in short_spans)
+
+
 def _select_operation(concepts, text):
     best = None
     for c in concepts:
-        for op in c.get("operations", []):
-            for alias in op.get("aliases", []):
-                if schema._alias_matches(text, alias):
-                    score = len(alias.split())
-                    cand = (score, op, c)
-                    if best is None or score > best[0]:
-                        best = cand
+        matched = _concept_explicit_op(c, text)
+        if matched and (best is None or matched[0] > best[0]):
+            best = (matched[0], matched[1], c)
     if best:
         return best[1], best[2]
     return None, None
+
+
+def _default_op_for_concept(concept: dict) -> dict | None:
+    """Resolve the fallback operation for a concept when no operation alias matched."""
+    desired = concept.get("default_operation")
+    if desired:
+        cand = next((x for x in concept.get("operations", []) if x.get("op") == desired), None)
+        if cand:
+            return cand
+    ops = [op for op in concept.get("operations", ()) if op.get("op") != "lookup"]
+    if len(ops) == 1 and ops[0].get("op") in {"avg", "sum", "median", "min", "max", "count"}:
+        return ops[0]
+    lookup = next((x for x in concept.get("operations", ()) if x.get("op") == "lookup" and not x.get("aliases")), None)
+    return lookup
+
+
+def _measure_for_concept(concept: dict, op_dict: dict) -> MeasureSpec:
+    rollup_spec = dict(concept.get("rollup_spec") or {})
+    groupings = tuple(concept.get("groupings") or ())
+    group_key = str(op_dict.get("group_by") or rollup_spec.get("group_key") or (groupings[0] if groupings else ""))
+    filters = list(concept.get("filters") or ())
+    null_policy = str(concept.get("null_policy") or "")
+    if null_policy and op_dict.get("op") in {"avg", "min", "max", "sum", "median", "rank"}:
+        for col in concept.get("columns", ()):
+            if (
+                col.endswith("walk_score")
+                or col.endswith("bike_score")
+                or col.endswith("transit_score")
+                or null_policy == "exclude NULL"
+            ):
+                if f"{col} IS NOT NULL" not in filters:
+                    filters.append(f"{col} IS NOT NULL")
+    return MeasureSpec(
+        concept_key=str(concept.get("key") or ""),
+        expr=str(op_dict.get("expr") or ""),
+        operation=str(op_dict.get("op") or ""),
+        tables=tuple(concept.get("tables") or ()),
+        source_grain=str(concept.get("grain") or ""),
+        target_grain=str(rollup_spec.get("target_grain") or ""),
+        group_key=group_key,
+        rollup_spec=rollup_spec,
+        filters=tuple(dict.fromkeys(filters)),
+        null_policy=null_policy,
+    )
+
+
+def _extract_measures(concepts: list[dict], text_low: str) -> list[MeasureSpec]:
+    """Extract active ``MeasureSpec`` entries from matched concepts without inventing subject-noun counts."""
+    explicit_ops = {c.get("key"): _concept_explicit_op(c, text_low) for c in concepts}
+    # Phrase subsumption: a generic operation alias ("how many") wholly contained in a longer,
+    # more specific alias from another matched concept ("how many transit routes") describes the
+    # SAME request.  Left alone, the generic concept adds a second, spurious measure whose
+    # single-table CTE cannot be grouped on the specific concept's geography (and would show an
+    # unrelated dataset-wide count beside the scoped answer).
+    for c in concepts:
+        key = c.get("key")
+        matched = explicit_ops.get(key)
+        if not matched:
+            continue
+        alias = matched[2]
+        for other in concepts:
+            if other is c:
+                continue
+            other_matched = explicit_ops.get(other.get("key"))
+            if not other_matched or len(other_matched[2]) <= len(alias):
+                continue
+            if _alias_is_fully_subsumed(text_low, alias, other_matched[2]):
+                explicit_ops[key] = None
+                break
+    active_tables = {
+        t
+        for c in concepts
+        if explicit_ops.get(c.get("key")) or c.get("default_operation")
+        for t in (c.get("tables") or ())
+    }
+    measures: list[MeasureSpec] = []
+    seen_columns: set[tuple[str, ...]] = set()
+    seen_exprs: set[tuple[tuple[str, ...], str, str]] = set()
+
+    # Order concepts with explicit operation matches or default_operation first so an explicit aggregate
+    # (e.g. msa_population SUM) claims its underlying column before a passive lookup concept on the same column.
+    ordered = sorted(
+        concepts,
+        key=lambda c: (0 if explicit_ops.get(c.get("key")) else (1 if c.get("default_operation") else 2),),
+    )
+    multi_table_concepts = (
+        len({t for cc in concepts if cc.get("operations") and not cc.get("gap") for t in (cc.get("tables") or ())}) > 1
+    )
+
+    for c in ordered:
+        if c.get("gap") or not c.get("operations"):
+            continue
+        matched = explicit_ops.get(c.get("key"))
+        op_dict = matched[1] if matched else _default_op_for_concept(c)
+        if op_dict is None and multi_table_concepts:
+            # Cross-table comparison questions ("flood risk and metro population") often name a second
+            # numeric metric without repeating an aggregate word; never promote an unrequested COUNT().
+            c_tables = set(c.get("tables") or ())
+            if not (c_tables <= active_tables):
+                op_dict = next(
+                    (x for x in c.get("operations", ()) if x.get("op") in {"avg", "sum", "median", "min", "max"}),
+                    None,
+                )
+        if op_dict is None:
+            continue
+        c_tables = set(c.get("tables") or ())
+        if not matched and not c.get("default_operation"):
+            if op_dict.get("op") == "count" and len(concepts) > 1:
+                continue
+            if (c_tables & active_tables) and len(c.get("operations", ())) > 1:
+                continue
+        spec = _measure_for_concept(c, op_dict)
+        # Deduplicate measures targeting either the same metric column or the exact same (tables, op, expr)
+        # (e.g. house_missing_walk COUNT(houses.house_id) already covers house_inventory COUNT(houses.house_id)).
+        metric_cols = tuple(
+            sorted(col for col in (c.get("columns") or ()) if not col.endswith(".name") and not col.endswith("_id"))
+        ) or (spec.tables + (spec.expr,))
+        expr_sig = (spec.tables, spec.operation, spec.expr)
+        if spec.expr and metric_cols not in seen_columns and expr_sig not in seen_exprs:
+            seen_columns.add(metric_cols)
+            seen_exprs.add(expr_sig)
+            measures.append(spec)
+
+    return measures
 
 
 def build_query_plan(request: str, requirements: str = "", plan: str = "", scope=None) -> QueryPlan:
@@ -134,7 +312,8 @@ def build_query_plan(request: str, requirements: str = "", plan: str = "", scope
     qp.grouping = []
     qp.rollup_spec = next((c.get("rollup_spec", {}) for c in concepts if c.get("rollup_spec")), {})
 
-    op, op_concept = _select_operation(concepts, text.lower())
+    norm_text, _repaired = schema.normalize_query_typos(text)
+    op, op_concept = _select_operation(concepts, norm_text)
     if op:
         qp.operation = op.get("op")
         qp.select_expression = op.get("expr")
@@ -170,14 +349,18 @@ def build_query_plan(request: str, requirements: str = "", plan: str = "", scope
                         qp.select_expression = ops[0]["expr"]
 
     if not qp.operation:
-        # Plain "show the named entity's columns" lookups: no aggregate or ranking phrase matched, so use the concept's
-        # declared LOOKUP operation (db/catalog_model.py).  Existing concepts declare none, so their plans are unchanged.
+        # Plain "show the named entity's columns" lookups: only apply anonymous (empty-alias) LOOKUP ops here
+        # so explicit listing phrases ("what houses ...") stay opt-in without drifting unrelated plans.
         for c in concepts:
-            lookup = next((x for x in c.get("operations", []) if x.get("op") == "lookup"), None)
+            lookup = next(
+                (x for x in c.get("operations", []) if x.get("op") == "lookup" and not x.get("aliases")), None
+            )
             if lookup:
                 qp.operation = "lookup"
                 qp.select_expression = lookup.get("expr")
                 break
+
+    qp.measures = _extract_measures(concepts, norm_text)
 
     missing_semantic = "house_missing_walk" in {c.get("key") for c in concepts}
     for c in concepts:
@@ -231,6 +414,20 @@ def build_query_plan(request: str, requirements: str = "", plan: str = "", scope
                 resolved.append(e)
     qp.resolved_entities = resolved
     qp.entities = sorted({e["entity_type"] for e in resolved})
+
+    if len(qp.measures) > 1 and not qp.grouping:
+        group_keys = [m.group_key for m in qp.measures if m.group_key]
+        if group_keys and (
+            len(resolved) >= 2
+            or any(
+                token in text.lower()
+                for token in (" vs ", " versus ", "compare", "deciding", "weigh", "between", " by ")
+            )
+        ):
+            # Pick the most common declared group_key so every measure CTE aligns on the comparison entity.
+            best_group = max(dict.fromkeys(group_keys), key=group_keys.count)
+            if not any(tok in text.lower() for tok in ("combined ", "total across ", "all together")):
+                qp.grouping = [best_group]
 
     tables = {t for c in concepts for t in c.get("tables", [])}
     tables.update(e["table"] for e in resolved)

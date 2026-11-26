@@ -101,12 +101,21 @@ def test_planning_work_does_not_depend_on_how_many_values_the_data_holds(fx):
 
 
 def test_unrelated_requests_never_consult_the_place_lexicon(fx, monkeypatch):
+    import db.schema_catalog as schema
     from agents.query_planner import build_query_plan
     from db import entity_lexicon
 
     calls = []
     monkeypatch.setattr(entity_lexicon, "get_lexicon", lambda *a, **k: calls.append(a[0]) or entity_lexicon.build(a[1]))
-    for q in GROUPS["unrelated"]:
+    # Exclude questions whose matched concept explicitly declares a component-lexicon entity type
+    # (e.g. market_heat_index declares entity_types=("MSA",) at metro grain).
+    non_component = [
+        q
+        for q in GROUPS["unrelated"]
+        if not any(et in {"MSA", "agency"} for c in schema.semantic_matches(q) for et in c.get("entity_types", ()))
+    ]
+    assert len(non_component) >= 20
+    for q in non_component:
         build_query_plan(q)
     assert calls == [], f"unrelated questions triggered the lexicon: {calls}"
 
