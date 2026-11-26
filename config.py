@@ -219,11 +219,19 @@ class Settings(BaseSettings):
     # roughly 4.5 GB.
     judge_llama_server_base_url: str = "http://127.0.0.1:8081/v1"
     judge_llama_server_model: str = "unsloth/Qwen3.5-4B-GGUF:Q8_0"  # CPU judge; independent of the Gemma agent
+    judge_max_tokens: int = 256
+    judge_timeout_s: float = 60.0
+    judge_prompt_max_chars: int = 12000
+
+    # Optional per-million-token pricing overrides for USD cost attribution (0.0 for local free inference).
+    llm_prompt_cost_per_1m_usd: float = 0.0
+    llm_completion_cost_per_1m_usd: float = 0.0
 
     # ── Evaluation: fixtures & reports ──────────────────────────────────────
     eval_fixture_duckdb_path: Path = BASE_DIR / "eval" / "fixture_data" / "eval_fixture.duckdb"
     eval_reports_dir: Path = BASE_DIR / "eval" / "reports"
     eval_traces_dir: Path = BASE_DIR / "eval" / "traces"
+    eval_runs_dir: Path = BASE_DIR / "eval" / "runs"
 
     # ── App ──────────────────────────────────────────────────────────────────
     app_host: str = "0.0.0.0"

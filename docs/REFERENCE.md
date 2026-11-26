@@ -220,9 +220,15 @@ Every field of `config.Settings` with its default and the comment that documents
 | `chroma_dir` | `BASE_DIR / 'data' / 'chroma'` |  |
 | `judge_llama_server_base_url` | `'http://127.0.0.1:8081/v1'` |  |
 | `judge_llama_server_model` | `'unsloth/Qwen3.5-4B-GGUF:Q8_0'` | CPU judge; independent of the Gemma agent |
+| `judge_max_tokens` | `256` |  |
+| `judge_timeout_s` | `60.0` |  |
+| `judge_prompt_max_chars` | `12000` |  |
+| `llm_prompt_cost_per_1m_usd` | `0.0` |  |
+| `llm_completion_cost_per_1m_usd` | `0.0` |  |
 | `eval_fixture_duckdb_path` | `BASE_DIR / 'eval' / 'fixture_data' / 'eval_fixture.duckdb'` |  |
 | `eval_reports_dir` | `BASE_DIR / 'eval' / 'reports'` |  |
 | `eval_traces_dir` | `BASE_DIR / 'eval' / 'traces'` |  |
+| `eval_runs_dir` | `BASE_DIR / 'eval' / 'runs'` |  |
 | `app_host` | `'0.0.0.0'` |  |
 | `app_port` | `8000` |  |
 | `map_default_lat` | `37.0902` |  |
