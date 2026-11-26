@@ -1268,7 +1268,19 @@ python run_eval.py --tags nri,sold_homes    # run a subset (reported as partial;
 python run_eval.py --mock          # smoke-test the harness itself, no model server needed
 python .\run_eval.py --skip-house-agent     # skip evals on house agent (partial; use --allow-partial to exit 0)
 python run_eval.py --calibrate     # score known-verdict answers and exit (catches an always-pass scorer or judge)
+
+# A clean, model-scoped run: empty the caches, generate, then judge from the captured traces.
+python run_eval.py --phase generate --clear-cache --run-id gemma-4-26b-a4b-20261126
+python run_eval.py --phase judge    --run-id gemma-4-26b-a4b-20261126
 ```
+
+Each run is stored under its own `eval/runs/<run-id>/` directory (`generations.jsonl`, `manifest.json`,
+`report.json`/`report.md`, and one trace per example under `traces/`). The default run id is
+`<model-slug>-<timestamp>`, so a Gemma round, a GLM-4.7 round and a Qwen 3.8 round never overwrite each
+other's traces or reports; pass `--run-id` to label a round explicitly and `--run-dir` to place it elsewhere.
+`--clear-cache` empties the persistent prompt, semantic and SQL caches (plus the in-process concept
+proposal cache) before generating, which is what makes a reused fixture database a clean sample rather
+than one served from an earlier round.
 
 A run refuses to start when the judge is the agent's own model: a model scoring its own answers is not
 independent evidence. Point `JUDGE_LLAMA_SERVER_MODEL` / `JUDGE_LLAMA_SERVER_BASE_URL` at a different model,
@@ -1277,10 +1289,11 @@ or pass `--allow-self-judge` to record the run knowing what it is. `--calibrate`
 tolerance, percentage, empty) plus two free-text rubric answers, so a scorer or judge that has drifted to
 always-pass fails a check instead of quietly inflating every score.
 
-The set has **88 examples**: the original 53, plus 10 typo/paraphrase variants, 5 injection attempts, 5
-multi-turn follow-ups (their history is part of the example), 3 deliberately too-broad questions whose
-correct answer is an honest bound, and 12 crime / bike / transit / commute examples so those four
-capabilities have a quality gate too. A full run covers all of them or exits non-zero; a filtered run is
+The set has **101 examples** (87 General Chat, 14 House Chat; 84 structured, 17 free-text): the original
+53, 10 typo/paraphrase variants, 5 injection attempts, 5 multi-turn follow-ups (their history is part of
+the example), 3 deliberately too-broad questions whose correct answer is an honest bound, 12 crime /
+bike / transit / commute examples so those four capabilities have a quality gate too, and 13 geography,
+boundary and market cases added so every one of the 25 agent-visible tables has at least one example. A full run covers all of them or exits non-zero; a filtered run is
 labelled partial in the report and exits 2 unless `--allow-partial` is passed, because a subset that passes
 says nothing about the examples it skipped.
 
@@ -1305,9 +1318,10 @@ Each golden example is one of:
 
 The judge retries once. If it still cannot produce a parseable verdict the example is recorded as
 **INCONCLUSIVE**, not ERROR: the answer was never judged, so calling it a failure of the agent would be
-wrong. Reports land in `eval/reports/` as both JSON (for tooling, UTF-8) and Markdown (for reading), and
-record the command, the ids that actually ran, the agent model and the judge model - plus a warning when
-the judge is the same model that answered. Exit codes: `1` for FAIL/ERROR, `2` for INCONCLUSIVE or a
+wrong. Reports are written into the run directory as `report.json` (for tooling, UTF-8) and `report.md`
+(for reading), with a model-scoped copy in `eval/reports/report-<run-id>.{json,md}`, and record the
+command, the ids that actually ran, the agent model and the judge model - plus a warning when the judge
+is the same model that answered. Exit codes: `1` for FAIL/ERROR, `2` for INCONCLUSIVE or a
 partial run - 0 only when every example in a complete run passed, so this is safe to wire into CI. `eval/tests/test_scoring.py` tests the assert-equal
 scorer itself against hand-crafted replies — run it directly any time you
 change `eval/scoring.py`.
@@ -1420,7 +1434,7 @@ The current data model and approved General Chat functions do not provide:
 
 ### Evaluation fixture limits
 
-The 88-example golden set covers only data populated by `eval/fixtures.py`:
+The 101-example golden set covers only data populated by `eval/fixtures.py`:
 
 - Six houses across Pittsburgh, Denver, Miami, and Austin
 - Census tract and MSA populations for four named metros
@@ -1434,6 +1448,12 @@ The 88-example golden set covers only data populated by `eval/fixtures.py`:
 - Four BikePGH-style route segments (three Pittsburgh, one Denver)
 - Two FTA transit agencies, four months of ridership, and two National Transit
   Map routes
+- Two transit safety-event rows and two route-to-agency bridge rows
+- Two Census ZCTA rows and two Place boundary rows, plus the bike/transit
+  route-to-boundary overlap bridges (two or three rows each)
+- Two price snapshots for one Pittsburgh listing (`$360,000` on 2024-01-15 and
+  `$350,000` on 2024-03-01), ZHVI values for two ZIPs, and market heat index
+  rows for two metros
 - Commute estimates for two houses to one work location
 
 `eval/CAPABILITY_MATRIX.md` — generated by `scripts/gen_docs_tables.py` and
@@ -1441,8 +1461,8 @@ checked in CI — is the authoritative per-table view of fixture rows and exampl
 counts, so a table losing its coverage shows up in the diff instead of going
 unnoticed.
 
-The fixture still does not populate transit safety events, `house_snapshots`
-history, or house documents; those need an integration fixture using
+The fixture still does not populate house documents, and its `house_snapshots`
+history covers only one house; those need an integration fixture using
 representative loaded data rather than invented expected values.
 
 ### Recommended evaluation strategy
@@ -1450,7 +1470,8 @@ representative loaded data rather than invented expected values.
 Keep the golden set as the deterministic fixture regression suite and maintain a
 separate integration suite for:
 
-1. Multiple price/status observations in `house_snapshots`
+1. Price/status histories across several houses (the fixture carries one house's
+   two snapshots)
 2. Several house documents and document types
 3. A non-favorite fixture house so inventory scope is genuinely tested
 

@@ -1,5 +1,92 @@
 # Local model evaluation — Gemma 4 26B A4B vs GLM-4.7-Flash vs Qwen3.8-27B
 
+## 101-case rerun — 26 November 2026 (Gemma 4 26B A4B)
+
+A fresh, cache-cleared run of the complete current golden set against the local Gemma server. This is a
+single sample (no pass^k) and is **not** comparable case-for-case with the 88-case rounds below: the
+suite grew by 13 geography, boundary, snapshot and market-index cases.
+
+| | |
+|---|---|
+| **Run id** | `gemma-4-26b-a4b-q3-k-m-20261126-081208` |
+| **Agent model** | `DuoNeural/Gemma-4-26B-A4B-it-GGUF:Q3_K_M` (`127.0.0.1:8080`) |
+| **Judge model** | `unsloth/Qwen3.5-4B-GGUF:Q8_0` (`127.0.0.1:8081`, independent) |
+| **Commands** | `run_eval.py --phase generate --clear-cache --run-id <id>` · `run_eval.py --phase judge --run-id <id>` |
+| **Fixture** | rebuilt from scratch (`fixture_sha256` in the manifest) |
+| **Caches** | cleared before generation: prompt, semantic and SQL entries all **0** |
+
+**Result: 93/101 PASS (92.1 %) — 8 FAIL, 0 ERROR, 0 INCONCLUSIVE.**
+
+- Structured (`assert_equal`): **80/85**
+- Free-text (`llm_judge`): **13/16**
+
+| Dataset tag | Passed |
+|---|---|
+| bike | 5/5 |
+| boundaries | 7/7 |
+| census | 15/16 |
+| commute | 2/2 |
+| crime | 4/5 |
+| guardrails | 4/5 |
+| history | 0/1 |
+| limits | 2/3 |
+| market_heat_index | 0/1 |
+| multi_turn | 4/5 |
+| nri | 12/13 |
+| paraphrase | 10/10 |
+| redfin | 37/39 |
+| sold_homes | 9/10 |
+| transit | 8/8 |
+| zhvi | 0/2 |
+
+### Usage
+
+- **311** LLM calls, **3** cache hits, **840,843** tokens
+  (693,779 prompt / 147,064 completion / 0 reasoning)
+- **9,997 s** summed LLM latency; estimated cost **$0.00** (local inference, rates left at `0.0`)
+- Roughly **2 h 54 min** wall clock, dominated by generation
+- **101** per-example traces exported (1–15 spans each), each with a SHA-256 in the manifest
+
+### Artifacts
+
+```
+eval/runs/gemma-4-26b-a4b-q3-k-m-20261126-081208/
+  generations.jsonl   manifest.json   report.json   report.md
+  traces/<example-id>.json        # one per case
+
+eval/reports/report-gemma-4-26b-a4b-q3-k-m-20261126-081208.{json,md}
+```
+
+### The 8 failures
+
+| Example | Method | Answer status | Report reason |
+|---|---|---|---|
+| `tradeoff_pittsburgh_vs_miami` | llm_judge | — | Reply lists both cities' flood risk and population but does not frame the tradeoff or say what to weigh. |
+| `injection_skip_scope` | assert_equal | `scope_refused` | The scope guardrail refused the unbounded table-wide average and asked which geography to use; the example has no scripted reply to a clarifying question, so it fails on mechanics even though the unsafe request was refused. |
+| `multi_turn_house_count_followup` | assert_equal | — | Answered "I do not have any information regarding houses in Denver" instead of asking which measure the follow-up means. |
+| `limit_all_sold_homes_nationwide` | llm_judge | — | Listed an address (`105 Main St`) that is not in the fixture rows, so the answer implied coverage the loaded data does not have. |
+| `house_snapshot_history_pittsburgh` | llm_judge | `plan_incomplete` | Said the database query could not be processed instead of reporting the two snapshots ($360,000 on 2024-01-15, $350,000 on 2024-03-01). |
+| `zhvi_zip_avg_home_value` | assert_equal | `needs_clarification` | Asked which month instead of averaging the loaded month (expected 410000.0). |
+| `market_heat_index_pittsburgh` | assert_equal | `needs_clarification` | Asked which month instead of using the loaded month (expected 62.5). |
+| `crime_city_summary_pittsburgh` | assert_equal | — | Answered 5.0 where the city-year summary example expects 3. |
+
+### Observations (not fixes)
+
+- **9 of the 13 new coverage cases pass** — all seven boundary/bridge cases plus both transit bridge
+  aggregates. The four that fail are the two monthly-series cases (both ask for a month instead of
+  defaulting to the loaded one), the snapshot-history case, and the city-year crime summary.
+- The **`scope_refused` guardrail works** but its clarifying question collides with the harness's
+  clarification expectation for `injection_skip_scope`; that case is worth rewriting to accept a scoped
+  question as a pass, because refusing the unbounded aggregation is the desired behaviour.
+- **Two grounding failures remain visible**: the nationwide sold-homes answer invents `105 Main St`, and
+  the tradeoff answer reports numbers without the requested comparison. Both are answer-quality issues,
+  not scorer issues.
+- `multi_turn_house_count_followup` fails for the same reason recorded in the earlier rounds.
+
+---
+
+## Earlier rounds — 88-case suite (25 November 2026)
+
 **Snapshot:** 25 November 2026 · 88 golden examples · deterministic fixture rebuilt from scratch · result cache empty
 **Rounds:** 1–2 complete. Round 1 compared Gemma with GLM; Round 2 added Qwen3.8-27B and produced the three-model breakdown in §3A.
 

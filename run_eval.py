@@ -16,6 +16,7 @@ import argparse
 import atexit
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import time
@@ -23,6 +24,12 @@ import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+# Windows consoles default to cp1252, which cannot encode the \u2713/\u2717 status glyphs printed per case.
+# Reconfiguring is harmless on UTF-8 terminals (Linux CI included) and keeps a local run from aborting.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 from config import settings
 from eval.fixtures import build_fixture
@@ -333,10 +340,47 @@ def _filter_examples(args) -> list[GoldenExample]:
     return examples
 
 
+def _slug(text: str, *, limit: int = 60) -> str:
+    """Filesystem-safe slug: ``DuoNeural/Gemma-4-26B:Q3_K_M`` -> ``duoneural-gemma-4-26b-q3-k-m``."""
+    slug = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    return slug[:limit].rstrip("-") or "model"
+
+
+def _default_run_id(model: str) -> str:
+    """Model-scoped run id, so a GLM or Qwen round can never overwrite this run's artifacts."""
+    return f"{_slug(model)}-{time.strftime('%Y%m%d-%H%M%S')}"
+
+
 def _resolve_run_dir(run_id: str, run_dir_arg: str | None) -> Path:
     if run_dir_arg:
         return Path(run_dir_arg)
     return settings.eval_runs_dir / run_id
+
+
+def _clear_caches() -> None:
+    """Empty the persistent prompt/semantic/SQL caches and the in-process proposal cache."""
+    from agents import semantic_fallback
+
+    semantic_fallback.reset_cache()
+    from services import cache as result_cache
+
+    try:
+        before = result_cache.stats()
+        outcome = result_cache.invalidate()
+        after = result_cache.stats()
+    except Exception as exc:  # a missing cache table must not stop an evaluation
+        print(f"warning: could not clear the result cache: {exc}", file=sys.stderr)
+        return
+    if not outcome.get("ok"):
+        print(f"warning: could not clear the result cache: {outcome.get('error')}", file=sys.stderr)
+        return
+    print(
+        "Cleared caches: "
+        f"{before.get('total_entries', 0)} -> {after.get('total_entries', 0)} entries "
+        f"(prompt={before.get('prompt', {}).get('entries', 0)}, "
+        f"semantic={before.get('semantic', {}).get('entries', 0)}, "
+        f"sql={before.get('sql', {}).get('entries', 0)})"
+    )
 
 
 def _aggregate_token_usage(items: list[dict]) -> dict:
@@ -479,8 +523,18 @@ def main():
         default="all",
         help="run generation+scoring ('all', default), generation only ('generate'), or offline scoring ('judge').",
     )
-    parser.add_argument("--run-id", help="run identifier for immutable run/trace storage (default: timestamp)")
+    parser.add_argument(
+        "--run-id",
+        help="run identifier for immutable run/trace storage (default: <model-slug>-<timestamp>)",
+    )
     parser.add_argument("--run-dir", help="explicit directory for run artifacts (defaults to eval/runs/<run-id>)")
+    parser.add_argument(
+        "--clear-cache",
+        action="store_true",
+        help="empty the prompt, semantic and SQL result caches (plus the in-process semantic proposal "
+        "cache) before generating. The fixture database is rebuilt by default, so this matters when "
+        "reusing one with --skip-fixture-build.",
+    )
     parser.add_argument(
         "--repeat",
         type=int,
@@ -493,7 +547,7 @@ def main():
     args = parser.parse_args()
 
     ts = time.strftime("%Y%m%d-%H%M%S")
-    run_id = args.run_id or (Path(args.run_dir).name if args.run_dir else ts)
+    run_id = args.run_id or (Path(args.run_dir).name if args.run_dir else _default_run_id(settings.llama_server_model))
     run_dir = _resolve_run_dir(run_id, args.run_dir)
     traces_dir = run_dir / "traces"
 
@@ -524,6 +578,7 @@ def main():
 
     filtered = bool(args.ids or args.tags or args.skip_house_agent or args.house_agent_only)
     covered_all = (not filtered) and len(examples) == len(GOLDEN_SET)
+    print(f"Run id: {run_id}\nRun directory: {run_dir}")
 
     if args.phase == "judge":
         generations, prior_manifest = _load_generations(run_dir)
@@ -601,6 +656,8 @@ def main():
         build_fixture(settings.eval_fixture_duckdb_path)
     settings.duckdb_path = settings.eval_fixture_duckdb_path
     fixture_sha = _sha256_file(settings.eval_fixture_duckdb_path)
+    if args.clear_cache:
+        _clear_caches()
 
     judge = None
     judge_model = None
