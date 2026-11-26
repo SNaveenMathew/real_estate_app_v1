@@ -23,10 +23,11 @@ import logging
 import re
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
 
 from agents import llm_resilience
-from config import settings
+from config import LLM_STOP_SEQUENCES, settings
+from services.guardrails import OutlinesStructuredClient
 
 log = logging.getLogger(__name__)
 
@@ -41,20 +42,32 @@ _SYSTEM = (
     f'At most {MAX_PAIRS} pairs, best first. Use only names from the lists. If nothing is plausible reply {{"pairs": []}}.'
 )
 
-_client: ChatOpenAI | None = None
+
+class SuggestedPair(BaseModel):
+    source: str = Field(..., min_length=1, max_length=128)
+    target: str = Field(..., min_length=1, max_length=128)
 
 
-def _get_client() -> ChatOpenAI:
+class PairSuggestions(BaseModel):
+    pairs: list[SuggestedPair] = Field(default_factory=list, max_length=MAX_PAIRS)
+
+
+_client: OutlinesStructuredClient | None = None
+
+
+def _get_client() -> OutlinesStructuredClient:
     global _client
     if _client is None:
-        _client = ChatOpenAI(
+        _client = OutlinesStructuredClient(
             base_url=settings.llama_server_base_url,
             api_key="not-needed",
             model=settings.llama_server_model,
+            output_schema=PairSuggestions,
             temperature=0.0,
             max_tokens=400,
             timeout=settings.relationship_llm_timeout_s,
             max_retries=0,
+            stop=LLM_STOP_SEQUENCES,
         )
     return _client
 

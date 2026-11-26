@@ -24,13 +24,16 @@ import json
 import re
 import threading
 from collections import OrderedDict
+from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field, create_model
 
 import db.schema_catalog as schema
 from agents import llm_resilience
-from config import settings
+from config import LLM_STOP_SEQUENCES, settings
+from observability import set_span_input, set_span_output, trace_span
+from services.guardrails import OutlinesStructuredClient
 
 MAX_KEYS = 3
 _SYSTEM = (
@@ -41,24 +44,46 @@ _SYSTEM = (
     "user asks about that topic."
 )
 
-_client: ChatOpenAI | None = None
+_client: Any = None
+_client_menu_sig: tuple[str, ...] | None = None
 _cache: "OrderedDict[tuple, tuple]" = OrderedDict()
 _lock = threading.Lock()
 _CACHE_SIZE = 256
 
 
-def _get_client() -> ChatOpenAI:
-    global _client
-    if _client is None:
-        _client = ChatOpenAI(
+class _EmptyConceptProposal(BaseModel):
+    concepts: list[str] = Field(default_factory=list, max_length=MAX_KEYS)
+
+
+def _proposal_schema(allowed_keys: tuple[str, ...]) -> type[BaseModel]:
+    if not allowed_keys:
+        return _EmptyConceptProposal
+    key_type = Literal[tuple(allowed_keys)]  # type: ignore[valid-type]
+    return create_model(
+        "ConceptProposal",
+        concepts=(list[key_type], Field(default_factory=list, max_length=MAX_KEYS)),  # type: ignore[valid-type]
+    )
+
+
+def _get_client(allowed_keys: tuple[str, ...] = ()) -> Any:
+    global _client, _client_menu_sig
+    # Respect test stubs injected via `monkeypatch.setattr(sf, "_client", stub)`.
+    if _client is not None and not isinstance(_client, OutlinesStructuredClient):
+        return _client
+    sig = tuple(allowed_keys) if allowed_keys else tuple(sorted(schema.SEMANTIC_GLOSSARY))
+    if _client is None or (sig and _client_menu_sig != sig):
+        _client = OutlinesStructuredClient(
             base_url=settings.llama_server_base_url,
             api_key="not-needed",
             model=settings.llama_server_model,
+            output_schema=_proposal_schema(sig),
             temperature=0.0,
-            max_tokens=120,  # a key list is a few dozen tokens
+            max_tokens=256,
             timeout=settings.semantic_fallback_timeout_s,
             max_retries=0,
+            stop=LLM_STOP_SEQUENCES,
         )
+        _client_menu_sig = sig
     return _client
 
 
@@ -73,14 +98,20 @@ def _menu() -> list[tuple[str, str]]:
     return items
 
 
-def parse_keys(text: str, allowed: set) -> list[str]:
-    """The valid keys in a model reply (tolerates prose or code fences around the JSON); [] when nothing usable."""
+def _extract_valid_json(text: str) -> tuple[bool, Any]:
     match = re.search(r"\{.*\}|\[.*\]", text or "", re.S)
     if not match:
-        return []
+        return False, None
     try:
-        data = json.loads(match.group(0))
+        return True, json.loads(match.group(0))
     except Exception:
+        return False, None
+
+
+def parse_keys(text: str, allowed: set) -> list[str]:
+    """The valid keys in a model reply (tolerates prose or code fences around the JSON); [] when nothing usable."""
+    ok, data = _extract_valid_json(text)
+    if not ok:
         return []
     raw = data.get("concepts") if isinstance(data, dict) else data
     if not isinstance(raw, list):
@@ -96,33 +127,55 @@ def propose_concepts(request: str) -> list[str]:
     """Validated concept keys the model proposes for ``request`` ([] when disabled, unavailable, or nothing fits)."""
     if not settings.semantic_fallback_enabled or not request or not request.strip():
         return []
-    menu = _menu()
-    cache_key = (hash(tuple(menu)), schema._normalize(request))
-    with _lock:
-        hit = _cache.get(cache_key)
-        if hit is not None:
-            _cache.move_to_end(cache_key)
-            return list(hit)
-    listing = "\n".join(f"- {k}: {d}" for k, d in menu)
-    try:
-        reply = llm_resilience.invoke(
-            _get_client(),
-            [
-                SystemMessage(content=_SYSTEM),
-                HumanMessage(content=f"CONCEPTS:\n{listing}\n\nQUESTION: {request.strip()[:500]}"),
-            ],
-            role="semantic_fallback",
-            breaker_name="semantic",
-        )  # its own breaker: it must never disable the chat models
-    except llm_resilience.ModelUnavailable:
-        return []  # transient: not cached, and the request is then simply unplannable
-    content = getattr(reply, "content", reply)
-    keys = parse_keys(content if isinstance(content, str) else str(content), {k for k, _ in menu})
-    with _lock:
-        _cache[cache_key] = tuple(keys)
-        while len(_cache) > _CACHE_SIZE:
-            _cache.popitem(last=False)
-    return keys
+    with trace_span(
+        "semantic_fallback.propose_concepts",
+        attributes={"openinference.span.kind": "CHAIN"},
+    ) as span:
+        set_span_input(span, {"request": request.strip()})
+        menu = _menu()
+        cache_key = (hash(tuple(menu)), schema._normalize(request))
+        with _lock:
+            hit = _cache.get(cache_key)
+            if hit is not None:
+                _cache.move_to_end(cache_key)
+                keys = list(hit)
+                set_span_output(span, {"cache_hit": True, "concepts": keys}, mime_type="application/json")
+                return keys
+        listing = "\n".join(f"- {k}: {d}" for k, d in menu)
+        allowed_keys = tuple(k for k, _ in menu)
+        try:
+            reply = llm_resilience.invoke(
+                _get_client(allowed_keys),
+                [
+                    SystemMessage(content=_SYSTEM),
+                    HumanMessage(content=f"CONCEPTS:\n{listing}\n\nQUESTION: {request.strip()[:500]}"),
+                ],
+                role="semantic_fallback",
+                breaker_name="semantic",
+            )  # its own breaker: it must never disable the chat models
+        except llm_resilience.ModelUnavailable as exc:
+            set_span_output(span, {"cache_hit": False, "error": str(exc), "concepts": []}, mime_type="application/json")
+            return []  # transient: not cached, and the request is then simply unplannable
+        content = getattr(reply, "content", reply)
+        raw_text = content if isinstance(content, str) else str(content)
+        valid_json, _parsed = _extract_valid_json(raw_text)
+        keys = parse_keys(raw_text, set(allowed_keys))
+        set_span_output(
+            span,
+            {
+                "cache_hit": False,
+                "raw_length": len(raw_text),
+                "concepts": keys,
+            },
+            mime_type="application/json",
+        )
+        if valid_json:
+            # Never poison the cache with unparseable / truncated completions; only cache valid structured replies.
+            with _lock:
+                _cache[cache_key] = tuple(keys)
+                while len(_cache) > _CACHE_SIZE:
+                    _cache.popitem(last=False)
+        return keys
 
 
 def describe(keys: list[str]) -> str:

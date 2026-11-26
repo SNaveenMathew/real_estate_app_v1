@@ -262,3 +262,17 @@ def test_the_fallback_does_not_second_guess_a_request_that_already_matched_an_al
     proposer.replies = ['{"concepts": ["census_place_population"]}']
     ask(question)
     assert proposer.calls == 0
+
+
+def test_parse_failure_is_not_cached_and_client_binds_outlines(proposer, monkeypatch):
+    from services.guardrails import OutlinesStructuredClient
+
+    proposer.replies = ["not valid json at all", '{"concepts": ["census_land_area"]}']
+    assert sf.propose_concepts("How big is Pittsburgh?") == []
+    # Invalid completion must not poison cache for the same question
+    assert sf.propose_concepts("How big is Pittsburgh?") == ["census_land_area"]
+
+    monkeypatch.setattr(sf, "_client", None)
+    monkeypatch.setattr(sf, "_client_menu_sig", None)
+    client = sf._get_client(("census_land_area", "house_inventory"))
+    assert isinstance(client, OutlinesStructuredClient)

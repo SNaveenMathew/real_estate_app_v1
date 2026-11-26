@@ -22,15 +22,17 @@ import inspect
 import json
 import re
 from time import perf_counter
-from typing import Any
+from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
 
 from config import settings, LLM_STOP_SEQUENCES
 from agents.response_validator import validate_response
 from agents.artifacts import classify_dataframe, emit_artifact, reset_artifacts, collect_artifacts
 from agents import answer_status, llm_resilience, tool_result
+from services.guardrails import OutlinesStructuredClient
 
 
 # -- Constants ----------------------------------------------------------------
@@ -65,41 +67,84 @@ def make_house_approved_functions(house_id: str) -> dict:
         """Return all structured fields for this house."""
         house = store.get_house(house_id)
         if not house:
-            return "House not found in database."
+            return tool_result.status_result("House not found in database.", answer_status.RESULT_EMPTY)
         house.pop("raw_json", None)
-        return json.dumps(house, indent=2)
+        ev = {
+            "tables_queried": ["houses"],
+            "columns": list(house.keys()),
+            "rows": [{k: v for k, v in house.items() if not isinstance(v, (dict, list))}],
+            "row_count": 1,
+            "truncated": False,
+            "applied_filters": [f"houses.house_id = '{house_id}'"],
+            "excluded_records": [],
+            "artifact_refs": [],
+        }
+        return tool_result.ToolResult(
+            json.dumps(house, indent=2),
+            kind="data",
+            status=answer_status.OK,
+            row_count=1,
+            columns=list(house.keys()),
+            evidence=ev,
+        )
 
     def get_nri_risk_data() -> str:
         """Return FEMA NRI data for this house's census tract."""
         house = store.get_house(house_id)
         if not house or not house.get("tract_fips"):
-            return "Census tract not available for this house."
+            return tool_result.status_result(
+                "Census tract not available for this house.", answer_status.DATA_UNAVAILABLE
+            )
         nri = store.get_nri_for_tract(house["tract_fips"])
         if not nri:
-            return f"No NRI data found for tract {house['tract_fips']}."
+            return tool_result.status_result(
+                f"No NRI data found for tract {house['tract_fips']}.", answer_status.RESULT_EMPTY
+            )
         hazards = {label: nri.get(col) for col, label in schema.NRI_HAZARD_COLUMNS.items()}
         top = sorted([(k, v) for k, v in hazards.items() if v and v > 0], key=lambda x: x[1], reverse=True)[:5]
+        art_refs: list[str] = []
         try:
             import pandas as pd
 
             hazards_df = pd.DataFrame(top, columns=["hazard", "risk_score"])
-            emit_artifact(classify_dataframe(hazards_df, title="Top hazards by risk score", presentation="chart"))
+            art = classify_dataframe(hazards_df, title="Top hazards by risk score", presentation="chart")
+            if art:
+                emit_artifact(art)
+                art_refs.append("Top hazards by risk score")
         except Exception:
             pass
-        return json.dumps(
-            {
-                "tract_fips": nri.get("tract_fips"),
-                "county": nri.get("county_name"),
-                "state": nri.get("state_name"),
-                "composite_risk_score": nri.get("risk_score"),
-                "composite_risk_rating": nri.get("risk_ratng"),
-                "risk_percentile": nri.get("risk_npctl"),
-                "expected_annual_loss_usd": nri.get("eal_valt"),
-                "social_vulnerability": nri.get("sovi_ratng"),
-                "community_resilience": nri.get("resl_ratng"),
-                "top_5_hazards_by_risk_score": top,
-            },
-            indent=2,
+        payload = {
+            "tract_fips": nri.get("tract_fips"),
+            "county": nri.get("county_name"),
+            "state": nri.get("state_name"),
+            "composite_risk_score": nri.get("risk_score"),
+            "composite_risk_rating": nri.get("risk_ratng"),
+            "risk_percentile": nri.get("risk_npctl"),
+            "expected_annual_loss_usd": nri.get("eal_valt"),
+            "social_vulnerability": nri.get("sovi_ratng"),
+            "community_resilience": nri.get("resl_ratng"),
+            "top_5_hazards_by_risk_score": top,
+        }
+        flat_row = {k: v for k, v in payload.items() if not isinstance(v, (dict, list))}
+        for h_name, h_score in top:
+            flat_row[f"hazard_{h_name}"] = h_score
+        ev = {
+            "tables_queried": ["nri_tracts"],
+            "columns": list(flat_row.keys()),
+            "rows": [flat_row],
+            "row_count": 1,
+            "truncated": False,
+            "applied_filters": [f"nri_tracts.tract_fips = '{house['tract_fips']}'"],
+            "excluded_records": [],
+            "artifact_refs": art_refs,
+        }
+        return tool_result.ToolResult(
+            json.dumps(payload, indent=2),
+            kind="data",
+            status=answer_status.OK,
+            row_count=1,
+            columns=list(flat_row.keys()),
+            evidence=ev,
         )
 
     def estimate_price_with_code() -> str:
@@ -126,9 +171,12 @@ def make_house_approved_functions(house_id: str) -> dict:
                     lines.append(f"  Median price/sqft: ${ppsf:,.2f}")
                     lines.append(f"  Estimated value (median $/sqft x {sqft:.0f} sqft): ${ppsf * sqft:,.0f}")
             if stats.get("sold_sold_count", 0) > 0:
+                excluded = int(stats.get("sold_non_arms_length_excluded") or 0)
                 lines.append("\n### Recent Sales (arm's-length, same census tract)")
                 lines.append(f"  Sold count: {int(stats['sold_sold_count'])}")
                 lines.append(f"  Median sold price: ${stats.get('sold_median_sold', 0):,.0f}")
+                if excluded > 0:
+                    lines.append(f"  Excluded non-arm's-length / <= $1,000 sales in tract: {excluded}")
                 if stats.get("sold_median_sold_per_sqft") and sqft:
                     lines.append(
                         f"  Estimated value (sold $/sqft x {sqft:.0f} sqft): ${stats['sold_median_sold_per_sqft'] * sqft:,.0f}"
@@ -138,6 +186,28 @@ def make_house_approved_functions(house_id: str) -> dict:
             lines.append(f"\n### Current List Price: ${price:,.0f}")
             if sqft:
                 lines.append(f"  Price/sqft: ${price / sqft:,.2f}")
+        # Prepend a compact top-line valuation summary so final response generation hits key figures
+        # without overflowing the output token budget on prose tables.
+        summary_lines = ["### Valuation Summary"]
+        if price:
+            summary_lines.append(f"  - Current list price: ${price:,.0f}")
+        if tract:
+            stats = store.get_price_stats_in_tract(tract)
+            if stats.get("count", 0) > 0:
+                summary_lines.append(
+                    f"  - Same-tract active listings ({int(stats['count'])}): median ${stats.get('median_price', 0):,.0f}, avg ${stats.get('avg_price', 0):,.0f}"
+                )
+            if stats.get("sold_sold_count", 0) > 0:
+                excl = int(stats.get("sold_non_arms_length_excluded") or 0)
+                excluded_note = (
+                    f" ({excl} non-arm's-length / <= $1,000 sale excluded)"
+                    if excl > 0
+                    else " (non-arm's-length sales under $1,000 excluded)"
+                )
+                summary_lines.append(
+                    f"  - Same-tract arm's-length sold comps ({int(stats['sold_sold_count'])}): median ${stats.get('sold_median_sold', 0):,.0f}{excluded_note}"
+                )
+        lines = summary_lines + [""] + lines
         if city:
             nearby = store.query(
                 """
@@ -151,8 +221,8 @@ def make_house_approved_functions(house_id: str) -> dict:
                 [city, house_id, price],
             )
             if len(nearby) > 0:
-                lines.append(f"\n### Similar Active Listings in {city}")
-                lines.append(nearby.to_string(index=False))
+                lines.append(f"\n### Similar Active Listings in {city} (top {min(5, len(nearby))} of {len(nearby)})")
+                lines.append(nearby.head(5).to_string(index=False))
                 try:
                     emit_artifact(
                         classify_dataframe(
@@ -179,8 +249,10 @@ def make_house_approved_functions(house_id: str) -> dict:
                 [tract],
             )
             if len(county_comps) > 0:
-                lines.append("\n### County-recorded Arm's-Length Sales (same tract)")
-                lines.append(county_comps.to_string(index=False))
+                lines.append(
+                    f"\n### County-recorded Arm's-Length Sales (same tract, top {min(5, len(county_comps))} of {len(county_comps)})"
+                )
+                lines.append(county_comps.head(5).to_string(index=False))
                 try:
                     emit_artifact(
                         classify_dataframe(
@@ -219,7 +291,45 @@ def make_house_approved_functions(house_id: str) -> dict:
                 "ZIP, metro, or state - run `python setup_data.py --only zhvi` after "
                 "downloading a ZHVI export to enable this estimate."
             )
-        return "\n".join(lines) if lines else "Insufficient data for price estimation."
+        text_out = "\n".join(lines) if lines else "Insufficient data for price estimation."
+        est_row: dict[str, Any] = {}
+        if price:
+            est_row["list_price"] = price
+        if tract:
+            stats = store.get_price_stats_in_tract(tract)
+            for k in (
+                "count",
+                "median_price",
+                "avg_price",
+                "median_price_per_sqft",
+                "sold_sold_count",
+                "sold_median_sold",
+                "sold_median_sold_per_sqft",
+                "non_arms_length_excluded",
+            ):
+                if stats.get(k) is not None:
+                    est_row[k] = stats[k]
+        if zhvi_est and zhvi_est.get("estimated_value") is not None:
+            est_row["zhvi_estimated_value"] = zhvi_est["estimated_value"]
+            est_row["zhvi_latest_value"] = zhvi_est.get("latest_value")
+        ev = {
+            "tables_queried": ["houses", "sold_homes"] + (["zhvi"] if zhvi_est else []),
+            "columns": list(est_row.keys()),
+            "rows": [est_row] if est_row else [],
+            "row_count": 1 if est_row else 0,
+            "truncated": False,
+            "applied_filters": [f"houses.house_id = '{house_id}'"] + ([f"tract_fips = '{tract}'"] if tract else []),
+            "excluded_records": ["Non-arm's-length and <= $1,000 sales excluded from sold comparables."],
+            "artifact_refs": [],
+        }
+        return tool_result.ToolResult(
+            text_out,
+            kind="data" if est_row else "status",
+            status=answer_status.OK,
+            row_count=ev["row_count"],
+            columns=list(est_row.keys()),
+            evidence=ev,
+        )
 
     def get_nearby_sold_homes() -> str:
         """Return recent sold comparables in the same census tract."""
@@ -227,10 +337,14 @@ def make_house_approved_functions(house_id: str) -> dict:
 
         house = store.get_house(house_id)
         if not house or not house.get("tract_fips"):
-            return "No tract data available."
+            return tool_result.status_result("No tract data available.", answer_status.DATA_UNAVAILABLE)
         sold = store.get_sold_in_tract(house["tract_fips"])
+        stats = store.get_price_stats_in_tract(house["tract_fips"])
+        excluded_count = int(stats.get("sold_non_arms_length_excluded") or 0)
         if not sold:
-            return "No sold homes found in this census tract yet."
+            return tool_result.status_result(
+                "No sold homes found in this census tract yet.", answer_status.RESULT_EMPTY
+            )
         df = pd.DataFrame(sold[:10])
         cols = [
             c
@@ -238,19 +352,47 @@ def make_house_approved_functions(house_id: str) -> dict:
             if c in df.columns
         ]
         view = df[cols]
+        art_refs: list[str] = []
         try:
-            emit_artifact(classify_dataframe(view, title="Nearby sold homes", presentation="table"))
+            art = classify_dataframe(view, title="Nearby sold homes", presentation="table")
+            if art:
+                emit_artifact(art)
+                art_refs.append("Nearby sold homes")
         except Exception:
             pass
-        return view.to_string(index=False)
+        excl_notes: list[str] = []
+        rendered = view.to_string(index=False)
+        if excluded_count > 0:
+            note = (
+                f"Note: {excluded_count} non-arm's-length or <= $1,000 sale(s) in tract {house['tract_fips']} "
+                "are excluded from arm's-length market comparable averages/medians."
+            )
+            excl_notes.append(note)
+            rendered = f"{rendered}\n\n{note}"
+        ev = {
+            "tables_queried": ["sold_homes"],
+            "columns": cols,
+            "rows": view.to_dict(orient="records"),
+            "row_count": len(view),
+            "truncated": len(sold) > 10,
+            "applied_filters": [f"sold_homes.tract_fips = '{house['tract_fips']}'"],
+            "excluded_records": excl_notes,
+            "artifact_refs": art_refs,
+        }
+        return tool_result.ToolResult(
+            rendered,
+            kind="data",
+            status=answer_status.OK,
+            row_count=len(view),
+            columns=cols,
+            evidence=ev,
+        )
 
     def search_house_documents(query: str) -> str:
         """Search stored descriptions and documents for this house."""
         docs = vs.search_house(house_id, query, n_results=4)
         if not docs:
-            return tool_result.status_result(
-                "No documents found for this house yet.", answer_status.RESULT_EMPTY
-            )
+            return tool_result.status_result("No documents found for this house yet.", answer_status.RESULT_EMPTY)
         return "\n\n".join(f"[{d['metadata'].get('doc_type', 'text')}]\n{d['text']}" for d in docs)
 
     def query_database(request: str, presentation: str = "auto", scope: str = "this_house") -> str:
@@ -512,10 +654,10 @@ KEY RULES
   explicitly returned a non-NULL numeric value for that field.
 - Format prices with commas and dollar signs (e.g. $450,000).
 - When discussing NRI risk, explain what the scores mean in plain language.
-- Be concise and direct. State the key figures in prose, in the order the
-  evidence gives them -- the application renders comparable results (sold
-  comps, hazard scores, similar listings) as their own table or chart
-  alongside your answer, so you do not need to reproduce one in markdown.
+- Be concise and direct (aim for under ~200 words). Lead with the key figures
+  in prose/short bullets, in the order the evidence gives them -- the application
+  renders comparable results (sold comps, hazard scores, similar listings) as
+  their own table or chart alongside your answer, so do not reproduce full tables.
 
 Return only the user-facing answer.
 """
@@ -525,6 +667,56 @@ Return only the user-facing answer.
 
 _house_code_agent: ChatOpenAI | None = None
 _house_response_agent: ChatOpenAI | None = None
+_house_structured_agent: OutlinesStructuredClient | None = None
+
+
+class HouseActionIR(BaseModel):
+    action: Literal[
+        "get_house_details",
+        "get_nri_risk_data",
+        "estimate_price_with_code",
+        "get_nearby_sold_homes",
+        "search_house_documents",
+        "query_database",
+        "get_linked_dataset_records",
+        "get_commute_info",
+    ]
+    question: str = Field(default="", max_length=400)
+    dataset: str = Field(default="", max_length=120)
+
+
+def _get_structured_house_agent() -> OutlinesStructuredClient:
+    global _house_structured_agent
+    if _house_structured_agent is None:
+        _house_structured_agent = OutlinesStructuredClient(
+            base_url=settings.llama_server_base_url,
+            api_key="not-needed",
+            model=settings.llama_server_model,
+            output_schema=HouseActionIR,
+            temperature=0.0,
+            max_tokens=256,
+            timeout=settings.llm_request_timeout,
+            max_retries=settings.llm_max_retries,
+            stop=LLM_STOP_SEQUENCES,
+        )
+    return _house_structured_agent
+
+
+def _compile_house_action_ir(ir: HouseActionIR, user_message: str) -> str:
+    if ir.action == "query_database":
+        q = (ir.question or user_message).strip()
+        return f"final_result = query_database(request={q!r})"
+    if ir.action == "search_house_documents":
+        q = (ir.question or user_message).strip()
+        return f"final_result = search_house_documents(query={q!r})"
+    if ir.action == "get_linked_dataset_records":
+        ds = (ir.dataset or "").strip()
+        return (
+            f"final_result = get_linked_dataset_records(dataset={ds!r})"
+            if ds
+            else "final_result = get_linked_dataset_records()"
+        )
+    return f"final_result = {ir.action}()"
 
 
 def _get_house_code_agent() -> ChatOpenAI:
@@ -673,6 +865,22 @@ def _linked_datasets_prompt() -> str:
     return "\n".join(lines)
 
 
+def _house_context_header(house_id: str) -> str:
+    """Build a compact deterministic antecedent header so multi-turn follow-ups keep house/tract/MSA grounding."""
+    try:
+        import db.duckdb_store as store
+
+        house = store.get_house(house_id) or {}
+    except Exception:
+        house = {}
+    parts = [f"house_id={house_id}"]
+    for key in ("address", "city", "state", "zip", "tract_fips", "msa_code"):
+        val = house.get(key)
+        if val not in (None, ""):
+            parts.append(f"{key}={val}")
+    return "[ACTIVE HOUSE CONTEXT: " + ", ".join(parts) + "]"
+
+
 def _generate_house_program(
     user_message: str,
     house_id: str,
@@ -687,11 +895,12 @@ def _generate_house_program(
         if stored_description
         else ""
     )
+    house_ctx = _house_context_header(house_id)
     conversation = _messages_to_text(history, user_message)
     prompt_parts = [
         _HOUSE_CODE_AGENT_PROMPT,
         _linked_datasets_prompt(),
-        f"HOUSE ID: {house_id}",
+        house_ctx,
         desc_section,
         f"CONVERSATION CONTEXT:\n{conversation}",
     ]
@@ -721,7 +930,35 @@ def _generate_house_program(
     else:
         first_error = "Code agent returned empty code."
 
-    # Recovery: narrow prompt
+    # Recovery: prefer grammar-constrained HouseActionIR via Outlines before deterministic fallback.
+    try:
+        ir_reply = llm_resilience.invoke(
+            _get_structured_house_agent(),
+            [
+                SystemMessage(
+                    content=(
+                        "Select the exact House Chat action needed for this request and reply with JSON matching "
+                        f"HouseActionIR. Approved actions: {', '.join(sorted(approved_names))}."
+                    )
+                ),
+                HumanMessage(content=user_message),
+            ],
+            role="house_code_agent",
+        )
+        parsed_ir = getattr(ir_reply, "parsed", None)
+        if parsed_ir is None:
+            raw_ir = getattr(ir_reply, "content", "")
+            if isinstance(raw_ir, str) and raw_ir.strip().startswith("{"):
+                parsed_ir = HouseActionIR.model_validate_json(raw_ir)
+        if isinstance(parsed_ir, HouseActionIR) and parsed_ir.action in approved_names:
+            ir_code = _compile_house_action_ir(parsed_ir, user_message)
+            _validate_house_program(ir_code, approved_names)
+            return ir_code
+    except llm_resilience.ModelUnavailable:
+        return "final_result = get_house_details()"  # model down: degrade, do not fail
+    except Exception:
+        pass
+
     retry_prompt = (
         "You are a code generator for a house real-estate agent. "
         "Return exactly one executable Python statement calling an approved function. "
@@ -756,11 +993,16 @@ def _generate_house_program(
 # -- Final answer synthesis ---------------------------------------------------
 
 
-def _write_house_final_answer_with_model(user_message: str, history: list | None, evidence: str) -> str:
+def _write_house_final_answer_with_model(
+    user_message: str, history: list | None, evidence: str, house_id: str = ""
+) -> str:
     conversation = _messages_to_text(history, user_message)
+    house_ctx = (_house_context_header(house_id) + "\n\n") if house_id else ""
     prompt = (
         _HOUSE_FINAL_RESPONSE_PROMPT
-        + "\n\nCONVERSATION:\n"
+        + "\n\n"
+        + house_ctx
+        + "CONVERSATION:\n"
         + conversation
         + "\n\nEXECUTED EVIDENCE:\n"
         + evidence[:HOUSE_FINAL_RESPONSE_MAX_CHARS]
@@ -795,10 +1037,10 @@ def _write_house_final_answer_with_model(user_message: str, history: list | None
     return _extract_text(retry) or evidence.strip() or "I could not produce a response."
 
 
-def _write_house_final_answer(user_message: str, history: list | None, evidence: str) -> str:
+def _write_house_final_answer(user_message: str, history: list | None, evidence: str, house_id: str = "") -> str:
     """The answer model writes the reply; if it is unavailable the user still gets the retrieved data, labeled as such."""
     try:
-        return _write_house_final_answer_with_model(user_message, history, evidence)
+        return _write_house_final_answer_with_model(user_message, history, evidence, house_id=house_id)
     except llm_resilience.ModelUnavailable:
         if not evidence.strip():
             return (
@@ -831,6 +1073,9 @@ def run_house_chat(
     reset_artifacts()
     from observability import (
         start_house_chat,
+        enter_usage_scope,
+        exit_usage_scope,
+        current_usage_snapshot,
         trace_span,
         set_span_input,
         set_span_output,
@@ -842,24 +1087,29 @@ def run_house_chat(
     from services.guardrails import GuardrailManager, OutputGroundingGuardrail
 
     started_at = perf_counter()
+    usage_token = enter_usage_scope()
     root_context, root_span, trace_id, trace_url = start_house_chat(message, house_id, len(history or []))
 
     # 1. Input Guardrail
     try:
         input_guard = GuardrailManager.inspect_turn_input(message)
     except Exception as exc:
+        token_usage = current_usage_snapshot()
         mark_span_error(root_span, exc)
         end_house_chat(
             root_span,
             root_context=root_context,
             trace_id=trace_id,
             started_at=started_at,
+            token_usage=token_usage,
             error=exc,
         )
         record_house_chat_error(perf_counter() - started_at)
+        exit_usage_scope(usage_token)
         raise
 
     if not input_guard.passed:
+        token_usage = current_usage_snapshot()
         blocked_reply = (
             "I'm sorry, but I cannot process this request because it violates "
             "safety guidelines or attempts to override system instructions."
@@ -880,7 +1130,24 @@ def run_house_chat(
             reply=blocked_reply,
             started_at=started_at,
             tool_call_count=0,
+            token_usage=token_usage,
         )
+        exit_usage_scope(usage_token)
+        if include_metadata:
+            return (
+                blocked_reply,
+                updated_history,
+                [],
+                {
+                    "trace_id": trace_id,
+                    "trace_url": trace_url,
+                    "answer_status": answer_status.REFUSED_UNSAFE,
+                    "outcome": answer_status.outcome(answer_status.REFUSED_UNSAFE),
+                    "guardrail": input_guard.to_dict(),
+                    "tool_outcomes": [],
+                    "token_usage": token_usage,
+                },
+            )
         return blocked_reply, updated_history, []
 
     from agents.turn_progress import get_current_tracker
@@ -992,7 +1259,7 @@ def run_house_chat(
                 },
                 mime_type="application/json",
             )
-            raw_reply = _write_house_final_answer(message, history, evidence)
+            raw_reply = _write_house_final_answer(message, history, evidence, house_id=house_id)
             set_span_output(response_span, {"reply": raw_reply}, mime_type="application/json")
 
         if tracker:
@@ -1004,7 +1271,8 @@ def run_house_chat(
             *_tool_messages_from_calls(all_calls),
             AIMessage(content=raw_reply),
         ]
-        reply = validate_response(raw_reply, all_lc_messages, strict=True, tool_results=all_calls)
+        artifacts = collect_artifacts()
+        reply = validate_response(raw_reply, all_lc_messages, strict=True, tool_results=all_calls, artifacts=artifacts)
 
         # 5. Output grounding guardrails
         try:
@@ -1032,6 +1300,7 @@ def run_house_chat(
         ]
 
         artifacts = collect_artifacts()
+        token_usage = current_usage_snapshot()
 
         end_house_chat(
             root_span,
@@ -1040,6 +1309,7 @@ def run_house_chat(
             reply=reply,
             started_at=started_at,
             tool_call_count=len(all_calls),
+            token_usage=token_usage,
         )
         record_house_chat_success(
             latency_seconds=perf_counter() - started_at,
@@ -1048,14 +1318,14 @@ def run_house_chat(
             reply_chars=len(reply),
             validation_changed=(reply != raw_reply),
         )
+        exit_usage_scope(usage_token)
         if include_metadata:
             # The turn's conclusion as a finite state (agents/answer_status.py), never parsed out of prose.
             turn_status = next(
                 (
                     facts["status"]
                     for _, result in reversed(all_calls)
-                    if (facts := tool_result.facts(result))
-                    and facts.get("status") not in (None, answer_status.OK)
+                    if (facts := tool_result.facts(result)) and facts.get("status") not in (None, answer_status.OK)
                 ),
                 None,
             )
@@ -1069,11 +1339,13 @@ def run_house_chat(
                     "answer_status": turn_status,
                     "outcome": answer_status.outcome(turn_status),
                     "tool_outcomes": [facts for _, result in all_calls if (facts := tool_result.facts(result))],
+                    "token_usage": token_usage,
                 },
             )
         return reply, updated_history, artifacts
 
     except Exception as exc:
+        token_usage = current_usage_snapshot()
         mark_span_error(root_span, exc)
         end_house_chat(
             root_span,
@@ -1082,7 +1354,9 @@ def run_house_chat(
             reply=None,
             started_at=started_at,
             tool_call_count=len(all_calls),
+            token_usage=token_usage,
             error=exc,
         )
         record_house_chat_error(perf_counter() - started_at)
+        exit_usage_scope(usage_token)
         raise

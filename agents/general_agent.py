@@ -19,12 +19,14 @@ from __future__ import annotations
 import ast
 import re
 import inspect
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
 
 from config import settings, LLM_STOP_SEQUENCES
+from services.guardrails import OutlinesStructuredClient
 from agents.tools import (
     check_data_availability,
     get_database_schema,
@@ -408,6 +410,66 @@ def _get_code_agent() -> ChatOpenAI:
     return _code_agent
 
 
+_structured_code_agent: OutlinesStructuredClient | None = None
+
+
+class GeneralActionIR(BaseModel):
+    """Grammar-constrained Approved Action IR compiled deterministically into Python."""
+
+    action: Literal[
+        "query_database",
+        "check_data_availability",
+        "get_database_schema",
+        "retrieve_data_model_context",
+        "find_bike_route",
+        "find_transit_route",
+        "search_all_house_descriptions",
+    ]
+    request: str = Field(..., min_length=1, max_length=600)
+    presentation: Literal["auto", "table", "chart", "map", "text"] = "auto"
+    requirements: str = Field(default="", max_length=300)
+    origin: str = Field(default="", max_length=200)
+    destination: str = Field(default="", max_length=200)
+
+
+def _get_structured_code_agent() -> OutlinesStructuredClient:
+    global _structured_code_agent
+    if _structured_code_agent is None:
+        _structured_code_agent = OutlinesStructuredClient(
+            base_url=settings.llama_server_base_url,
+            api_key="not-needed",
+            model=settings.llama_server_model,
+            output_schema=GeneralActionIR,
+            temperature=0.0,
+            max_tokens=256,
+            timeout=settings.llm_request_timeout,
+            max_retries=settings.llm_max_retries,
+            stop=LLM_STOP_SEQUENCES,
+        )
+    return _structured_code_agent
+
+
+def _compile_action_ir(ir: GeneralActionIR, user_message: str, query_plan) -> str:
+    req = (ir.request or user_message).strip()
+    if ir.action == "query_database":
+        reqs = (ir.requirements or "Answer the user request using the database and documented relationships.").strip()
+        return (
+            "final_result = query_database("
+            f"request={req!r}, requirements={reqs!r}, plan={query_plan.render()!r}, presentation={ir.presentation!r})"
+        )
+    if ir.action == "check_data_availability":
+        return "final_result = check_data_availability()"
+    if ir.action == "get_database_schema":
+        return "final_result = get_database_schema()"
+    if ir.action == "retrieve_data_model_context":
+        return f"final_result = retrieve_data_model_context(query={req!r})"
+    if ir.action == "search_all_house_descriptions":
+        return f"final_result = search_all_house_descriptions(query={req!r})"
+    if ir.action in {"find_bike_route", "find_transit_route"} and ir.origin and ir.destination:
+        return f"final_result = {ir.action}(origin={ir.origin!r}, destination={ir.destination!r})"
+    return _deterministic_program(user_message, query_plan)
+
+
 def _get_response_agent() -> ChatOpenAI:
     global _response_agent
     if _response_agent is None:
@@ -438,12 +500,27 @@ def _tool_messages_from_calls(calls: list[tuple[str, Any]]) -> list[ToolMessage]
 
 
 def _program_semantic_consistency_errors(source: str, user_message: str, query_plan) -> list[str]:
-    """Reject LLM plans that contradict the metadata-derived query plan."""
+    """Reject LLM plans that contradict or weaken the metadata-derived query plan."""
+    from services.guardrails import ScopePolicyGuardrail
+
     errors: list[str] = []
     text = source.lower()
     matched = schema.semantic_matches(user_message)
     matched_keys = {m.get("key") for m in matched}
     planned_tables = set(query_plan.required_tables)
+
+    # Bidirectional check: reject programs that attempt to drop filtering or override planned scope.
+    errors.extend(ScopePolicyGuardrail.program_drops_scope(source))
+    if query_plan.entity_filters and "query_database" in text:
+        for filt in query_plan.entity_filters:
+            for literal in re.findall(r"'([^']+)'", filt):
+                if literal.lower() not in text and "request=" in text:
+                    # Only enforce when the code agent rewrote `request=` rather than forwarding `user_message`
+                    req_match = re.search(r"request\s*=\s*(['\"])(.*?)\1", source, re.S)
+                    if req_match and req_match.group(2).strip().lower() != user_message.strip().lower():
+                        errors.append(
+                            f"Generated program dropped planned entity scope '{literal}' while rewriting request."
+                        )
 
     # Any semantic filter that exists in the catalog is allowed only when the
     # corresponding concept actually matched the request. This is generic and
@@ -465,6 +542,20 @@ def _program_semantic_consistency_errors(source: str, user_message: str, query_p
     # If the plan names an explicit geography grain, the generated requirements
     # must not substitute an unrelated source geography.
     return errors
+
+
+def _hard_semantic_errors(errors: list[str]) -> list[str]:
+    """Filter to errors that BLOCK execution outright (not entity-scope drops).
+
+    Entity scope drops are "soft": the generated program merely narrowed the user's
+    entity name in the ``request=`` string.  ``query_database`` will itself return
+    ``NOT_ANSWERED[unplannable]`` when the reworded request can't be mapped to a
+    measure, giving the outer retry loop a richer signal than a pre-execution rejection.
+    Hard errors (invented tables, unsupported semantic filters, dump-guard violations)
+    must still block because they can produce silently wrong SQL.
+    """
+    soft_prefix = "Generated program dropped planned entity scope"
+    return [e for e in errors if not e.startswith(soft_prefix)]
 
 
 def _generate_program(
@@ -497,8 +588,12 @@ def _generate_program(
         try:
             _validate_program(code)
             semantic_errors = _program_semantic_consistency_errors(code, user_message, query_plan)
-            if semantic_errors:
-                raise CodeAgentProgramError("; ".join(semantic_errors))
+            hard_errors = _hard_semantic_errors(semantic_errors)
+            if hard_errors:
+                raise CodeAgentProgramError("; ".join(hard_errors))
+            # Soft-only errors (e.g. entity scope drop): allow execution.  query_database will
+            # return NOT_ANSWERED[unplannable] when the reworded request is unplannable, giving
+            # the outer retry loop a richer recovery signal than a pre-execution rejection.
             return code
         except Exception as first_exc:
             first_error = str(first_exc)
@@ -507,11 +602,38 @@ def _generate_program(
     else:
         first_error = "Code agent returned empty code."
 
-    # Local models can occasionally emit an empty completion or malformed
-    # Python. Recover with a tiny, syntax-constrained prompt rather than
-    # allowing the failure to become a user-facing "no data" answer.
-    # re-classifying the user's intent: ask the same Code Agent for the minimal
-    # program and include only the semantic capabilities it needs.
+    # Recovery: first try grammar-constrained Approved Action IR via Outlines before unconstrained retry.
+    try:
+        ir_reply = llm_resilience.invoke(
+            _get_structured_code_agent(),
+            [
+                SystemMessage(
+                    content=(
+                        "Select the exact approved application action and arguments as JSON matching GeneralActionIR. "
+                        f"Preserve the user's entities and planned tables ({', '.join(query_plan.required_tables) or 'none'})."
+                    )
+                ),
+                HumanMessage(content=user_message),
+            ],
+            role="code_agent",
+        )
+        parsed_ir = getattr(ir_reply, "parsed", None)
+        if parsed_ir is None:
+            raw_ir = getattr(ir_reply, "content", "")
+            if isinstance(raw_ir, str) and raw_ir.strip().startswith("{"):
+                parsed_ir = GeneralActionIR.model_validate_json(raw_ir)
+        if isinstance(parsed_ir, GeneralActionIR):
+            ir_code = _compile_action_ir(parsed_ir, user_message, query_plan)
+            _validate_program(ir_code)
+            semantic_errors = _program_semantic_consistency_errors(ir_code, user_message, query_plan)
+            if not _hard_semantic_errors(semantic_errors):
+                return ir_code
+    except llm_resilience.ModelUnavailable:
+        return _deterministic_program(user_message, query_plan)
+    except Exception:
+        pass
+
+    # Secondary fallback: narrow Python code-generation prompt when Outlines IR is mocked/unavailable.
     retry_prompt = (
         "You are a code generator. Return exactly one executable Python statement "
         "calling an approved function. For this user request, the usual analytical "
@@ -536,8 +658,9 @@ def _generate_program(
         try:
             _validate_program(retry_code)
             semantic_errors = _program_semantic_consistency_errors(retry_code, user_message, query_plan)
-            if semantic_errors:
-                raise CodeAgentProgramError("; ".join(semantic_errors))
+            hard_errors = _hard_semantic_errors(semantic_errors)
+            if hard_errors:
+                raise CodeAgentProgramError("; ".join(hard_errors))
             return retry_code
         except Exception:
             pass
@@ -672,6 +795,9 @@ def run_general_chat(
     from time import perf_counter
     from observability import (
         start_general_chat,
+        enter_usage_scope,
+        exit_usage_scope,
+        current_usage_snapshot,
         trace_span,
         set_span_input,
         set_span_output,
@@ -682,6 +808,7 @@ def run_general_chat(
     )
 
     started_at = perf_counter()
+    usage_token = enter_usage_scope()
     root_context, root_span, trace_id, trace_url = start_general_chat(message, session_id, len(history or []))
 
     from services.guardrails import GuardrailManager
@@ -698,36 +825,55 @@ def run_general_chat(
             error=exc,
         )
         record_general_chat_error(perf_counter() - started_at)
+        exit_usage_scope(usage_token)
         raise
 
     early_reply = ""
     early_meta: dict[str, Any] = {}
     if not input_guard.passed:
-        early_reply = (
-            "I can't do that. I only read this database - I can't drop, alter or delete tables - and I won't "
-            "take instructions that try to override how I work. I can still answer questions about the houses, "
-            "sold homes, census, crime, bike and transit data."
-        )
+        early_reply = answer_status.LIMITATION_TEXT[answer_status.REFUSED_UNSAFE]
         early_meta = {
             "guardrail": input_guard.to_dict(),
             "answer_status": answer_status.REFUSED_UNSAFE,
             "outcome": answer_status.outcome(answer_status.REFUSED_UNSAFE),
         }
     else:
-        # a request for personal fields the catalogue does not hold is answered from the catalogue: naming the
-        # columns that do not exist beats letting the answer model narrate an internal failure as the cause
-        from agents.privacy import personal_field_limitation
-
-        limitation = personal_field_limitation(message)
-        if limitation:
-            early_reply = limitation.text
+        scope_decision = GuardrailManager.inspect_scope_and_dump(message)
+        if not scope_decision.allowed and scope_decision.violation == answer_status.SCOPE_REFUSED:
+            early_reply = answer_status.LIMITATION_TEXT[answer_status.SCOPE_REFUSED]
             early_meta = {
-                "privacy": limitation.to_dict(),
-                "answer_status": answer_status.REFUSED_PII,
-                "outcome": answer_status.outcome(answer_status.REFUSED_PII),
+                "guardrail": scope_decision.to_dict(),
+                "answer_status": answer_status.SCOPE_REFUSED,
+                "outcome": answer_status.outcome(answer_status.SCOPE_REFUSED),
+                "clarification": {
+                    "code": answer_status.SCOPE_REFUSED,
+                    "places": [],
+                    "candidates": ["census tract", "city", "county", "metro area"],
+                },
             }
+        elif not scope_decision.allowed and scope_decision.violation == answer_status.LIMIT_EXCEEDED:
+            early_reply = answer_status.LIMITATION_TEXT[answer_status.LIMIT_EXCEEDED]
+            early_meta = {
+                "guardrail": scope_decision.to_dict(),
+                "answer_status": answer_status.LIMIT_EXCEEDED,
+                "outcome": answer_status.outcome(answer_status.LIMIT_EXCEEDED),
+            }
+        else:
+            # a request for personal fields the catalogue does not hold is answered from the catalogue: naming the
+            # columns that do not exist beats letting the answer model narrate an internal failure as the cause
+            from agents.privacy import personal_field_limitation
+
+            limitation = personal_field_limitation(message)
+            if limitation:
+                early_reply = limitation.text
+                early_meta = {
+                    "privacy": limitation.to_dict(),
+                    "answer_status": answer_status.REFUSED_PII,
+                    "outcome": answer_status.outcome(answer_status.REFUSED_PII),
+                }
 
     if early_reply:
+        token_usage = current_usage_snapshot()
         updated_history = list(history or []) + [
             {"role": "user", "content": message},
             {
@@ -745,6 +891,7 @@ def run_general_chat(
             started_at=started_at,
             tool_call_count=0,
         )
+        exit_usage_scope(usage_token)
         if include_metadata:
             return (
                 early_reply,
@@ -753,6 +900,7 @@ def run_general_chat(
                 {
                     "trace_id": trace_id,
                     "trace_url": trace_url,
+                    "token_usage": token_usage,
                     **early_meta,
                 },
             )
@@ -889,8 +1037,7 @@ def run_general_chat(
                 (
                     facts["status"]
                     for _, result in reversed(all_calls)
-                    if (facts := tool_result.facts(result))
-                    and facts.get("status") not in (None, answer_status.OK)
+                    if (facts := tool_result.facts(result)) and facts.get("status") not in (None, answer_status.OK)
                 ),
                 None,
             )
@@ -926,7 +1073,8 @@ def run_general_chat(
                 *all_tool_messages,
                 AIMessage(content=raw_reply),
             ]
-            reply = validate_response(raw_reply, all_messages, strict=True, tool_results=all_calls)
+            artifacts = collect_artifacts()
+            reply = validate_response(raw_reply, all_messages, strict=True, tool_results=all_calls, artifacts=artifacts)
 
         if tracker:
             tracker.set_result_running()
@@ -942,6 +1090,7 @@ def run_general_chat(
         ]
 
         artifacts = collect_artifacts()
+        token_usage = current_usage_snapshot()
 
         end_general_chat(
             root_span,
@@ -950,6 +1099,7 @@ def run_general_chat(
             reply=reply,
             started_at=started_at,
             tool_call_count=len(all_calls),
+            token_usage=token_usage,
         )
         record_general_chat_success(
             latency_seconds=perf_counter() - started_at,
@@ -958,6 +1108,7 @@ def run_general_chat(
             reply_chars=len(reply),
             validation_changed=(reply != raw_reply),
         )
+        exit_usage_scope(usage_token)
 
         if include_metadata:
             return (
@@ -974,10 +1125,12 @@ def run_general_chat(
                     "outcome": answer_status.outcome(ask.code if ask else evidence_status),
                     "tool_outcomes": [facts for _, result in all_calls if (facts := tool_result.facts(result))],
                     "clarification": ask.to_dict() if ask else None,
+                    "token_usage": token_usage,
                 },
             )
         return reply, updated_history
     except Exception as exc:
+        token_usage = current_usage_snapshot()
         mark_span_error(root_span, exc)
         end_general_chat(
             root_span,
@@ -986,7 +1139,9 @@ def run_general_chat(
             reply=None,
             started_at=started_at,
             tool_call_count=len(all_calls),
+            token_usage=token_usage,
             error=exc,
         )
         record_general_chat_error(perf_counter() - started_at)
+        exit_usage_scope(usage_token)
         raise
