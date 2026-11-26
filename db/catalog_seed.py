@@ -444,8 +444,12 @@ TABLES = {
         grain="one row per transit route-ZCTA overlap",
         domain="mobility",
         column_notes=(
-            ColumnNote("route_uid", "Transit route shape feature that overlaps the ZCTA; joins transit_routes.route_uid."),
-            ColumnNote("zcta5", "Census ZCTA5 code; joins zcta_boundaries.zcta5. A ZCTA approximates a ZIP service area."),
+            ColumnNote(
+                "route_uid", "Transit route shape feature that overlaps the ZCTA; joins transit_routes.route_uid."
+            ),
+            ColumnNote(
+                "zcta5", "Census ZCTA5 code; joins zcta_boundaries.zcta5. A ZCTA approximates a ZIP service area."
+            ),
             ColumnNote("overlap_m", "Length in metres of the route inside the ZCTA, measured in EPSG:5070."),
             ColumnNote(
                 "route_fraction",
@@ -460,7 +464,9 @@ TABLES = {
         grain="one row per transit route-Census Place overlap",
         domain="mobility",
         column_notes=(
-            ColumnNote("route_uid", "Transit route shape feature that overlaps the Place; joins transit_routes.route_uid."),
+            ColumnNote(
+                "route_uid", "Transit route shape feature that overlaps the Place; joins transit_routes.route_uid."
+            ),
             ColumnNote("place_geoid", "Census Place GEOID; joins place_boundaries.place_geoid."),
             ColumnNote("overlap_m", "Length in metres of the route inside the Place, measured in EPSG:5070."),
             ColumnNote(
@@ -938,7 +944,16 @@ SEMANTIC_GLOSSARY = {
         columns=("houses.house_id", "houses.city"),
         operations=(
             COUNT("houses.house_id"),
-            {"op": "distinct", "aliases": ["which cities", "cities", "list of cities"], "expr": "houses.city"},
+            {
+                "op": "distinct",
+                "aliases": ["which cities", "cities", "list of cities", "which metros", "which markets", "which areas"],
+                "expr": "houses.city",
+            },
+            _op(
+                "lookup",
+                ["what houses", "what homes", "which houses do i have", "what houses do i have"],
+                "houses.address, houses.city, houses.state, houses.price, houses.status",
+            ),
         ),
         grain="house",
         groupings=("houses.city",),
@@ -1260,13 +1275,13 @@ SEMANTIC_GLOSSARY.update(
         "sold_price": _concept(
             "sold_price",
             ["sold_homes"],
-            ["sold price", "sale price", "sales price", "sold-home records", "sold home records"],
+            ["sold price", "sold prices", "sale price", "sales price", "sold-home records", "sold home records"],
             "Recorded sold-home transaction price.",
             columns=("sold_homes.sold_price",),
             operations=(
                 AVG("sold_homes.sold_price"),
                 MAX("sold_homes.sold_price"),
-                RANK_DESC("sold_homes.sold_price", group_by="sold_homes.city"),
+                RANK_DESC("AVG(sold_homes.sold_price)", group_by="sold_homes.city"),
             ),
             filters=(
                 "(sold_homes.is_arms_length IS NULL OR sold_homes.is_arms_length = TRUE)",
@@ -1340,7 +1355,12 @@ SEMANTIC_GLOSSARY.update(
         "zhvi_neighborhood": _concept(
             "zhvi_neighborhood",
             ["zhvi"],
-            ["neighborhood home value", "home value by neighborhood", "neighborhood-level home value", "neighborhood home values"],
+            [
+                "neighborhood home value",
+                "home value by neighborhood",
+                "neighborhood-level home value",
+                "neighborhood home values",
+            ],
             "ZHVI at neighborhood level — Zillow's neighborhood geography, reached by neighborhood name (zhvi.region_name where region_type = 'neighborhood'). No house column holds a neighborhood name (measured: houses.zip = a neighborhood region_name matches 0 rows), so this level is answered on its own, without a houses join.",
             columns=("zhvi.home_value",),
             operations=(
@@ -1523,6 +1543,21 @@ SEMANTIC_GLOSSARY.update(
             ),
             grain="route",
         ),
+        "transit_agencies": _concept(
+            "transit_agencies",
+            ["transit_agencies"],
+            ["transit agencies", "public transit agencies", "transit operators", "ntd agencies"],
+            "Federal Transit Administration (FTA) NTD transit agencies. Because transit_agencies has one row per "
+            "agency, mode, and type of service, use COUNT(DISTINCT transit_agencies.ntd_id) for agency counts.",
+            columns=("transit_agencies.ntd_id", "transit_agencies.agency"),
+            operations=(
+                COUNT("DISTINCT transit_agencies.ntd_id"),
+                _op("distinct", ["which transit agencies", "list of transit agencies"], "transit_agencies.agency"),
+            ),
+            grain="agency-mode-service",
+            groupings=("transit_agencies.agency",),
+            default_operation="count",
+        ),
         "transit_route_agencies": _concept(
             "transit_route_agencies",
             ["transit_route_agencies"],
@@ -1615,7 +1650,12 @@ SEMANTIC_GLOSSARY.update(
             operations=(
                 {
                     "op": "count",
-                    "aliases": ["how many transit routes", "number of transit routes", "how many bus routes", "route count"],
+                    "aliases": [
+                        "how many transit routes",
+                        "number of transit routes",
+                        "how many bus routes",
+                        "route count",
+                    ],
                     "expr": "DISTINCT transit_route_zctas.route_uid",
                 },
             ),
@@ -1666,7 +1706,12 @@ SEMANTIC_GLOSSARY.update(
             operations=(
                 {
                     "op": "count",
-                    "aliases": ["how many transit routes", "number of transit routes", "how many bus routes", "route count"],
+                    "aliases": [
+                        "how many transit routes",
+                        "number of transit routes",
+                        "how many bus routes",
+                        "route count",
+                    ],
                     "expr": "DISTINCT transit_route_places.route_uid",
                 },
             ),
@@ -3005,6 +3050,197 @@ COLUMN_NOTES: dict[str, dict[str, str]] = {
 }
 
 
+PROVENANCE_SPECS: dict[str, dict[str, object]] = {
+    "houses": {
+        "source_key": "redfin",
+        "source_citation": "Redfin Favorites CSV export (redfin.com)",
+        "vintage": "Live listing export",
+        "licence": "Personal export (non-redistribution)",
+        "freshness_sla_days": 7,
+    },
+    "house_snapshots": {
+        "source_key": "redfin",
+        "source_citation": "Redfin / Sold Home historical import snapshots",
+        "vintage": "Point-in-time snapshot series",
+        "licence": "Personal/local archive",
+        "freshness_sla_days": 7,
+    },
+    "house_commute": {
+        "source_key": "derived",
+        "source_citation": "Local routing engines (OSRM / Valhalla / OpenTripPlanner)",
+        "vintage": "Computed per work location",
+        "licence": "Derived local routing output",
+        "freshness_sla_days": 30,
+    },
+    "nri_tracts": {
+        "source_key": "nri",
+        "source_citation": "FEMA National Risk Index (hazards.fema.gov/nri)",
+        "vintage": "NRI v1.20 (2023+ release)",
+        "licence": "Public Domain (US Federal Government)",
+        "freshness_sla_days": 365,
+    },
+    "census_tracts": {
+        "source_key": "census_tracts",
+        "source_citation": "US Census Bureau Decennial PL 94-171 (data.census.gov)",
+        "vintage": "2020 Decennial Census",
+        "licence": "Public Domain (US Federal Government)",
+        "freshness_sla_days": 365,
+    },
+    "census_msa": {
+        "source_key": "census_msa",
+        "source_citation": "US Census Bureau Decennial PL 94-171 (data.census.gov)",
+        "vintage": "2020 Decennial Census",
+        "licence": "Public Domain (US Federal Government)",
+        "freshness_sla_days": 365,
+    },
+    "cbsa_counties": {
+        "source_key": "cbsa",
+        "source_citation": "US Census Bureau / OMB CBSA Delineation Crosswalk",
+        "vintage": "2023 OMB Delineation",
+        "licence": "Public Domain (US Federal Government)",
+        "freshness_sla_days": 365,
+    },
+    "zcta_boundaries": {
+        "source_key": "tiger_zcta",
+        "source_citation": "US Census Bureau TIGER/Line ZCTA5 Boundaries",
+        "vintage": "2026 TIGER/Line",
+        "licence": "Public Domain (US Federal Government)",
+        "freshness_sla_days": 365,
+    },
+    "place_boundaries": {
+        "source_key": "tiger_places",
+        "source_citation": "US Census Bureau Cartographic/TIGER Place Boundaries",
+        "vintage": "2025 TIGER Cartographic",
+        "licence": "Public Domain (US Federal Government)",
+        "freshness_sla_days": 365,
+    },
+    "sold_homes": {
+        "source_key": "sold",
+        "source_citation": "WPRDC / County Assessor Real Estate Sales",
+        "vintage": "County recorded transactions",
+        "licence": "Open Data (County / WPRDC)",
+        "freshness_sla_days": 30,
+    },
+    "crime_incidents": {
+        "source_key": "crime_pittsburgh",
+        "source_citation": "Municipal Open-Data Crime Incident Feeds (WPRDC / city portals)",
+        "vintage": "Multi-year incident feed",
+        "licence": "Municipal Open Data",
+        "freshness_sla_days": 30,
+    },
+    "crime_city_year": {
+        "source_key": "crime_pittsburgh",
+        "source_citation": "Aggregated city-year crime summary derived from crime_incidents",
+        "vintage": "Derived from crime_incidents",
+        "licence": "Municipal Open Data",
+        "freshness_sla_days": 30,
+    },
+    "bike_routes": {
+        "source_key": "bike",
+        "source_citation": "BikePGH / Municipal Bike Infrastructure Map (WPRDC)",
+        "vintage": "Published GIS release",
+        "licence": "Open Data (BikePGH / WPRDC)",
+        "freshness_sla_days": 180,
+    },
+    "bike_route_tracts": {
+        "source_key": "bike",
+        "source_citation": "Spatial overlay of bike_routes x Census Tracts",
+        "vintage": "Derived spatial bridge",
+        "licence": "Open Data / Public Domain",
+        "freshness_sla_days": 180,
+    },
+    "bike_route_zctas": {
+        "source_key": "bike",
+        "source_citation": "Spatial overlay of bike_routes x Census ZCTAs",
+        "vintage": "Derived spatial bridge",
+        "licence": "Open Data / Public Domain",
+        "freshness_sla_days": 180,
+    },
+    "bike_route_places": {
+        "source_key": "bike",
+        "source_citation": "Spatial overlay of bike_routes x Census Places",
+        "vintage": "Derived spatial bridge",
+        "licence": "Open Data / Public Domain",
+        "freshness_sla_days": 180,
+    },
+    "zhvi": {
+        "source_key": "zhvi",
+        "source_citation": "Zillow Research Home Value Index (zillow.com/research/data)",
+        "vintage": "Monthly smoothed ZHVI series",
+        "licence": "Zillow Research Public Data Terms",
+        "freshness_sla_days": 45,
+    },
+    "market_heat_index": {
+        "source_key": "market_heat_index",
+        "source_citation": "Zillow Research Market Heat Index (zillow.com/research/data)",
+        "vintage": "Monthly heat index series",
+        "licence": "Zillow Research Public Data Terms",
+        "freshness_sla_days": 45,
+    },
+    "transit_agencies": {
+        "source_key": "fta_ridership",
+        "source_citation": "USDOT / FTA National Transit Database (NTD)",
+        "vintage": "NTD annual/monthly reporting",
+        "licence": "Public Domain (US Federal Government)",
+        "freshness_sla_days": 90,
+    },
+    "transit_ridership": {
+        "source_key": "fta_ridership",
+        "source_citation": "USDOT / FTA NTD Monthly Unlinked Passenger Trips (UPT)",
+        "vintage": "2002-2026 NTD monthly series",
+        "licence": "Public Domain (US Federal Government)",
+        "freshness_sla_days": 45,
+    },
+    "transit_safety": {
+        "source_key": "fta_safety",
+        "source_citation": "USDOT / FTA NTD Safety & Security (S&S) Time Series",
+        "vintage": "NTD Safety & Security annual/monthly",
+        "licence": "Public Domain (US Federal Government)",
+        "freshness_sla_days": 90,
+    },
+    "transit_routes": {
+        "source_key": "fta_routes",
+        "source_citation": "USDOT BTS National Transit Map GTFS Routes",
+        "vintage": "Latest NTM release",
+        "licence": "Public Domain (US Federal Government)",
+        "freshness_sla_days": 90,
+    },
+    "transit_route_agencies": {
+        "source_key": "fta_routes",
+        "source_citation": "BTS National Transit Map Route-to-NTD Agency Bridge",
+        "vintage": "Derived from transit_routes",
+        "licence": "Public Domain (US Federal Government)",
+        "freshness_sla_days": 90,
+    },
+    "transit_route_zctas": {
+        "source_key": "fta_routes",
+        "source_citation": "Spatial overlay of transit_routes x Census ZCTAs",
+        "vintage": "Derived spatial bridge",
+        "licence": "Public Domain (US Federal Government)",
+        "freshness_sla_days": 90,
+    },
+    "transit_route_places": {
+        "source_key": "fta_routes",
+        "source_citation": "Spatial overlay of transit_routes x Census Places",
+        "vintage": "Derived spatial bridge",
+        "licence": "Public Domain (US Federal Government)",
+        "freshness_sla_days": 90,
+    },
+    "geocode_cache": {
+        "source_key": "internal",
+        "source_citation": "Census/Nominatim geocoding cache",
+        "vintage": "Internal cache",
+        "licence": "Internal system table",
+    },
+    "data_source_log": {
+        "source_key": "internal",
+        "source_citation": "Application refresh audit log",
+        "vintage": "Runtime audit log",
+        "licence": "Internal system table",
+    },
+}
+
+
 def _with_column_metadata(name: str, meta: TableMeta) -> TableMeta:
     """Merge the role/unit vocabulary and the added notes into one table's column notes.
 
@@ -3015,20 +3251,28 @@ def _with_column_metadata(name: str, meta: TableMeta) -> TableMeta:
     merged = {note.column: note for note in meta.column_notes}
     for column, text in COLUMN_NOTES.get(name, {}).items():
         current = merged.get(column)
-        merged[column] = (
-            ColumnNote(column, text) if current is None else replace(current, note=current.note or text)
-        )
+        merged[column] = ColumnNote(column, text) if current is None else replace(current, note=current.note or text)
     for ref, (role, unit) in COLUMN_ROLES.items():
         table, _, column = ref.partition(".")
         if table != name:
             continue
         current = merged.get(column)
         merged[column] = (
-            ColumnNote(column, "", role=role, unit=unit)
-            if current is None
-            else replace(current, role=role, unit=unit)
+            ColumnNote(column, "", role=role, unit=unit) if current is None else replace(current, role=role, unit=unit)
         )
-    return replace(meta, column_notes=tuple(merged.values()))
+    prov = PROVENANCE_SPECS.get(name, {})
+    return replace(
+        meta,
+        column_notes=tuple(merged.values()),
+        source_key=str(meta.source_key or prov.get("source_key", "")),
+        source_citation=str(meta.source_citation or prov.get("source_citation", "")),
+        vintage=str(meta.vintage or prov.get("vintage", "")),
+        as_of_date=str(meta.as_of_date or prov.get("as_of_date", "")),
+        licence=str(meta.licence or prov.get("licence", "")),
+        freshness_sla_days=meta.freshness_sla_days
+        if meta.freshness_sla_days is not None
+        else prov.get("freshness_sla_days"),  # type: ignore[arg-type]
+    )
 
 
 TABLES = {name: _with_column_metadata(name, meta) for name, meta in TABLES.items()}

@@ -33,6 +33,12 @@ class TableMeta:
     domain: str = ""  # housing | geography | risk | sales | safety | mobility | ...
     origin: str = "builtin"  # provenance only: builtin | upload | manual
     dataset_id: str = ""
+    source_key: str = ""
+    source_citation: str = ""
+    vintage: str = ""
+    as_of_date: str = ""
+    licence: str = ""
+    freshness_sla_days: int | None = None
 
 
 @dataclass(frozen=True)
@@ -201,7 +207,18 @@ MIN = lambda expr, **kw: _op("min", ["lowest", "minimum", "min", "worst"], expr,
 MAX = lambda expr, **kw: _op("max", ["highest", "maximum", "max", "best"], expr, **kw)
 RANK_DESC = lambda expr, **kw: _op(
     "rank",
-    ["rank", "ranking", "highest to lowest", "from highest to lowest", "largest", "highest"],
+    [
+        "rank",
+        "ranking",
+        "order",
+        "priciest",
+        "from the priciest",
+        "most expensive",
+        "highest to lowest",
+        "from highest to lowest",
+        "largest",
+        "highest",
+    ],
     expr,
     direction="DESC",
     **kw,

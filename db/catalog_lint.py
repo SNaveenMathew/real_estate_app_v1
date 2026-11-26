@@ -210,7 +210,12 @@ def lint_catalog(include_info: bool = True) -> list[Issue]:
         joins = item.get("join")
         if joins is not None:
             if not isinstance(joins, list) or not all(isinstance(x, str) for x in joins):
-                add("error", "bad_knob", key, "join must be a list of relationship keys like houses.zip=zhvi.region_name")
+                add(
+                    "error",
+                    "bad_knob",
+                    key,
+                    "join must be a list of relationship keys like houses.zip=zhvi.region_name",
+                )
             else:
                 for join_key in joins:
                     tables_in_edge = join_edges.get(join_key)
@@ -409,6 +414,19 @@ def lint_catalog(include_info: bool = True) -> list[Issue]:
                 "relationship_dropped",
                 r["rel_key"],
                 "an endpoint table is not active, so the relationship is ignored",
+            )
+
+    for r in data["tables"]:
+        if not r.get("agent_visible"):
+            continue
+        tname = r["name"]
+        missing_prov = [f for f in ("source_citation", "vintage", "licence") if not str(r.get(f) or "").strip()]
+        if missing_prov:
+            add(
+                "error" if _is_builtin(r) else "warning",
+                "missing_provenance",
+                tname,
+                f"agent-visible table is missing required provenance fields: {', '.join(missing_prov)}",
             )
 
     return [i for i in issues if include_info or i.severity != "info"]

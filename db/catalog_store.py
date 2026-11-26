@@ -43,6 +43,8 @@ _DDL = [
         name VARCHAR PRIMARY KEY, description VARCHAR, setup_hint VARCHAR, filter_hint VARCHAR,
         grain VARCHAR, default_filter VARCHAR, hidden_columns VARCHAR,
         agent_visible BOOLEAN DEFAULT TRUE, domain VARCHAR, origin VARCHAR, dataset_id VARCHAR,
+        source_key VARCHAR DEFAULT '', source_citation VARCHAR DEFAULT '', vintage VARCHAR DEFAULT '',
+        as_of_date VARCHAR DEFAULT '', licence VARCHAR DEFAULT '', freshness_sla_days INTEGER,
         status VARCHAR DEFAULT 'active', ord INTEGER, seed_hash VARCHAR,
         user_modified BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""",
@@ -101,6 +103,18 @@ def ensure_tables(conn) -> None:
         conn.execute("ALTER TABLE catalog_relationships ADD COLUMN IF NOT EXISTS scope_json VARCHAR")
     except Exception:
         pass
+    for stmt in (
+        "ALTER TABLE catalog_tables ADD COLUMN IF NOT EXISTS source_key VARCHAR DEFAULT ''",
+        "ALTER TABLE catalog_tables ADD COLUMN IF NOT EXISTS source_citation VARCHAR DEFAULT ''",
+        "ALTER TABLE catalog_tables ADD COLUMN IF NOT EXISTS vintage VARCHAR DEFAULT ''",
+        "ALTER TABLE catalog_tables ADD COLUMN IF NOT EXISTS as_of_date VARCHAR DEFAULT ''",
+        "ALTER TABLE catalog_tables ADD COLUMN IF NOT EXISTS licence VARCHAR DEFAULT ''",
+        "ALTER TABLE catalog_tables ADD COLUMN IF NOT EXISTS freshness_sla_days INTEGER",
+    ):
+        try:
+            conn.execute(stmt)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +223,12 @@ def _table_row(
         "domain": domain or meta.domain or "other",
         "origin": origin,
         "dataset_id": dataset_id or "",
+        "source_key": meta.source_key or "",
+        "source_citation": meta.source_citation or "",
+        "vintage": meta.vintage or "",
+        "as_of_date": meta.as_of_date or "",
+        "licence": meta.licence or "",
+        "freshness_sla_days": meta.freshness_sla_days,
         "status": status,
         "ord": ord_,
     }

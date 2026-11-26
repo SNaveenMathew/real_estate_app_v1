@@ -179,6 +179,12 @@ def reload() -> str:
                 domain=r.get("domain") or "other",
                 origin=r.get("origin") or "builtin",
                 dataset_id=r.get("dataset_id") or "",
+                source_key=r.get("source_key") or "",
+                source_citation=r.get("source_citation") or "",
+                vintage=r.get("vintage") or "",
+                as_of_date=r.get("as_of_date") or "",
+                licence=r.get("licence") or "",
+                freshness_sla_days=r.get("freshness_sla_days"),
             )
 
         rels = [
@@ -651,8 +657,57 @@ def forcing_concepts(keys):
         _FORCED_CONCEPTS.reset(token)
 
 
+_PROTECTED_TYPO_WORDS = frozenset(
+    """
+    which where about under above other these those their there could would should being having every
+    first order market metro metros dataset available using across between before after during inside
+    outside through loaded saved recorded nearby recent cities states county tracts areas biggest
+    cheapest priciest weather people living reside within miles square atlantis
+    """.split()
+)
+_TYPO_VOCAB_CACHE: tuple[tuple[int, int, str, int], frozenset[str]] | None = None
+
+
+def _typo_vocabulary() -> frozenset[str]:
+    """Cached vocabulary of domain concept tokens (>=5 chars) + live entity place tokens."""
+    global _TYPO_VOCAB_CACHE
+    glossary = _glossary()
+    domains = _entity_domains()
+    sig = (len(glossary), len(domains), catalog_version(), int(store.connection_generation()))
+    if _TYPO_VOCAB_CACHE is not None and _TYPO_VOCAB_CACHE[0] == sig:
+        return _TYPO_VOCAB_CACHE[1]
+    words: set[str] = set()
+    for item in glossary.values():
+        for alias in item.get("aliases", ()):
+            words.update(w for w in _normalize(alias).split() if len(w) >= 5)
+        for term_list in (item.get("required_terms", ()), item.get("excluded_terms", ())):
+            for term in term_list:
+                words.update(w for w in _normalize(term).split() if len(w) >= 5)
+        for op in item.get("operations", ()):
+            for alias in op.get("aliases", ()):
+                words.update(w for w in _normalize(alias).split() if len(w) >= 5)
+    # Include live entity words for city/MSA/county names (avoid multi-million/huge boundary scans).
+    for d in domains:
+        if d.match_mode == "exact" or d.table in {"zcta_boundaries", "place_boundaries"}:
+            continue
+        for val in _fetch_values(d.table, d.column, limit=1000):
+            prefix = val.split(",", 1)[0]
+            words.update(w for w in _normalize(prefix).split() if len(w) >= 5)
+    vocab = frozenset(words)
+    _TYPO_VOCAB_CACHE = (sig, vocab)
+    return vocab
+
+
+def normalize_query_typos(query: str) -> tuple[str, bool]:
+    """Return ``(normalized_text, changed)`` with bounded single-edit typo recovery on unknown words."""
+    vocab = _typo_vocabulary()
+    return text_match.repair_typos(query, vocab, protected=_PROTECTED_TYPO_WORDS)
+
+
 def semantic_matches(query: str) -> list[dict]:
-    text = _normalize(query)
+    repaired_text, repaired = normalize_query_typos(query)
+    text = repaired_text if repaired else _normalize(query)
+    entity_query = repaired_text if repaired else query
     hits = []
     entity_checks: dict[tuple, bool] = {}  # one lookup per distinct requirement per call
     for key, item in _glossary().items():
@@ -674,7 +729,7 @@ def semantic_matches(query: str) -> list[dict]:
         if needs:
             needs_key = tuple(sorted(needs))
             if needs_key not in entity_checks:
-                entity_checks[needs_key] = request_has_entity(query, needs)
+                entity_checks[needs_key] = request_has_entity(entity_query, needs)
             if not entity_checks[needs_key]:
                 continue
         specificity = max(m[0] for m in matches)
@@ -793,9 +848,7 @@ def _value_exists(table: str, column: str, value: str) -> bool:
     if not re.match(r"^[A-Za-z_]\w*$", table) or not re.match(r"^[A-Za-z_]\w*$", column):
         return False
     try:
-        return not store.query(
-            f"SELECT 1 FROM {table} WHERE {column} = ? LIMIT 1", [value]
-        ).empty
+        return not store.query(f"SELECT 1 FROM {table} WHERE {column} = ? LIMIT 1", [value]).empty
     except Exception:
         return False
 
@@ -948,7 +1001,9 @@ def recognized_entities(query: str, entity_types=None) -> list[dict]:
 
 
 def resolve_request_entities(query: str, candidate_tables: set[str] | None = None) -> list[dict]:
-    t = _normalize(query)
+    repaired_text, repaired = normalize_query_typos(query)
+    t = repaired_text if repaired else _normalize(query)
+    component_query = repaired_text if repaired else query
     domains = [d for d in _entity_domains() if not candidate_tables or d.table in candidate_tables]
     results = _literal_tract_entities(domains, query)
     # Prefer MSA domain when the request contains MSA/metro language or an MSA concept matched.
@@ -968,7 +1023,7 @@ def resolve_request_entities(query: str, candidate_tables: set[str] | None = Non
             continue
         values = _fetch_values(d.table, d.column)
         if d.match_mode == "components" and d.entity_type in active_types:
-            results.extend(_component_entities(d, values, query))
+            results.extend(_component_entities(d, values, component_query))
         else:
             results.extend(_value_entities(d, values, t, msa_context))
     # Keep the best domain for each normalized value/entity type.
@@ -1168,7 +1223,44 @@ def build_query_context(request: str, requirements: str = "", plan: str = "", fo
         parts.append("RESOLVED LIVE ENTITY VALUES")
         for e in resolved[:20]:
             parts.append(f"- {e['entity_type']}: {e['table']}.{e['column']} = {e['value']}")
+    prov_lines = []
+    for table in sorted(target_tables):
+        meta = _tables().get(table)
+        if meta and (meta.source_citation or meta.vintage or meta.licence):
+            prov_lines.append(
+                f"- {table}: source={meta.source_citation or 'unspecified'}; "
+                f"vintage={meta.vintage or 'unspecified'}; licence={meta.licence or 'unspecified'}"
+            )
+    if prov_lines:
+        parts.append("DATA PROVENANCE")
+        parts.extend(prov_lines)
     return "\n".join(parts)
+
+
+def table_provenance(table: str) -> dict[str, Any]:
+    """Return canonical provenance metadata for ``table`` (plus last refresh timestamp when recorded)."""
+    meta = _tables().get(table)
+    if not meta:
+        return {}
+    out: dict[str, Any] = {
+        "source_key": meta.source_key,
+        "source_citation": meta.source_citation,
+        "vintage": meta.vintage,
+        "as_of_date": meta.as_of_date,
+        "licence": meta.licence,
+        "freshness_sla_days": meta.freshness_sla_days,
+    }
+    if meta.source_key:
+        try:
+            df = store.query(
+                "SELECT last_loaded_at FROM data_source_log WHERE source_key = ? LIMIT 1",
+                [meta.source_key],
+            )
+            if not df.empty and df.iloc[0]["last_loaded_at"] is not None:
+                out["last_loaded_at"] = str(df.iloc[0]["last_loaded_at"])
+        except Exception:
+            pass
+    return out
 
 
 def render_schema_for_agent() -> str:

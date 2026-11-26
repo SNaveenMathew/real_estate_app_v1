@@ -72,6 +72,7 @@ DETAIL_LEVELS = ("overview", "standard", "full")
 PREDICATES: dict[str, str] = {
     "in_domain": "belongs to subject area",
     "in_dataset": "comes from dataset",
+    "has_source": "comes from external data source",
     "in_table": "is a column of",
     "uses_table": "reads table",
     "measures": "measures column",
@@ -90,8 +91,8 @@ PREDICATES: dict[str, str] = {
 # tables and the approved joins; "full" adds every column and the measure/identity relations.
 _DETAIL_KINDS: dict[str, frozenset[str]] = {
     "overview": frozenset({"domain", "dataset", "concept", "entity_type"}),
-    "standard": frozenset({"domain", "dataset", "concept", "entity_type", "table", "transform"}),
-    "full": frozenset({"domain", "dataset", "concept", "entity_type", "table", "column", "transform"}),
+    "standard": frozenset({"domain", "dataset", "concept", "entity_type", "table", "transform", "source"}),
+    "full": frozenset({"domain", "dataset", "concept", "entity_type", "table", "column", "transform", "source"}),
 }
 
 # Small LRU-ish cache.  Keyed by (catalog version, counts) so a catalog edit can never serve a
@@ -296,6 +297,10 @@ def _build(with_counts: bool) -> dict:
         )
 
     # ── tables ─────────────────────────────────────────────────────────────
+    # Collect (source, target, predicate, attrs) edges that require the source
+    # node to already exist; flushed after all nodes are created.
+    pending: list[tuple[str, str, str, dict]] = []
+
     def _row_count(name: str) -> int | None:
         try:
             row = conn.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()
@@ -306,6 +311,12 @@ def _build(with_counts: bool) -> dict:
     for name, r in table_rows.items():
         domain = table_domain[name]
         hidden_columns = _loads(r.get("hidden_columns"), []) or []
+        source_key = str(r.get("source_key") or "").strip()
+        source_citation = str(r.get("source_citation") or "").strip()
+        vintage = str(r.get("vintage") or "").strip()
+        as_of_date = str(r.get("as_of_date") or "").strip()
+        licence = str(r.get("licence") or "").strip()
+        freshness_sla = r.get("freshness_sla_days")
         add_class(
             {
                 "id": f"table:{name}",
@@ -323,8 +334,38 @@ def _build(with_counts: bool) -> dict:
                 "dataset_id": r.get("dataset_id") or "",
                 "agent_visible": bool(r.get("agent_visible")),
                 "rows": _row_count(name),
+                "source_key": source_key,
+                "source_citation": source_citation,
+                "vintage": vintage,
+                "as_of_date": as_of_date,
+                "licence": licence,
+                "freshness_sla_days": freshness_sla,
             }
         )
+        src_id_key = source_key or source_citation
+        if src_id_key:
+            src_node_id = f"source:{src_id_key}"
+            if src_node_id not in ids:
+                add_class(
+                    {
+                        "id": src_node_id,
+                        "kind": "source",
+                        "key": src_id_key,
+                        "label": source_citation or src_id_key,
+                        "description": f"Provenance source ({vintage or 'current'}; {licence or 'documented licence'}).",
+                        "source_key": source_key,
+                        "vintage": vintage,
+                        "licence": licence,
+                    }
+                )
+            pending.append(
+                (
+                    f"table:{name}",
+                    src_node_id,
+                    "has_source",
+                    {"key": f"{name}:{src_id_key}", "vintage": vintage, "licence": licence},
+                )
+            )
 
     # ── columns (data properties) ──────────────────────────────────────────
     notes: dict[str, dict[str, dict]] = {}
@@ -512,8 +553,6 @@ def _build(with_counts: bool) -> dict:
             entity_counts[entity_type] = total
 
     # ── relations ──────────────────────────────────────────────────────────
-    pending: list[tuple[str, str, str, dict]] = []
-
     def relate(source: str, target: str, predicate: str, **attrs) -> None:
         pending.append((source, target, predicate, attrs))
 
@@ -801,7 +840,8 @@ def _build(with_counts: bool) -> dict:
         {
             "relationship": edge["join_key"],
             "sides": [
-                side for side in ("left", "right")
+                side
+                for side in ("left", "right")
                 if (edge.get("transform") or {}).get(side, {}).get("kind") == "expression"
             ],
         }
@@ -962,6 +1002,11 @@ def as_jsonld(doc: dict | None = None) -> dict:
             "origin",
             "dataset_id",
             "tables",
+            "source_key",
+            "source_citation",
+            "vintage",
+            "as_of_date",
+            "licence",
             "needs_width",
             "widths",
             "sql_pattern",

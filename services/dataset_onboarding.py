@@ -938,6 +938,11 @@ def _publish_table(conn, ds: dict, prop: dict, note: str) -> None:
         domain=ds["domain"],
         origin="upload",
         dataset_id=ds["dataset_id"],
+        source_key="upload",
+        source_citation=str(ds.get("source_citation") or ds.get("source_filename") or "Uploaded dataset"),
+        vintage=str(ds.get("vintage") or "User upload"),
+        as_of_date=str(ds.get("as_of_date") or ""),
+        licence=str(ds.get("licence") or "User-provided dataset"),
     )
     notes = [
         {
@@ -1034,7 +1039,9 @@ def _approve_relationship(conn, ds: dict, prop: dict, note: str, edits: dict) ->
             "rule": derive.get("rule", ""),
         }
     if not isinstance(transform_meta, dict) and derive and isinstance(derive.get("transform"), dict):
-        transform_meta = tx.pair(derive["transform"], derive.get("from") or pl["left_expr"], tx.column_of(pl["right_expr"]))
+        transform_meta = tx.pair(
+            derive["transform"], derive.get("from") or pl["left_expr"], tx.column_of(pl["right_expr"])
+        )
     rel = Relationship(
         left_table=pl["left_table"],
         left_expr=pl["left_expr"],
@@ -1177,9 +1184,7 @@ def retest_transform(proposal_id: str, kind: str, width: int | None = None) -> d
 
     source = ds["staging_table"] or ds["table_name"]
     source_column = (
-        ev.get("source_column")
-        or (pl.get("derive") or {}).get("from")
-        or tx.column_of(pl.get("left_expr") or "")
+        ev.get("source_column") or (pl.get("derive") or {}).get("from") or tx.column_of(pl.get("left_expr") or "")
     )
     target_table = pl["right_table"]
     target_column = ev.get("target_column") or tx.column_of(pl.get("right_expr") or "")
@@ -1189,9 +1194,7 @@ def retest_transform(proposal_id: str, kind: str, width: int | None = None) -> d
         + [c["name"] for c in included if c.get("role") == "label" and c.get("key_kind") in ("city", "address")]
     )[:3]
     try:
-        result = disc.evaluate_selection(
-            conn, source, source_column, target_table, target_column, spec, ctx_cols
-        )
+        result = disc.evaluate_selection(conn, source, source_column, target_table, target_column, spec, ctx_cols)
     except ValueError as exc:
         raise OnboardingError(str(exc), 400) from exc
 
@@ -1199,7 +1202,9 @@ def retest_transform(proposal_id: str, kind: str, width: int | None = None) -> d
     card = disc.cardinality_of(st)
     score = disc.containment_score(st)
     ns = float(pl.get("name_score") or 0.0)
-    conf = "high" if score >= 0.9 and (st["matched_distinct"] >= 3 or ns >= 0.9) else ("medium" if score >= 0.6 else "low")
+    conf = (
+        "high" if score >= 0.9 and (st["matched_distinct"] >= 3 or ns >= 0.9) else ("medium" if score >= 0.6 else "low")
+    )
 
     current_derive = pl.get("derive") or {}
     # Reuse the proposal's own derived column while it is still only a proposal (so switching
