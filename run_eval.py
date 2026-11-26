@@ -6,39 +6,17 @@ Runs every example in eval/golden_set.py against the REAL agents
 (agents/general_agent.py, agents/house_agent.py) on a dedicated evaluation
 database (eval/fixtures.py), scores each one, and writes a report.
 
-Structured examples are scored by exact assert-equal logic (eval/scoring.py):
-ordered sequence comparison when order matters, set comparison otherwise.
-Free-text examples are scored by an LLM judge (eval/judge.py) against a
-rubric. See those modules' docstrings for how each works.
-
-Usage:
-    python run_eval.py                                  # full run
-    python run_eval.py --ids cities_with_houses,total_house_count
-    python run_eval.py --tags nri,sold_homes
-    python run_eval.py --skip-fixture-build             # reuse existing fixture DB
-    python run_eval.py --list                           # list examples, run nothing
-    python run_eval.py --skip-house-agent                # evaluate General Chat examples only
-    python run_eval.py --house-agent-only               # evaluate House Agent examples only
-    python run_eval.py --mock                           # smoke-test the harness only —
-                                                          # no model server needed, NOT a
-                                                          # real evaluation (see eval/judge.py)
-
-A run is only a gate if it covers the whole set. Unfiltered runs must execute every
-GOLDEN_SET example or exit 2; a filtered run (--ids/--tags/--*-agent-only) is reported as
-partial and also exits 2 unless --allow-partial is given, because a subset that passes
-says nothing about the examples it skipped. Every report records the command, the ids
-that actually ran, and the judge's model, so two reports can be compared honestly.
-
-Requires a reachable model server for a real run — set llama_server_base_url
-(the agent under test) and judge_llama_server_base_url (the judge; defaults
-to the same server/model, but an independent or stronger judge is stronger
-evidence) in .env. Exits non-zero if anything failed or errored, so this is
-safe to wire into CI.
+Supports both one-shot (`--phase all`, default) and separated two-pass runs so
+the agent server and independent judge never compete for 16 GB VRAM:
+    python run_eval.py --phase generate --run-id gemma-20261125
+    python run_eval.py --phase judge    --run-id gemma-20261125
 """
 
 import argparse
 import atexit
+import hashlib
 import json
+import subprocess
 import sys
 import time
 import traceback
@@ -48,22 +26,106 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config import settings
 from eval.fixtures import build_fixture
-from eval.golden_set import GOLDEN_SET, GoldenExample
-from eval.scoring import score_structured, ScoreResult
+from eval.golden_set import GOLDEN_SET, GoldenExample, get_example
+from eval.scoring import ScoreResult, score_structured
 from eval.judge import LLMJudge, MockJudge
 
 
-def run_example(example: GoldenExample, judge, mock: bool):
-    """Get the agent's reply, then dispatch to the right scorer."""
+def _git_sha() -> str:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(Path(__file__).parent),
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        return out.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _sha256_file(path: Path | None) -> str | None:
+    if path is None or not path.exists() or not path.is_file():
+        return None
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _jsonable_artifacts(artifacts) -> list[dict]:
+    if not artifacts:
+        return []
+    try:
+        raw = json.loads(json.dumps(list(artifacts), default=str))
+        return raw if isinstance(raw, list) else []
+    except Exception:
+        return []
+
+
+def _judge_with_artifacts(judge, example: GoldenExample, reply: str, artifacts: list[dict]) -> ScoreResult:
+    try:
+        return judge.judge(example, reply, artifacts=artifacts)
+    except TypeError:
+        return judge.judge(example, reply)
+
+
+def _export_example_trace(
+    ex: GoldenExample,
+    *,
+    trace_id: str | None,
+    trace_url: str | None,
+    traces_dir: Path,
+    metadata: dict,
+) -> tuple[str | None, str | None, int, str | None]:
+    """Export one trace into the run-scoped immutable directory and return (path, sha256, span_count, error)."""
+    trace_path = traces_dir / f"{ex.id}.json"
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if trace_id:
+            from observability import export_trace
+
+            payload = export_trace(
+                trace_id,
+                trace_path,
+                metadata={**metadata, "trace_url": trace_url},
+            )
+            span_count = int(payload.get("span_count", 0))
+        else:
+            payload = {
+                "trace_id": None,
+                "span_count": 0,
+                "metadata": {
+                    **metadata,
+                    "note": "No OpenTelemetry trace was emitted by this agent path.",
+                },
+                "spans": [],
+            }
+            trace_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            span_count = 0
+        return str(trace_path), _sha256_file(trace_path), span_count, None
+    except Exception as exc:
+        return None, None, 0, str(exc)
+
+
+def generate_example(example: GoldenExample, mock: bool, *, traces_dir: Path | None = None) -> dict:
+    """Execute one golden example through the real (or mock) agent and capture reply, artifacts, usage, and trace."""
+    t0 = time.time()
     trace_id = None
     trace_url = None
     metadata: dict = {}
+    artifacts: list[dict] = []
     asked = 0
     scripted_used = 0
     ended_with_question = False
+    reply = ""
+    gen_error: str | None = None
+    gen_traceback: str | None = None
+
     if not mock:
         try:
-            from observability import initialize_observability, clear_local_trace_capture
+            from observability import clear_local_trace_capture, initialize_observability
 
             initialize_observability()
             clear_local_trace_capture()
@@ -76,28 +138,25 @@ def run_example(example: GoldenExample, judge, mock: bool):
         try:
             reply = mock_reply(example)
         except Exception as e:
-            return ScoreResult(
-                example.id, "ERROR", "n/a", f"mock agent failed: {e}", extra={"traceback": traceback.format_exc()}
-            )
+            gen_error = f"mock agent failed: {e}"
+            gen_traceback = traceback.format_exc()
     else:
         try:
             if example.agent == "general":
                 from agents.general_agent import run_general_chat
 
-                # A turn may legitimately end in a QUESTION (agents/clarification.py).  If the example scripts the
+                # A turn may legitimately end in a QUESTION (agents/clarification.py). If the example scripts the
                 # user's reply, continue the conversation with it; otherwise the question is the result and is rated
-                # as such.  Each scripted reply is self-contained on purpose - planning is single-turn by design.
+                # as such. Each scripted reply is self-contained on purpose - planning is single-turn by design.
                 pending = list(example.clarifications)
                 turns = list(example.history)
                 question = example.question
                 while True:
-                    reply, _, _, metadata = run_general_chat(question, history=turns, include_metadata=True) or (
-                        "",
-                        [],
-                        [],
-                        {},
-                    )
+                    reply, _, turn_artifacts, metadata = run_general_chat(
+                        question, history=turns, include_metadata=True
+                    ) or ("", [], [], {})
                     metadata = metadata or {}
+                    artifacts = _jsonable_artifacts(turn_artifacts)
                     trace_id = metadata.get("trace_id") or trace_id
                     trace_url = metadata.get("trace_url") or trace_url
                     ended_with_question = bool(metadata.get("clarification"))
@@ -115,32 +174,104 @@ def run_example(example: GoldenExample, judge, mock: bool):
             else:
                 from agents.house_agent import run_house_chat
 
-                reply, _, _ = run_house_chat(example.house_id, example.question, history=list(example.history))
-                # run_house_chat emits spans but returns no metadata, so read the trace the local capture
-                # already holds; without this every house-agent example shipped an empty trace file.
-                try:
-                    from observability import latest_local_trace_id
+                out = run_house_chat(
+                    example.house_id,
+                    example.question,
+                    history=list(example.history),
+                    include_metadata=True,
+                )
+                if len(out) == 4:
+                    reply, _, turn_artifacts, metadata = out
+                else:
+                    reply, _, turn_artifacts = out
+                    metadata = {}
+                metadata = metadata or {}
+                artifacts = _jsonable_artifacts(turn_artifacts)
+                trace_id = metadata.get("trace_id")
+                trace_url = metadata.get("trace_url")
+                if not trace_id:
+                    try:
+                        from observability import latest_local_trace_id
 
-                    trace_id = latest_local_trace_id()
-                except Exception:
-                    trace_id = None
+                        trace_id = latest_local_trace_id()
+                    except Exception:
+                        trace_id = None
         except Exception as e:
-            trace_id = None
+            gen_error = f"agent call failed: {e}"
+            gen_traceback = traceback.format_exc()
             try:
                 from observability import latest_local_trace_id
 
                 trace_id = latest_local_trace_id()
             except Exception:
                 pass
-            extra = {"traceback": traceback.format_exc()}
-            if trace_id:
-                extra["trace_id"] = trace_id
-            return ScoreResult(example.id, "ERROR", "n/a", f"agent call failed: {e}", extra=extra)
 
-    # Scoring rule for the round trip: a scripted reply turns a question into an answer, which counts as a PASS but
-    # is reported as assisted, so a conversational pass is never confused with a single-shot one.  Asking when the
-    # example expects a question is the correct behaviour; answering without asking is not.
-    if example.expect_clarification and not asked:
+    dt = time.time() - t0
+    trace_file = None
+    trace_sha256 = None
+    span_count = 0
+    trace_export_error = None
+    if not mock and traces_dir is not None:
+        trace_file, trace_sha256, span_count, trace_export_error = _export_example_trace(
+            example,
+            trace_id=trace_id,
+            trace_url=trace_url,
+            traces_dir=traces_dir,
+            metadata={
+                "eval_id": example.id,
+                "agent": example.agent,
+                "answer_type": example.answer_type,
+                "tags": list(example.tags),
+                "question": example.question,
+                "reply": reply,
+                "answer_status": metadata.get("answer_status"),
+            },
+        )
+
+    return {
+        "id": example.id,
+        "agent": example.agent,
+        "answer_type": example.answer_type,
+        "tags": list(example.tags),
+        "question": example.question,
+        "reply": reply,
+        "artifacts": artifacts,
+        "clarification_rounds": scripted_used,
+        "assisted": scripted_used > 0,
+        "asked": asked,
+        "ended_with_question": ended_with_question,
+        "answer_status": metadata.get("answer_status"),
+        "token_usage": metadata.get("token_usage") or {},
+        "latency_s": round(dt, 3),
+        "trace_id": trace_id,
+        "trace_url": trace_url,
+        "trace_file": trace_file,
+        "trace_sha256": trace_sha256,
+        "span_count": span_count,
+        "trace_export_error": trace_export_error,
+        "error": gen_error,
+        "traceback": gen_traceback,
+    }
+
+
+def score_generation(example: GoldenExample, gen: dict, judge) -> ScoreResult:
+    """Grade a single captured generation record with either assert_equal or the JudgeBackend."""
+    reply = str(gen.get("reply") or "")
+    asked = int(gen.get("asked") or 0)
+    ended_with_question = bool(gen.get("ended_with_question"))
+    scripted_used = int(gen.get("clarification_rounds") or 0)
+    artifacts = list(gen.get("artifacts") or [])
+
+    if gen.get("error"):
+        result = ScoreResult(
+            example.id,
+            "ERROR",
+            "n/a",
+            str(gen["error"]),
+            reply,
+            extra={"traceback": gen.get("traceback")},
+        )
+    elif example.expect_clarification and not asked:
         result = ScoreResult(
             example.id,
             "FAIL",
@@ -159,16 +290,32 @@ def run_example(example: GoldenExample, judge, mock: bool):
     elif example.answer_type == "structured":
         result = score_structured(example, reply)
     else:
-        result = judge.judge(example, reply)
-    if ended_with_question and example.expect_clarification and not scripted_used:
+        result = _judge_with_artifacts(judge, example, reply, artifacts)
+
+    if ended_with_question and example.expect_clarification and not scripted_used and not gen.get("error"):
         result = ScoreResult(example.id, "PASS", "assert_equal", "asked the expected clarifying question", reply)
-    result.extra["clarification_rounds"] = scripted_used
-    result.extra["assisted"] = scripted_used > 0
-    result.extra["asked"] = asked
-    if trace_id:
-        result.extra["trace_id"] = trace_id
-        result.extra["trace_url"] = trace_url
+
+    result.extra.update(
+        {
+            "clarification_rounds": scripted_used,
+            "assisted": bool(gen.get("assisted")),
+            "asked": asked,
+            "artifacts": artifacts,
+            "answer_status": gen.get("answer_status"),
+            "token_usage": gen.get("token_usage") or {},
+            "latency_s": gen.get("latency_s", 0.0),
+        }
+    )
+    for k in ("trace_id", "trace_url", "trace_file", "trace_sha256", "trace_export_error"):
+        if gen.get(k) is not None:
+            result.extra[k] = gen[k]
     return result
+
+
+def run_example(example: GoldenExample, judge, mock: bool, *, traces_dir: Path | None = None):
+    """Run and grade one golden example synchronously."""
+    gen = generate_example(example, mock, traces_dir=traces_dir)
+    return score_generation(example, gen, judge)
 
 
 def _filter_examples(args) -> list[GoldenExample]:
@@ -184,6 +331,101 @@ def _filter_examples(args) -> list[GoldenExample]:
     if args.house_agent_only:
         examples = [e for e in examples if e.agent == "house"]
     return examples
+
+
+def _resolve_run_dir(run_id: str, run_dir_arg: str | None) -> Path:
+    if run_dir_arg:
+        return Path(run_dir_arg)
+    return settings.eval_runs_dir / run_id
+
+
+def _aggregate_token_usage(items: list[dict]) -> dict:
+    totals = {
+        "llm_calls": 0,
+        "cache_hits": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 0,
+        "llm_latency_seconds": 0.0,
+        "estimated_cost_usd": 0.0,
+    }
+    for item in items:
+        usage = item.get("token_usage") or {}
+        for k in ("llm_calls", "cache_hits", "prompt_tokens", "completion_tokens", "reasoning_tokens", "total_tokens"):
+            totals[k] += int(usage.get(k) or 0)
+        totals["llm_latency_seconds"] += float(usage.get("llm_latency_seconds") or 0.0)
+        totals["estimated_cost_usd"] += float(usage.get("estimated_cost_usd") or 0.0)
+    totals["llm_latency_seconds"] = round(totals["llm_latency_seconds"], 4)
+    totals["estimated_cost_usd"] = round(totals["estimated_cost_usd"], 6)
+    return totals
+
+
+def _write_manifest(
+    run_dir: Path,
+    meta: dict,
+    generations: list[dict],
+    results: list[tuple[GoldenExample, ScoreResult]] | None = None,
+) -> Path:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    result_by_id = {ex.id: r for ex, r in (results or [])}
+    entries: dict[str, dict] = {}
+    for g in generations:
+        ex_id = g["id"]
+        res = result_by_id.get(ex_id)
+        entry = {
+            "agent": g.get("agent"),
+            "answer_type": g.get("answer_type"),
+            "answer_status": g.get("answer_status"),
+            "latency_s": g.get("latency_s", 0.0),
+            "trace_id": g.get("trace_id"),
+            "trace_file": g.get("trace_file"),
+            "trace_sha256": g.get("trace_sha256"),
+            "span_count": g.get("span_count", 0),
+            "token_usage": g.get("token_usage") or {},
+        }
+        if res is not None:
+            entry["verdict"] = res.verdict
+            entry["method"] = res.method
+            entry["reason"] = res.reason
+        entries[ex_id] = entry
+
+    manifest = {
+        "run_id": meta.get("run_id"),
+        "phase": meta.get("phase"),
+        "git_sha": meta.get("git_sha") or _git_sha(),
+        "timestamp": meta.get("timestamp") or time.strftime("%Y%m%d-%H%M%S"),
+        "command": meta.get("command", ""),
+        "agent_model": meta.get("agent_model"),
+        "judge_model": meta.get("judge_model"),
+        "judge_independent": meta.get("judge_independent"),
+        "fixture_path": meta.get("fixture_path"),
+        "fixture_sha256": meta.get("fixture_sha256"),
+        "complete_coverage": meta.get("complete_coverage"),
+        "token_usage_totals": _aggregate_token_usage(generations),
+        "entries": entries,
+    }
+    manifest_path = run_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return manifest_path
+
+
+def _write_generations(run_dir: Path, generations: list[dict]) -> Path:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / "generations.jsonl"
+    lines = [json.dumps(g, ensure_ascii=False, default=str) for g in generations]
+    path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    return path
+
+
+def _load_generations(run_dir: Path) -> tuple[list[dict], dict]:
+    gen_path = run_dir / "generations.jsonl"
+    if not gen_path.exists():
+        raise FileNotFoundError(f"No generations.jsonl found in run directory: {run_dir}")
+    generations = [json.loads(line) for line in gen_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+    return generations, manifest
 
 
 def main():
@@ -231,31 +473,32 @@ def main():
         help="score the known-verdict calibration answers (eval/calibration.py) and exit; catches a "
         "scorer or judge that has drifted to always-pass. Add --mock for the deterministic half only.",
     )
+    parser.add_argument(
+        "--phase",
+        choices=("all", "generate", "judge"),
+        default="all",
+        help="run generation+scoring ('all', default), generation only ('generate'), or offline scoring ('judge').",
+    )
+    parser.add_argument("--run-id", help="run identifier for immutable run/trace storage (default: timestamp)")
+    parser.add_argument("--run-dir", help="explicit directory for run artifacts (defaults to eval/runs/<run-id>)")
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        metavar="K",
+        help="run each example K independent times (default: 1). Reports pass@1 (at least 1 of K "
+        "trials passed) and pass^K (all K trials passed). Semantic and prompt caches are disabled "
+        "between trials so each is an independent sample.",
+    )
     args = parser.parse_args()
 
-    examples = _filter_examples(args)
-    if not examples:
-        print("No golden examples matched the given filters.")
-        sys.exit(1)
-
-    if args.list:
-        for e in examples:
-            print(f"  {e.id:<40s} [{e.agent}] [{e.answer_type}] tags={list(e.tags)}")
-        return
-
-    if not args.skip_fixture_build:
-        print(f"Building evaluation fixture at {settings.eval_fixture_duckdb_path} ...")
-        build_fixture(settings.eval_fixture_duckdb_path)
-    settings.duckdb_path = settings.eval_fixture_duckdb_path
-
-    filtered = bool(args.ids or args.tags or args.skip_house_agent or args.house_agent_only)
-    covered_all = (not filtered) and len(examples) == len(GOLDEN_SET)
-
-    judge = MockJudge() if args.mock else LLMJudge()
-    if args.mock:
-        print("*** --mock: smoke-testing the harness only. This is NOT a real evaluation. ***")
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    run_id = args.run_id or (Path(args.run_dir).name if args.run_dir else ts)
+    run_dir = _resolve_run_dir(run_id, args.run_dir)
+    traces_dir = run_dir / "traces"
 
     if args.calibrate:
+        judge = MockJudge() if args.mock else LLMJudge()
         from eval import calibration
 
         rows, ok = calibration.run(judge=None if args.mock else judge)
@@ -269,16 +512,111 @@ def main():
         print(f"\n{len(rows) - len(bad)}/{len(rows)} calibration answers agreed with their known verdict")
         sys.exit(0 if ok else 2)
 
-    judge_model = getattr(judge, "model", None)
-    if not args.mock and judge_model == settings.llama_server_model and not args.allow_self_judge:
-        print(
-            f"error: the judge is the model under test ({judge_model}). A model scoring its own answers is not "
-            "independent evidence: set JUDGE_LLAMA_SERVER_MODEL (and JUDGE_LLAMA_SERVER_BASE_URL) to a different "
-            "model, or pass --allow-self-judge to record a run that says so.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    else:
+    examples = _filter_examples(args)
+    if not examples:
+        print("No golden examples matched the given filters.")
+        sys.exit(1)
+
+    if args.list:
+        for e in examples:
+            print(f"  {e.id:<40s} [{e.agent}] [{e.answer_type}] tags={list(e.tags)}")
+        return
+
+    filtered = bool(args.ids or args.tags or args.skip_house_agent or args.house_agent_only)
+    covered_all = (not filtered) and len(examples) == len(GOLDEN_SET)
+
+    if args.phase == "judge":
+        generations, prior_manifest = _load_generations(run_dir)
+        by_id = {g["id"]: g for g in generations}
+        if filtered:
+            wanted_ids = {e.id for e in examples}
+            missing = [e.id for e in examples if e.id not in by_id]
+            if missing:
+                print(
+                    f"error: generations.jsonl in {run_dir} is missing example(s): {', '.join(missing[:10])}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            generations = [g for g in generations if g["id"] in wanted_ids]
+        examples = [get_example(g["id"]) for g in generations]
+        covered_all = (not filtered) and len(examples) == len(GOLDEN_SET)
+        if not covered_all:
+            filtered = True
+        judge = MockJudge() if args.mock else LLMJudge()
+        judge_model = getattr(judge, "model", None)
+        agent_model = prior_manifest.get("agent_model") or settings.llama_server_model
+        if not args.mock and judge_model == agent_model and not args.allow_self_judge:
+            print(
+                f"error: the judge is the model under test ({judge_model}). Pass --allow-self-judge or use an independent judge.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        meta = {
+            "command": " ".join([Path(sys.argv[0]).name, *sys.argv[1:]]),
+            "run_id": run_id,
+            "run_dir": str(run_dir),
+            "phase": "judge",
+            "git_sha": prior_manifest.get("git_sha") or _git_sha(),
+            "timestamp": ts,
+            "ids": [e.id for e in examples],
+            "count": len(examples),
+            "golden_set_size": len(GOLDEN_SET),
+            "complete_coverage": covered_all,
+            "filtered": filtered,
+            "agent_model": agent_model,
+            "judge_model": judge_model or "unknown",
+            "judge_is_agent_model": judge_model == agent_model,
+            "judge_independent": (not args.mock) and judge_model != agent_model,
+            "fixture_path": prior_manifest.get("fixture_path"),
+            "fixture_sha256": prior_manifest.get("fixture_sha256"),
+            "token_usage_totals": _aggregate_token_usage(generations),
+            "mock": args.mock,
+        }
+        results: list[tuple[GoldenExample, ScoreResult]] = []
+        print(f"\nGrading {len(examples)} captured generation(s) from {run_dir}...\n")
+        for ex, gen in zip(examples, generations):
+            t0 = time.time()
+            result = score_generation(ex, gen, judge)
+            dt = time.time() - t0
+            icon = {"PASS": "\u2713", "FAIL": "\u2717", "ERROR": "!", "INCONCLUSIVE": "?"}[result.verdict]
+            print(f"  [{icon}] {ex.id:<42s} {result.verdict:<6s} ({result.method}, {dt:.1f}s)")
+            if result.verdict != "PASS":
+                print(f"        {result.reason}")
+            results.append((ex, result))
+
+        _write_manifest(run_dir, meta, generations, results)
+        _write_report(results, mock=args.mock, meta=meta, run_dir=run_dir, run_id=run_id)
+        _print_summary(results)
+        failed = [r for _, r in results if r.verdict in ("FAIL", "ERROR")]
+        unknown = [r for _, r in results if r.verdict == "INCONCLUSIVE"]
+        if failed:
+            sys.exit(1)
+        if unknown or (filtered and not args.allow_partial):
+            sys.exit(2)
+        return
+
+    # Generation phases ("generate" or "all")
+    if not args.skip_fixture_build:
+        print(f"Building evaluation fixture at {settings.eval_fixture_duckdb_path} ...")
+        build_fixture(settings.eval_fixture_duckdb_path)
+    settings.duckdb_path = settings.eval_fixture_duckdb_path
+    fixture_sha = _sha256_file(settings.eval_fixture_duckdb_path)
+
+    judge = None
+    judge_model = None
+    if args.phase == "all":
+        judge = MockJudge() if args.mock else LLMJudge()
+        judge_model = getattr(judge, "model", None)
+        if not args.mock and judge_model == settings.llama_server_model and not args.allow_self_judge:
+            print(
+                f"error: the judge is the model under test ({judge_model}). A model scoring its own answers is not "
+                "independent evidence: set JUDGE_LLAMA_SERVER_MODEL (and JUDGE_LLAMA_SERVER_BASE_URL) to a different "
+                "model, or pass --allow-self-judge to record a run that says so.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+    if not args.mock:
         from observability import ensure_phoenix_server, initialize_observability, stop_phoenix_server
 
         atexit.register(stop_phoenix_server)
@@ -289,16 +627,24 @@ def main():
 
     meta = {
         "command": " ".join([Path(sys.argv[0]).name, *sys.argv[1:]]),
+        "run_id": run_id,
+        "run_dir": str(run_dir),
+        "phase": args.phase,
+        "git_sha": _git_sha(),
+        "timestamp": ts,
         "ids": [e.id for e in examples],
         "count": len(examples),
         "golden_set_size": len(GOLDEN_SET),
         "complete_coverage": covered_all,
         "filtered": filtered,
         "agent_model": settings.llama_server_model,
-        "judge_model": getattr(judge, "model", "unknown"),
-        "judge_is_agent_model": judge_model == settings.llama_server_model,
-        "judge_independent": (not args.mock) and judge_model != settings.llama_server_model,
+        "judge_model": judge_model or "deferred (--phase generate)",
+        "judge_is_agent_model": (judge_model == settings.llama_server_model) if judge_model else False,
+        "judge_independent": bool(judge_model and not args.mock and judge_model != settings.llama_server_model),
+        "fixture_path": str(settings.eval_fixture_duckdb_path),
+        "fixture_sha256": fixture_sha,
         "mock": args.mock,
+        "repeat": args.repeat,
     }
     if filtered:
         print(
@@ -314,76 +660,111 @@ def main():
             file=sys.stderr,
         )
 
-    results: list[tuple[GoldenExample, ScoreResult]] = []
-    print(f"\nRunning {len(examples)} example(s){' [MOCK]' if args.mock else ''}...\n")
+    generations: list[dict] = []
+    results = []
+    repeat = max(1, args.repeat)
+    trial_label = f" x{repeat} trials" if repeat > 1 else ""
+    print(
+        f"\nRunning {len(examples)} example(s) [phase={args.phase}]{' [MOCK]' if args.mock else ''}{trial_label}...\n"
+    )
+
+    # Per-example multi-trial records for pass@1 / pass^K aggregation.
+    trial_records: dict[str, list[ScoreResult]] = {}
+
     for ex in examples:
-        t0 = time.time()
-        result = run_example(ex, judge, args.mock)
-        if not args.mock:
-            try:
-                from observability import export_trace
+        trial_records[ex.id] = []
+        for trial_idx in range(repeat):
+            if repeat > 1:
+                # Disable both caches between trials so each is an independent sample.
+                try:
+                    import services.cache as _cache  # noqa: PLC0415
+                    import unittest.mock as _mock  # noqa: PLC0415
 
-                trace_path = settings.eval_traces_dir / f"{ex.id}.json"
-                trace_id = result.extra.get("trace_id")
-                if trace_id:
-                    export_trace(
-                        trace_id,
-                        trace_path,
-                        metadata={
-                            "eval_id": ex.id,
-                            "agent": ex.agent,
-                            "answer_type": ex.answer_type,
-                            "tags": list(ex.tags),
-                            "question": ex.question,
-                            "verdict": result.verdict,
-                            "method": result.method,
-                            "reason": result.reason,
-                            "reply": result.reply,
-                            "trace_url": result.extra.get("trace_url"),
-                        },
-                    )
-                else:
-                    trace_path.parent.mkdir(parents=True, exist_ok=True)
-                    trace_path.write_text(
-                        json.dumps(
-                            {
-                                "trace_id": None,
-                                "span_count": 0,
-                                "metadata": {
-                                    "eval_id": ex.id,
-                                    "agent": ex.agent,
-                                    "answer_type": ex.answer_type,
-                                    "tags": list(ex.tags),
-                                    "question": ex.question,
-                                    "verdict": result.verdict,
-                                    "method": result.method,
-                                    "reason": result.reason,
-                                    "reply": result.reply,
-                                    "note": "No OpenTelemetry trace was emitted by this agent path.",
-                                },
-                                "spans": [],
-                            },
-                            indent=2,
-                            ensure_ascii=False,
-                        ),
-                        encoding="utf-8",
-                    )
-                result.extra["trace_file"] = str(trace_path)
-            except Exception as exc:
-                result.extra["trace_export_error"] = str(exc)
-        dt = time.time() - t0
-        # INCONCLUSIVE is a real verdict (the judge could not decide), so a run that hits it must keep
-        # printing rather than dying on a KeyError and losing the report for every earlier example.
-        icon = {"PASS": "\u2713", "FAIL": "\u2717", "ERROR": "!", "INCONCLUSIVE": "?"}[result.verdict]
-        print(f"  [{icon}] {ex.id:<42s} {result.verdict:<6s} ({result.method}, {dt:.1f}s)")
-        if result.verdict != "PASS":
-            print(f"        {result.reason}")
-            if result.verdict == "ERROR" and result.extra.get("traceback"):
-                print("        (full traceback in the report)")
-        results.append((ex, result))
+                    _cache_patch: object = _mock.patch.object(_cache, "enabled", return_value=False)
+                    _cache_patch.start()  # type: ignore[union-attr]
+                except Exception:
+                    _cache_patch = None
+            else:
+                _cache_patch = None
 
-    _write_report(results, mock=args.mock, meta=meta)
-    _print_summary(results)
+            t0 = time.time()
+            gen = generate_example(ex, args.mock, traces_dir=None if args.mock else traces_dir)
+            if repeat > 1:
+                gen = {**gen, "trial": trial_idx}
+            generations.append(gen)
+
+            if repeat > 1 and _cache_patch is not None:
+                try:
+                    _cache_patch.stop()  # type: ignore[union-attr]
+                except Exception:
+                    pass
+
+            if args.phase == "generate":
+                status_icon = "!" if gen.get("error") else "\u2713"
+                trial_suffix = f" [trial {trial_idx + 1}/{repeat}]" if repeat > 1 else ""
+                print(f"  [{status_icon}] {ex.id:<42s} GENERATED ({gen.get('latency_s', 0.0):.1f}s){trial_suffix}")
+                if gen.get("error"):
+                    print(f"        {gen['error']}")
+            else:
+                result = score_generation(ex, gen, judge)
+                trial_records[ex.id].append(result)
+                dt = time.time() - t0
+                icon = {"PASS": "\u2713", "FAIL": "\u2717", "ERROR": "!", "INCONCLUSIVE": "?"}[result.verdict]
+                trial_suffix = f" [trial {trial_idx + 1}/{repeat}]" if repeat > 1 else ""
+                print(f"  [{icon}] {ex.id:<42s} {result.verdict:<6s} ({result.method}, {dt:.1f}s){trial_suffix}")
+                if result.verdict != "PASS":
+                    print(f"        {result.reason}")
+                    if result.verdict == "ERROR" and result.extra.get("traceback"):
+                        print("        (full traceback in the report)")
+
+        if args.phase != "generate" and trial_records[ex.id]:
+            # Representative result for the report: worst-case across trials so a
+            # single failure is surfaced (FAIL < ERROR < INCONCLUSIVE < PASS).
+            worst_order = {"FAIL": 0, "ERROR": 1, "INCONCLUSIVE": 2, "PASS": 3}
+            rep_result = min(trial_records[ex.id], key=lambda r: worst_order.get(r.verdict, 4))
+            results.append((ex, rep_result))
+
+    _write_generations(run_dir, generations)
+    meta["token_usage_totals"] = _aggregate_token_usage(generations)
+
+    # Compute pass@1 and pass^K metrics when K > 1 trials were run.
+    if repeat > 1 and args.phase != "generate":
+        # pass@1: fraction of examples where at least 1 trial passed.
+        pass_at_1 = sum(1 for ex in examples if any(r.verdict == "PASS" for r in trial_records.get(ex.id, [])))
+        # pass^K: fraction of examples where ALL K trials passed.
+        pass_all_k = sum(
+            1 for ex in examples if trial_records.get(ex.id) and all(r.verdict == "PASS" for r in trial_records[ex.id])
+        )
+        n_ex = len(examples)
+        meta["multi_trial"] = {
+            "K": repeat,
+            "pass_at_1": pass_at_1,
+            "pass_at_1_rate": round(pass_at_1 / n_ex, 4) if n_ex else 0.0,
+            "pass_all_k": pass_all_k,
+            "pass_all_k_rate": round(pass_all_k / n_ex, 4) if n_ex else 0.0,
+            "per_example": {
+                ex.id: {
+                    "trials": [r.verdict for r in trial_records.get(ex.id, [])],
+                    "pass_at_1": any(r.verdict == "PASS" for r in trial_records.get(ex.id, [])),
+                    "pass_all_k": all(r.verdict == "PASS" for r in trial_records.get(ex.id, [])),
+                }
+                for ex in examples
+            },
+        }
+
+    _write_manifest(run_dir, meta, generations, results if args.phase == "all" else None)
+
+    if args.phase == "generate":
+        print(f"\nGenerations captured to:\n  {run_dir / 'generations.jsonl'}\n  {run_dir / 'manifest.json'}")
+        has_err = any(g.get("error") for g in generations)
+        if has_err:
+            sys.exit(1)
+        if filtered and not args.allow_partial:
+            sys.exit(2)
+        return
+
+    _write_report(results, mock=args.mock, meta=meta, run_dir=run_dir, run_id=run_id)
+    _print_summary(results, multi_trial=meta.get("multi_trial"))
 
     failed = [r for _, r in results if r.verdict in ("FAIL", "ERROR")]
     unknown = [r for _, r in results if r.verdict == "INCONCLUSIVE"]
@@ -393,7 +774,7 @@ def main():
         sys.exit(2)
 
 
-def _print_summary(results: list[tuple[GoldenExample, ScoreResult]]):
+def _print_summary(results: list[tuple[GoldenExample, ScoreResult]], *, multi_trial: dict | None = None):
     n = len(results)
     passed = sum(1 for _, r in results if r.verdict == "PASS")
     failed = sum(1 for _, r in results if r.verdict == "FAIL")
@@ -401,6 +782,13 @@ def _print_summary(results: list[tuple[GoldenExample, ScoreResult]]):
     unknown = sum(1 for _, r in results if r.verdict == "INCONCLUSIVE")
     print(f"\n{'=' * 60}")
     print(f"{passed}/{n} passed, {failed} failed, {errored} errored, {unknown} inconclusive")
+
+    if multi_trial and multi_trial.get("K", 1) > 1:
+        K = multi_trial["K"]
+        p1 = multi_trial["pass_at_1"]
+        pk = multi_trial["pass_all_k"]
+        print(f"  pass@1 (≥1/{K} trials passed): {p1}/{n} ({multi_trial['pass_at_1_rate']:.1%})")
+        print(f"  pass^{K} (all {K} trials passed): {pk}/{n} ({multi_trial['pass_all_k_rate']:.1%})")
 
     assisted = [r for _, r in results if r.extra.get("assisted")]
     if assisted:
@@ -427,9 +815,16 @@ def _print_summary(results: list[tuple[GoldenExample, ScoreResult]]):
             print(f"  {tag:<12s} {p}/{t}")
 
 
-def _write_report(results: list[tuple[GoldenExample, ScoreResult]], mock: bool, meta: dict):
+def _write_report(
+    results: list[tuple[GoldenExample, ScoreResult]],
+    mock: bool,
+    meta: dict,
+    *,
+    run_dir: Path | None = None,
+    run_id: str | None = None,
+):
     settings.eval_reports_dir.mkdir(parents=True, exist_ok=True)
-    ts = time.strftime("%Y%m%d-%H%M%S")
+    ts = run_id or meta.get("run_id") or time.strftime("%Y%m%d-%H%M%S")
     json_path = settings.eval_reports_dir / f"report-{ts}.json"
     md_path = settings.eval_reports_dir / f"report-{ts}.md"
 
@@ -452,15 +847,20 @@ def _write_report(results: list[tuple[GoldenExample, ScoreResult]], mock: bool, 
                 "trace_id": r.extra.get("trace_id"),
                 "trace_url": r.extra.get("trace_url"),
                 "trace_file": r.extra.get("trace_file"),
+                "trace_sha256": r.extra.get("trace_sha256"),
                 "trace_export_error": r.extra.get("trace_export_error"),
                 "clarification_rounds": r.extra.get("clarification_rounds", 0),
                 "assisted": r.extra.get("assisted", False),
                 "asked": r.extra.get("asked", 0),
+                "answer_status": r.extra.get("answer_status"),
+                "latency_s": r.extra.get("latency_s", 0.0),
+                "token_usage": r.extra.get("token_usage") or {},
             }
             for ex, r in results
         ],
     }
-    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    payload_text = json.dumps(payload, indent=2)
+    json_path.write_text(payload_text, encoding="utf-8")
 
     n = len(results)
     passed = sum(1 for _, r in results if r.verdict == "PASS")
@@ -478,6 +878,17 @@ def _write_report(results: list[tuple[GoldenExample, ScoreResult]], mock: bool, 
     if not meta.get("complete_coverage", True):
         lines.append(
             f"- **partial run:** {meta.get('count')} of {meta.get('golden_set_size')} examples — not a quality gate."
+        )
+    if meta.get("multi_trial"):
+        mt = meta["multi_trial"]
+        K = mt["K"]
+        p1 = mt["pass_at_1"]
+        pk = mt["pass_all_k"]
+        n_ex = meta.get("count", len(results))
+        lines.append(
+            f"- **multi-trial (K={K}):** "
+            f"pass@1 = {p1}/{n_ex} ({mt['pass_at_1_rate']:.1%}) · "
+            f"pass^{K} = {pk}/{n_ex} ({mt['pass_all_k_rate']:.1%})"
         )
     lines.append(f"- **ids:** {', '.join(meta.get('ids') or [])}")
     lines.append("")
@@ -500,7 +911,12 @@ def _write_report(results: list[tuple[GoldenExample, ScoreResult]], mock: bool, 
             lines.append(f"- **trace export error:** `{r.extra['trace_export_error']}`")
         if r.verdict == "ERROR" and r.extra.get("traceback"):
             lines.append(f"- **traceback:**\n```\n{r.extra['traceback']}```")
-    md_path.write_text("\n".join(lines), encoding="utf-8")  # reports are read on other machines too
+    md_text = "\n".join(lines)
+    md_path.write_text(md_text, encoding="utf-8")  # reports are read on other machines too
+    if run_dir is not None:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "report.json").write_text(payload_text, encoding="utf-8")
+        (run_dir / "report.md").write_text(md_text, encoding="utf-8")
 
     print(f"\nReport written to:\n  {json_path}\n  {md_path}")
 
